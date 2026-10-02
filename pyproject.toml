@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ratt"
+dynamic = ["version"]
+description = "rattlesnake: o print do pandas relido no terminal — sem mudar uma linha do seu código"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [{ name = "Jared" }]
+keywords = ["pandas", "terminal", "data analysis", "cli", "print"]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Natural Language :: Portuguese (Brazilian)",
+]
+
+[project.scripts]
+ratt = "ratt.cli:main"
+
+[project.urls]
+Repositorio = "https://github.com/GF-Linux/rattlesnake"
+
+[tool.setuptools.dynamic]
+version = { attr = "ratt.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
