@@ -102,8 +102,40 @@ O tempo, com a série inteira numa linha e o balde incompleto avisado:
 
 ![resample e rolling relidos](docs/img/tempo.png)
 
+**Tuplas:** se a sua função faz `return df, df.shape, df.head()` (ou você monta
+`x = df.shape, df.head()`), o `print` recebe uma tupla — um objeto só, com os itens dentro. O
+`ratt` relê cada item sozinho, com o template dele, e dá a cada um o nome que está no seu código.
+
 Saem como o pandas escreve: o `info()`, números soltos (`print(df["x"].mean())`), tabelas com
-índice de vários níveis e `print` com mais de uma coisa (`print("total:", df.shape)`).
+índice de vários níveis e `print` com mais de um argumento (`print("total:", df.shape)`).
+
+## O que mudou
+
+### 0.2.0: tuplas relidas item por item
+
+**A mudança.** Um `print` que recebe uma tupla com objetos do pandas agora relê cada item
+sozinho, com o template dele, e dá a cada um o nome que está no código:
+
+```python
+def abrir_e_olhar(caminho):
+    df = pd.read_csv(caminho, sep=";")
+    return df, df.shape, df.dtypes, df.head(), df.isna().sum(), df.describe()
+
+print(abrir_e_olhar("dados.csv"))     # ── 1/6 · df   ── 2/6 · df.shape   …   ── 6/6 · df.describe()
+```
+
+O mesmo vale para `x = df.shape, df.head()` seguido de `print(x)`, e para `print((df.shape, df.dtypes))`.
+
+**O motivo.** Ela veio do primeiro uso real da 0.1.0. Uma função de "abrir e olhar", que devolvia
+de uma vez o `df` e os seus cinco olhares (`shape`, `dtypes`, `head`, `isna().sum()`, `describe`),
+saía crua no terminal. Com a vírgula, o `return` junta tudo numa tupla, e a 0.1.0 só relia um
+objeto do pandas por `print`. Juntar os olhares numa função é um jeito natural de trabalhar, e a
+ferramenta é que precisava acompanhar.
+
+Na mesma leva, o mesmo uso mostrou que o `describe()` de muitas colunas de texto estourava a
+largura da tela. Agora ele se divide em blocos, como o `head`.
+
+O histórico completo está no [CHANGELOG](CHANGELOG.md).
 
 ## Desligar
 

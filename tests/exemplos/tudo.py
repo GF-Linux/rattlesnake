@@ -47,6 +47,16 @@ df["quando"] = pd.to_datetime(df["data"], format="%d/%m/%Y")
 print(df["quando"].dt.day_name())
 print(df["quando"].dt.to_period("M"))
 
+
+def abrir_e_olhar(caminho):
+    tabela = pd.read_csv(caminho, sep=";", decimal=",")
+    return tabela, tabela.shape, tabela.dtypes, tabela.isna().sum()
+
+
+print(abrir_e_olhar(DADOS / "pesagens.csv"))
+olhares = df.shape, df.head()
+print(olhares)
+
 # ── um rebanho inventado: 120 animais ──
 rng = np.random.default_rng(42)
 rebanho = pd.DataFrame({

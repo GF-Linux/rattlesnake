@@ -132,6 +132,7 @@ TEMPLATES = [
         ("print(df.columns)", "lista numerada, a cor do nome é o tipo da coluna"),
         ("print(df.index)", "o RangeIndex explicado; num índice de texto, os repetidos em laranja"),
         ("print(df.isna().sum())", "vazios por coluna, com % e barra; as sem vazio ficam apagadas"),
+        ("print(f())  com  return df, df.shape, …", "uma tupla: cada item relido sozinho, com o nome que está no seu código"),
         ("print(df.nunique())", "valores diferentes 'de N linhas'; constante, vazia e todos diferentes marcados"),
         ('print(df["col"].value_counts())', "%, barra, ␣ visível e os vazios que ficaram fora da contagem"),
         ('print(df["col"].value_counts(normalize=True))', "a proporção ao lado do mesmo número em %"),

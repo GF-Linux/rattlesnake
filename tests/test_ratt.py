@@ -60,7 +60,7 @@ def test_no_terminal_sai_relido():
                   ".str.strip()", "groupby ·", "groupby · agg", "groupby · duas chaves", "pivot_table ·",
                   "crosstab ·", "pd.cut", "to_datetime ·", ".dt ·", "to_period ·", "DataFrame ·",
                   "Series ·", "mean() ·", "corr() ·", "DatetimeIndex ·", "date_range ·", "resample ·",
-                  ".rolling(7).mean()", ".diff()"]:
+                  ".rolling(7).mean()", ".diff()", "tupla · 4 itens", "tupla · 2 itens", "── 2/4 · tabela.shape"]:
         assert marca in texto, f"faltou {marca!r} na saída"
 
 

@@ -73,7 +73,10 @@ def comando_de_atualizacao(forma):
     if forma == "pipx":
         return ["pipx", "upgrade", "ratt"]
     if forma == "pip":
-        return [sys.executable, "-m", "pip", "install", "--upgrade", f"git+https://github.com/{_repositorio()}.git"]
+        cmd = [sys.executable, "-m", "pip", "install", "--upgrade"]
+        if sys.prefix == sys.base_prefix:            # fora de ambiente virtual: foi instalado com --user
+            cmd.append("--user")
+        return cmd + [f"git+https://github.com/{_repositorio()}.git"]
     return None
 
 

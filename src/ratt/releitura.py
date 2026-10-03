@@ -90,8 +90,17 @@ def _reler(obj, quadro):
     pd = sys.modules.get("pandas")
     if pd is None:                        # sem pandas carregado, não há nada a reler
         return None
-    linha = linecache.getline(quadro.f_code.co_filename, quadro.f_lineno)
+    arquivo, numero = quadro.f_code.co_filename, quadro.f_lineno
+    linha = linecache.getline(arquivo, numero)
+    if isinstance(obj, tuple) and not re.search(r"print\(\s*[A-Za-z_]\w*\.shape\s*\)", linha) \
+            and any(_e_do_pandas(i) for i in obj):
+        return _tupla(obj, linha, quadro, arquivo, numero)
+    return _reler_linha(obj, linha, quadro)
 
+
+def _reler_linha(obj, linha, quadro):
+    """O roteador: decide o template pelo objeto e pela linha que você escreveu."""
+    pd = sys.modules["pandas"]
     if isinstance(obj, tuple) and re.search(r"print\(\s*[A-Za-z_]\w*\.shape\s*\)", linha):
         base = _base(linha, quadro)
         if isinstance(base, (pd.DataFrame, pd.Series)) and base.shape == obj:
@@ -886,11 +895,24 @@ def _describe_texto(obj, df):
                       str(int(obj.at["freq", c]))]
         larg = {c: max(len(str(c)), *(_largura(x) for x in cel[c])) + 4 for c in texto}
         LR = 27
-        L = [_encher("", LR) + "".join(_encher(_c(str(c), "lilas", True), larg[c], ">") for c in texto), "---"]
-        for i, (orig, trad) in enumerate(med):
-            L.append(_encher(trad, 20) + _encher(_c(orig, "cinza"), LR - 20)
-                     + "".join(_encher(cel[c][i], larg[c], ">") for c in texto))
-        saida += _caixa("colunas de texto", L, LR + sum(larg.values()) + 4)
+        tela = _tela()
+        blocos, atual = [], []                       # quantas colunas cabem na largura da tela
+        for c in texto:
+            if atual and LR + sum(larg[x] for x in atual + [c]) + 4 > tela:
+                blocos.append(atual)
+                atual = []
+            atual.append(c)
+        blocos.append(atual)
+        feitas = 0
+        for b in blocos:
+            L = [_encher("", LR) + "".join(_encher(_c(str(c), "lilas", True), larg[c], ">") for c in b), "---"]
+            for i, (orig, trad) in enumerate(med):
+                L.append(_encher(trad, 20) + _encher(_c(orig, "cinza"), LR - 20)
+                         + "".join(_encher(cel[c][i], larg[c], ">") for c in b))
+            titulo = (f"colunas de texto {feitas + 1}–{feitas + len(b)} de {len(texto)}" if len(blocos) > 1
+                      else "colunas de texto")
+            feitas += len(b)
+            saida += _caixa(titulo, L, LR + sum(larg[c] for c in b) + 4)
         saida.append(_c("se dois valores empatam como mais frequente, o pandas mostra um só — o 'top' não avisa o empate",
                         "cinza"))
     if numer:
@@ -1596,5 +1618,115 @@ def _janela(serie, obj, expressao, linha):
     if novos > 0 and explica:
         saida.append(_c("NaN novos: ", "laranja") + _c(explica, "cinza"))
     saida.append(_c("as duas linhas de ▁▂▃▄▅▆▇█ são a série inteira, comprimida na largura da tela, cada uma na sua escala",
+                    "cinza"))
+    return "\n".join(saida)
+
+
+# ── a tupla: print(f()) com return a, b, c — ou x = a, b — cada item relido sozinho ─────────
+
+class _Quadro:
+    """Um quadro de mentira: só os nomes que a releitura procura (f_locals e f_globals)."""
+
+    def __init__(self, f_locals, f_globals):
+        self.f_locals, self.f_globals = f_locals, f_globals
+
+
+def _e_do_pandas(v):
+    pd = sys.modules.get("pandas")
+    return pd is not None and isinstance(v, (pd.DataFrame, pd.Series, pd.Index))
+
+
+def _itens_do_codigo(no, fonte, n):
+    """Os textos de cada item de uma tupla escrita no código, se ela tiver n itens."""
+    import ast
+    if isinstance(no, ast.Tuple) and len(no.elts) == n:
+        return [ast.get_source_segment(fonte, e) for e in no.elts]
+    return None
+
+
+def _expressoes(obj, linha, quadro, arquivo, numero):
+    """De onde veio cada item: lê a linha do print e, se preciso, o return da função ou a
+    atribuição da variável. Só lê o código — nada é executado. None se não der para saber."""
+    import ast
+    import inspect
+    import textwrap
+    m = re.match(r"^\s*print\((.*)\)\s*(#.*)?$", linha)
+    if not m:
+        return None, None
+    dentro = m.group(1).strip()
+    try:
+        arvore = ast.parse(dentro, mode="eval").body
+    except SyntaxError:
+        return None, None
+    n = len(obj)
+    # print((a, b)) — a tupla está escrita ali mesmo
+    achou = _itens_do_codigo(arvore, dentro, n)
+    if achou:
+        return achou, dentro
+    # print(f(...)) — os itens estão no return de f
+    if isinstance(arvore, ast.Call) and isinstance(arvore.func, ast.Name):
+        funcao = quadro.f_locals.get(arvore.func.id, quadro.f_globals.get(arvore.func.id))
+        try:
+            fonte = textwrap.dedent(inspect.getsource(funcao))
+            corpo = ast.parse(fonte).body[0]
+        except (TypeError, OSError, SyntaxError, IndexError):
+            return None, dentro
+        candidatos = []
+        for no in ast.walk(corpo):
+            if isinstance(no, ast.Return) and no.value is not None:
+                itens = _itens_do_codigo(no.value, fonte, n)
+                if itens:
+                    candidatos.append(itens)
+        return (candidatos[0] if len(candidatos) == 1 else None), dentro
+    # print(x) — os itens estão na última atribuição de x antes desta linha
+    if isinstance(arvore, ast.Name):
+        try:
+            fonte = "".join(linecache.getlines(arquivo))
+            modulo = ast.parse(fonte)
+        except (SyntaxError, ValueError):
+            return None, dentro
+        melhor = None
+        for no in ast.walk(modulo):
+            if (isinstance(no, ast.Assign) and no.lineno < numero and len(no.targets) == 1
+                    and isinstance(no.targets[0], ast.Name) and no.targets[0].id == arvore.id):
+                if melhor is None or no.lineno > melhor.lineno:
+                    melhor = no
+        if melhor is not None:
+            return _itens_do_codigo(melhor.value, fonte, n), dentro
+    return None, dentro
+
+
+def _tupla(obj, linha, quadro, arquivo, numero):
+    exprs, dentro = _expressoes(obj, linha, quadro, arquivo, numero)
+    n = len(obj)
+    # um item que é só um nome (o df do return df, ...) passa a existir para os outros itens
+    nomes = dict(quadro.f_globals)
+    nomes.update(quadro.f_locals)
+    if exprs:
+        for e, v in zip(exprs, obj):
+            if e and re.fullmatch(r"[A-Za-z_]\w*", e):
+                nomes[e] = v
+    falso = _Quadro(nomes, quadro.f_globals)
+    saida = [_cabecalho("tupla", f"{n} itens", _c(dentro, "amarelo") if dentro else ""), ""]
+    tela = _tela()
+    for i, v in enumerate(obj):
+        expr = exprs[i] if exprs else None
+        rotulo = expr or type(v).__name__
+        titulo = f"── {i + 1}/{n} · "
+        saida.append(_c(titulo, "borda") + _c(rotulo, "amarelo", True) + " "
+                     + _c("─" * max(3, min(60, tela - len(titulo) - len(rotulo) - 2)), "borda"))
+        texto = None
+        try:
+            if expr and expr.endswith(".shape") and isinstance(v, tuple) and all(isinstance(k, int) for k in v):
+                texto = _shape(v)
+            elif expr:
+                texto = _reler_linha(v, f"print({expr})\n", falso)
+            elif _e_do_pandas(v):
+                texto = _reler_linha(v, "print(item)\n", _Quadro({"item": v}, {}))
+        except Exception:
+            texto = None
+        saida.append(texto if texto is not None else str(v))
+        saida.append("")
+    saida.append(_c("cada item da tupla relido sozinho; o nome vem do seu código (o return, a atribuição ou o próprio print)",
                     "cinza"))
     return "\n".join(saida)
