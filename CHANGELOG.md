@@ -3,6 +3,23 @@
 O `ratt check-update` e o `ratt upgrade` leem este arquivo: cada `## versão` é o que você
 vê antes de responder `[s/N]`.
 
+## 0.8.0
+
+- **ratt db** (sem comando, num terminal): a tela do banco, no lugar do DBeaver. A árvore à
+  esquerda — esquemas, tabelas (com o número de linhas), views, funções e sequências — e o
+  objeto escolhido à direita, em quatro abas:
+  - **Dados**: as linhas, com o tipo embaixo do nome da coluna, o vazio (NULL) `∅` em laranja e
+    o texto com espaço sobrando em amarelo, e os avisos embaixo — a mesma releitura do `run`.
+    200 linhas por página (`n` / `N`).
+  - **Estrutura**: colunas, tipos, se aceitam vazio, valor padrão, chave primária e para onde
+    cada chave estrangeira aponta; índices e restrições.
+  - **Relações**: as chaves estrangeiras que saem da tabela e as que chegam nela.
+  - **SQL**: o que recria o objeto (o mesmo que o `pg_dump` escreveria).
+- a tela olha o banco a cada dois segundos: um `ratt db run` (ou o `psql`) que cria uma tabela
+  ou muda dados aparece sozinho. Deixe aberta ao lado do VS Code.
+- `p` abre o `psql` no banco e `\q` volta para a tela; `b` troca de banco; `r` recarrega.
+- o ratt agora instala o `textual`, que desenha a tela.
+
 ## 0.7.0
 
 - **ratt db run <arquivo.sql>**: o `.sql` que você escreve no VS Code, rodado no banco atual

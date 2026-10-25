@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.9"
-dependencies = ["psycopg[binary]>=3.1"]
+dependencies = ["psycopg[binary]>=3.1", "textual>=1.0"]
 authors = [{ name = "Jared" }]
 keywords = ["pandas", "terminal", "data analysis", "cli", "print"]
 classifiers = [

@@ -77,6 +77,7 @@ ratt templates           o que é relido, e como aparece
 ratt check-update        procura uma versão nova e mostra o que mudou
 ratt upgrade             procura, mostra o que mudou e pergunta [s/N] antes de instalar
 ratt sync                reescreve a releitura em todo lugar, com a versão deste ratt
+ratt db                  a tela do banco: a árvore à esquerda, dados e estrutura à direita
 ratt db status           o PostgreSQL: o que está instalado, ligado e configurado (ratt db -h)
 ratt db setup            o PostgreSQL do zero até o primeiro banco, em Debian/Ubuntu, Fedora/RHEL e Arch
 ratt db list             os bancos, com dono e tamanho
@@ -90,6 +91,25 @@ ratt db reset            apaga todos os bancos e usuários (backup antes) e volt
 O `upgrade` segue o espírito do `dnf upgrade --refresh`: busca a versão no repositório, mostra
 as novidades deste [CHANGELOG](CHANGELOG.md), pergunta, atualiza o `ratt` do jeito que ele foi
 instalado (pipx ou pip) e reaplica a releitura em todo lugar onde ela está ligada.
+
+## ratt db — o PostgreSQL no terminal
+
+O outro braço do ratt é a releitura do DBeaver: configurar, escrever e ver o banco sem sair do
+terminal. Os comandos são em inglês; a interface, em português ou inglês (`ratt db lang en`).
+
+```bash
+ratt db setup                 # do zero até o primeiro banco: instala, inicializa, liga, senha, usuário
+ratt db new estudos           # um banco novo, que vira o atual
+ratt db run 01-tabelas.sql    # o .sql do VS Code, comando por comando (--dry-run · --watch)
+ratt db                       # a tela: a árvore do banco, os dados, a estrutura, as relações, o SQL
+```
+
+O jeito de trabalhar: o `.sql` aberto no VS Code, `ratt db run --watch arquivo.sql` no terminal
+dele, e a tela (`ratt db`) num terminal ao lado — ela se atualiza sozinha quando o script cria
+uma tabela ou muda dados. Na tela, `p` abre o `psql` no banco e `\q` volta.
+
+Funciona nas famílias Debian/Ubuntu, Fedora/RHEL e Arch; `ratt db status` diz o que falta e
+`ratt db reset` volta ao antes do setup (com backup e a trava do nome da máquina).
 
 ## O que é relido
 

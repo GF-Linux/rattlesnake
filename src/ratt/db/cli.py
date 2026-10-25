@@ -28,6 +28,7 @@ def ajuda():
         f"{c('ratt db', 'azul', 'negrito')} {__version__} — {t('slogan')}",
         "",
         f"{c(t('uso'), 'negrito')} {t('uso.linha')}",
+        f"     ratt db{' ' * 12}{c(t('ajuda.tela'), 'cinza')}",
         "",
         c(t("comandos"), "negrito"),
     ]
@@ -243,8 +244,11 @@ def _ler_argumentos(args):
 def main(args):
     comando, resto, op, pediu_ajuda = _ler_argumentos(args)
     if comando is None:
-        print(ajuda())
-        return 0
+        if pediu_ajuda or not (sys.stdin.isatty() and sys.stdout.isatty()):
+            print(ajuda())
+            return 0
+        from ratt.db import tela          # o textual só carrega quando a tela abre
+        return tela.abrir(op)
     if comando not in EXECUTA:
         _erro_de_uso(t("erro.comando", nome=comando))
     if pediu_ajuda:

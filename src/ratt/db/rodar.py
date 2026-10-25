@@ -167,6 +167,23 @@ def _numerico(tipo):
     return tipo in ("int2", "int4", "int8", "numeric", "float4", "float8", "money", "oid")
 
 
+def avisos(colunas, linhas):
+    """[(marca, cor, texto)] coluna por coluna: os vazios (NULL), o texto vazio e o espaço nas pontas.
+    O mesmo que a releitura do pandas avisa — e a TUI mostra embaixo da aba de dados."""
+    achados = []
+    for j, col in enumerate(colunas):
+        vazios = sum(1 for linha in linhas if linha[j] is None)
+        pontas = sum(1 for linha in linhas if isinstance(linha[j], str) and linha[j] and linha[j] != linha[j].strip())
+        vazio_texto = sum(1 for linha in linhas if linha[j] == "")
+        if vazios:
+            achados.append(("∅", "laranja", t("run.nulos", col=col, n=vazios, de=len(linhas))))
+        if pontas:
+            achados.append(("⚠", "amarelo", t("run.pontas", col=col, n=pontas)))
+        if vazio_texto:
+            achados.append(("⚠", "amarelo", t("run.texto_vazio", col=col, n=vazio_texto)))
+    return achados
+
+
 def tabela(colunas, tipos, linhas, total, largura_tela=None):
     """As linhas como texto: blocos de colunas que cabem na tela, o tipo embaixo do nome, e avisos."""
     largura_tela = largura_tela or shutil.get_terminal_size((120, 40)).columns
@@ -201,17 +218,8 @@ def tabela(colunas, tipos, linhas, total, largura_tela=None):
             saida.append("   " + "   ".join(celulas))
         saida.append("")
 
-    # os avisos, coluna por coluna
-    for j, col in enumerate(colunas):
-        vazios = sum(1 for linha in linhas if linha[j] is None)
-        pontas = sum(1 for linha in linhas if isinstance(linha[j], str) and linha[j] and linha[j] != linha[j].strip())
-        vazio_texto = sum(1 for linha in linhas if linha[j] == "")
-        if vazios:
-            saida.append(c(f"   ∅ {t('run.nulos', col=col, n=vazios, de=len(linhas))}", "laranja"))
-        if pontas:
-            saida.append(c(f"   ⚠ {t('run.pontas', col=col, n=pontas)}", "amarelo"))
-        if vazio_texto:
-            saida.append(c(f"   ⚠ {t('run.texto_vazio', col=col, n=vazio_texto)}", "amarelo"))
+    for marca, cor, texto in avisos(colunas, linhas):
+        saida.append(c(f"   {marca} {texto}", cor))
     if total > len(linhas):
         saida.append(c(f"   … {t('run.mais_linhas', n=total - len(linhas), mostradas=len(linhas))}", "cinza"))
     while saida and saida[-1] == "":
