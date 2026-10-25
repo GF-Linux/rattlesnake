@@ -263,7 +263,7 @@ TEXTOS = {
     psql -h localhost -U jared estudos     (pela rede, senha do ~/.pgpass)
     psql -U jared estudos                  (pelo socket, quando o seu usuário do Linux entra direto)
 
-  Para sair do psql:  \q""",
+  Para sair do psql:  \\q""",
         "en": """ratt db connect [database] [--user NAME]
 
   Opens psql on the database. With no name, shows the numbered list: a number picks, Enter opens
@@ -272,7 +272,7 @@ TEXTOS = {
     psql -h localhost -U jared estudos     (over the network, password from ~/.pgpass)
     psql -U jared estudos                  (local socket, when your Linux user logs in directly)
 
-  To leave psql:  \q""",
+  To leave psql:  \\q""",
     },
     "ajuda_cmd.new": {
         "pt": """ratt db new <banco> [--owner NOME] [-y]
@@ -345,4 +345,67 @@ ratt db user passwd [name]            changes a password (no name: yours)
     "g.add_sem_nome": {"pt": "diga o nome: ratt db user add <nome>", "en": "name it: ratt db user add <name>"},
     "g.user_sub": {"pt": "ratt db user {nome}? use add, passwd ou nada (a lista)",
                    "en": "ratt db user {nome}? use add, passwd or nothing (the list)"},
+
+    # ── reset ──
+    "ajuda.reset": {"pt": "apaga todos os bancos e usuários (com backup antes) e volta ao antes do setup",
+                    "en": "deletes every database and user (backup first) and goes back to before setup"},
+    "ajuda_cmd.reset": {
+        "pt": """ratt db reset [--no-backup] [-y --confirm MÁQUINA]
+
+  Apaga TODOS os bancos e usuários deste PostgreSQL e deixa a máquina como antes do setup: o
+  pacote continua instalado, a pasta de dados some (no Debian/Ubuntu, o cluster inteiro).
+
+    1 mostra o que vai sumir: cada banco, quantas tabelas, o tamanho, e os usuários
+    2 oferece um backup de tudo (pg_dumpall) na sua pasta pessoal — o padrão é sim
+    3 pede que você digite o nome desta máquina — é a trava contra o terminal errado
+    4 para o servidor e apaga; as senhas de localhost no ~/.pgpass saem junto
+    5 pergunta se já quer rodar o ratt db setup de novo
+
+  --no-backup         pula o backup
+  -y --confirm NOME   sem perguntas (backup feito, setup não); o nome da máquina vai na linha
+                      de comando — sem ele, o -y sozinho é recusado
+
+  Restaurar o backup num PostgreSQL novo:  psql -f ~/ratt-backup-….sql postgres""",
+        "en": """ratt db reset [--no-backup] [-y --confirm MACHINE]
+
+  Deletes EVERY database and user on this PostgreSQL and leaves the machine as before setup: the
+  package stays installed, the data directory goes away (on Debian/Ubuntu, the whole cluster).
+
+    1 shows what will go away: each database, its tables, its size, and the users
+    2 offers a backup of everything (pg_dumpall) in your home directory — the default is yes
+    3 asks you to type this machine's name — the lock against the wrong terminal
+    4 stops the server and deletes; the localhost passwords in ~/.pgpass go too
+    5 asks whether to run ratt db setup again right away
+
+  --no-backup         skips the backup
+  -y --confirm NAME   no questions (backup yes, setup no); the machine name goes on the command
+                      line — without it, -y alone is refused
+
+  Restoring the backup on a fresh PostgreSQL:  psql -f ~/ratt-backup-….sql postgres""",
+    },
+    "z.nada": {"pt": "não há PostgreSQL inicializado aqui: nada para zerar", "en": "no initialized PostgreSQL here: nothing to reset"},
+    "z.y_sem_confirm": {"pt": "com -y, diga o nome da máquina: ratt db reset -y --confirm {maquina}",
+                        "en": "with -y, name the machine: ratt db reset -y --confirm {maquina}"},
+    "z.sem_terminal": {"pt": "sem terminal para confirmar: use -y --confirm <nome da máquina>",
+                       "en": "no terminal to confirm: use -y --confirm <machine name>"},
+    "z.aviso": {"pt": "isto apaga TODOS os bancos e usuários deste PostgreSQL:",
+                "en": "this deletes EVERY database and user on this PostgreSQL:"},
+    "z.sem_bancos": {"pt": "(nenhum banco além dos do sistema)", "en": "(no databases besides the system ones)"},
+    "z.tabela": {"pt": "{n} tabela", "en": "{n} table"},
+    "z.tabelas": {"pt": "{n} tabelas", "en": "{n} tables"},
+    "z.usuarios": {"pt": "usuários: {nomes}", "en": "users: {nomes}"},
+    "z.parado": {"pt": "o servidor está parado: não dá para ver o que tem dentro, nem fazer backup",
+                 "en": "the server is stopped: can't see what's inside, nor back it up"},
+    "z.backup": {"pt": "fazer backup de tudo antes?", "en": "back everything up first?"},
+    "z.backup_feito": {"pt": "backup em {arquivo} ({tamanho})", "en": "backup in {arquivo} ({tamanho})"},
+    "z.restaurar": {"pt": "para restaurar num PostgreSQL novo:  psql -f {arquivo} postgres",
+                    "en": "to restore on a fresh PostgreSQL:  psql -f {arquivo} postgres"},
+    "z.digite": {"pt": "para confirmar, digite o nome desta máquina ({maquina}):",
+                 "en": "to confirm, type this machine's name ({maquina}):"},
+    "z.cancelado": {"pt": "cancelado: nada foi apagado", "en": "cancelled: nothing was deleted"},
+    "z.zerado": {"pt": "zerado: nenhum banco, nenhum usuário, como antes do setup",
+                 "en": "reset: no databases, no users, as before setup"},
+    "z.pgpass": {"pt": "{n} senha(s) de localhost:{porta} tirada(s) do ~/.pgpass",
+                 "en": "{n} localhost:{porta} password(s) removed from ~/.pgpass"},
+    "z.setup_agora": {"pt": "rodar o ratt db setup agora?", "en": "run ratt db setup now?"},
 }

@@ -244,3 +244,12 @@ def test_opcoes_novas():
 def test_tamanho():
     from ratt.db import acesso
     assert [acesso.tamanho(n) for n in (None, 512, 8 * 1024 ** 2, 3 * 1024 ** 3)] == ["—", "512 B", "8 MB", "3.0 GB"]
+
+
+def test_codigo_compila_sem_avisos():
+    """Um  \\q  sem escape numa string já escapou para uma versão; o Python avisa na tela de quem usa."""
+    import warnings
+    for arquivo in sorted((RAIZ / "src" / "ratt").rglob("*.py")):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            compile(arquivo.read_text(encoding="utf-8"), str(arquivo), "exec")

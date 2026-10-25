@@ -3,6 +3,17 @@
 O `ratt check-update` e o `ratt upgrade` leem este arquivo: cada `## versão` é o que você
 vê antes de responder `[s/N]`.
 
+## 0.6.0
+
+- **ratt db reset**: apaga todos os bancos e usuários e deixa o PostgreSQL como antes do setup
+  (o pacote fica; a pasta de dados some — no Debian/Ubuntu, o cluster inteiro). Antes, mostra
+  cada banco com tabelas e tamanho, oferece um backup de tudo (`pg_dumpall`, na sua pasta
+  pessoal, só você lê) e pede que você **digite o nome da máquina** — a trava contra o terminal
+  errado numa VM do trabalho. No fim, pergunta se já quer rodar o `ratt db setup`.
+- `-y` sozinho não zera nada: precisa de `--confirm <nome da máquina>`. `--no-backup` pula o backup.
+- as senhas de localhost no `~/.pgpass` saem junto, porque os usuários delas sumiram.
+- corrigido: a ajuda do `ratt db connect` fazia o Python mostrar um aviso (`SyntaxWarning: "\q"`).
+
 ## 0.5.0
 
 - **ratt db connect**: abre o `psql` num banco. Sem nome, mostra a lista numerada — o número

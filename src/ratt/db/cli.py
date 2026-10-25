@@ -5,7 +5,7 @@ import sys
 
 from ratt import __version__
 from ratt.cli import c, _casa
-from ratt.db import acesso, config, configurar, gerenciar, idioma, sistema, sonda
+from ratt.db import acesso, config, configurar, gerenciar, idioma, sistema, sonda, zerar
 from ratt.db.idioma import t
 
 COMANDOS = [     # (comando, o argumento na ajuda, o que faz)
@@ -15,6 +15,7 @@ COMANDOS = [     # (comando, o argumento na ajuda, o que faz)
     ("connect", "arg.connect", "ajuda.connect"),
     ("new", "arg.new", "ajuda.new"),
     ("user", "arg.user", "ajuda.user"),
+    ("reset", "", "ajuda.reset"),
     ("lang", "arg.lang", "ajuda.lang"),
 ]
 
@@ -191,14 +192,16 @@ EXECUTA = {     # comando: (função, máximo de argumentos)
     "connect": (gerenciar.cmd_connect, 1),
     "new": (gerenciar.cmd_new, 1),
     "user": (gerenciar.cmd_user, 2),
+    "reset": (zerar.cmd_reset, 0),
     "lang": (cmd_lang, 1),
 }
 
 
 # ── a entrada ───────────────────────────────────────────────────────────────
 
-_OPCOES_PADRAO = {"user": None, "db": None, "owner": None, "superuser": False, "createdb": False, "yes": False}
-_COM_VALOR = {"--user": "user", "--db": "db", "--owner": "owner"}
+_OPCOES_PADRAO = {"user": None, "db": None, "owner": None, "confirm": None,
+                  "superuser": False, "createdb": False, "no_backup": False, "yes": False}
+_COM_VALOR = {"--user": "user", "--db": "db", "--owner": "owner", "--confirm": "confirm"}
 
 
 def _erro_de_uso(msg):
@@ -216,8 +219,8 @@ def _ler_argumentos(args):
             pediu_ajuda = True
         elif a in ("-y", "--yes"):
             op["yes"] = True
-        elif a in ("--superuser", "--createdb"):
-            op[a[2:]] = True
+        elif a in ("--superuser", "--createdb", "--no-backup"):
+            op[a[2:].replace("-", "_")] = True
         elif nome in _COM_VALOR:
             if not valor:
                 i += 1

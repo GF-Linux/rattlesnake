@@ -83,6 +83,7 @@ ratt db list             os bancos, com dono e tamanho
 ratt db connect [banco]  abre o psql no banco; sem nome, escolhe da lista
 ratt db new <banco>      cria um banco (--owner: outro dono)
 ratt db user             os usuários; user add cria, user passwd troca a senha
+ratt db reset            apaga todos os bancos e usuários (backup antes) e volta ao antes do setup
 ```
 
 O `upgrade` segue o espírito do `dnf upgrade --refresh`: busca a versão no repositório, mostra
