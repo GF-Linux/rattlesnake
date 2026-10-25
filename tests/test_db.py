@@ -253,3 +253,72 @@ def test_codigo_compila_sem_avisos():
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             compile(arquivo.read_text(encoding="utf-8"), str(arquivo), "exec")
+
+
+# ── run: dividir o arquivo ──────────────────────────────────────────────────
+
+from ratt.db import rodar      # noqa: E402
+
+
+def _textos(sql):
+    return [cmd.texto for cmd in rodar.dividir(sql)]
+
+
+def test_dividir_simples_e_linhas():
+    sql = "create table a (id int);\n\ninsert into a values (1);\nselect * from a"
+    cmds = rodar.dividir(sql)
+    assert [c.texto for c in cmds] == ["create table a (id int)", "insert into a values (1)", "select * from a"]
+    assert [c.linha for c in cmds] == [1, 3, 4]
+    assert sql[cmds[2].inicio:].startswith("select")
+
+
+def test_ponto_e_virgula_em_texto_e_identificador():
+    assert _textos("insert into t values ('a;b', 'it''s; ok');\nselect \"col;x\" from t;") == [
+        "insert into t values ('a;b', 'it''s; ok')", 'select "col;x" from t']
+
+
+def test_texto_com_barra_e_E():
+    assert _textos(r"select E'a\';b'; select 'c\'; select 2") == [r"select E'a\';b'", r"select 'c\'", "select 2"]
+
+
+def test_comentarios():
+    sql = "-- cria; a tabela\ncreate table a (id int); /* um; /* dentro; */ fim; */ select 1; -- só comentário;\n"
+    assert _textos(sql) == ["-- cria; a tabela\ncreate table a (id int)", "/* um; /* dentro; */ fim; */ select 1"]
+
+
+def test_dolar():
+    funcao = "create function f() returns int as $$ begin return 1; end; $$ language plpgsql"
+    corpo = "do $corpo$ begin raise notice 'a;b'; end $corpo$"
+    assert _textos(f"{funcao};\n{corpo};\nselect $1") == [funcao, corpo, "select $1"]
+
+
+def test_comando_do_psql():
+    cmds = rodar.dividir("\\d alunos\nselect 1;\n  \\dt\n")
+    assert [(c.texto, c.meta) for c in cmds] == [("\\d alunos", True), ("select 1", False), ("\\dt", True)]
+
+
+def test_titulo():
+    assert rodar.titulo("-- comentário\n  CREATE   TABLE alunos (\n id int)") == "CREATE TABLE alunos ("
+    assert len(rodar.titulo("select " + "x, " * 40 + "y")) == 48
+
+
+def test_resumo(monkeypatch):
+    monkeypatch.setenv("RATT_LANG", "pt")
+    assert rodar.resumo("INSERT 0 3", False) == "3 linhas inseridas"
+    assert rodar.resumo("DELETE 1", True) == "apagaria 1 linha"
+    assert rodar.resumo("CREATE TABLE", False) == "create table"
+
+
+def test_tabela_marca_nulo_e_espacos(monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("RATT_LANG", "pt")
+    saida = rodar.tabela(["id", "nome"], ["int4", "text"], [(1, "Ana"), (2, None), (3, "Carla "), (4, "")], 4, 100)
+    assert "∅" in saida and "'Carla '" in saida and "''" in saida
+    assert "nome: 1 vazio(s) (NULL) de 4" in saida and "1 valor(es) com espaço nas pontas" in saida
+    assert "int4" in saida.splitlines()[1]
+
+
+def test_codigo_pula_comentarios_do_topo():
+    sql = "select 1;\n\n-- este curso não existe\n/* e este bloco */\ninsert into a\nvalues (9);"
+    cmd = rodar.dividir(sql)[1]
+    assert sql[cmd.codigo:].startswith("insert into a")

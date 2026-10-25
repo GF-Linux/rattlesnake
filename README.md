@@ -81,6 +81,7 @@ ratt db status           o PostgreSQL: o que está instalado, ligado e configura
 ratt db setup            o PostgreSQL do zero até o primeiro banco, em Debian/Ubuntu, Fedora/RHEL e Arch
 ratt db list             os bancos, com dono e tamanho
 ratt db connect [banco]  abre o psql no banco; sem nome, escolhe da lista
+ratt db run <a.sql>      roda o .sql comando por comando (--dry-run · --watch)
 ratt db new <banco>      cria um banco (--owner: outro dono)
 ratt db user             os usuários; user add cria, user passwd troca a senha
 ratt db reset            apaga todos os bancos e usuários (backup antes) e volta ao antes do setup

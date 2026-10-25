@@ -5,7 +5,7 @@ import sys
 
 from ratt import __version__
 from ratt.cli import c, _casa
-from ratt.db import acesso, config, configurar, gerenciar, idioma, sistema, sonda, zerar
+from ratt.db import acesso, config, configurar, gerenciar, idioma, rodar, sistema, sonda, zerar
 from ratt.db.idioma import t
 
 COMANDOS = [     # (comando, o argumento na ajuda, o que faz)
@@ -13,6 +13,7 @@ COMANDOS = [     # (comando, o argumento na ajuda, o que faz)
     ("setup", "", "ajuda.setup"),
     ("list", "", "ajuda.list"),
     ("connect", "arg.connect", "ajuda.connect"),
+    ("run", "arg.run", "ajuda.run"),
     ("new", "arg.new", "ajuda.new"),
     ("user", "arg.user", "ajuda.user"),
     ("reset", "", "ajuda.reset"),
@@ -190,6 +191,7 @@ EXECUTA = {     # comando: (função, máximo de argumentos)
     "setup": (configurar.cmd_setup, 0),
     "list": (gerenciar.cmd_list, 0),
     "connect": (gerenciar.cmd_connect, 1),
+    "run": (rodar.cmd_run, 1),
     "new": (gerenciar.cmd_new, 1),
     "user": (gerenciar.cmd_user, 2),
     "reset": (zerar.cmd_reset, 0),
@@ -199,8 +201,8 @@ EXECUTA = {     # comando: (função, máximo de argumentos)
 
 # ── a entrada ───────────────────────────────────────────────────────────────
 
-_OPCOES_PADRAO = {"user": None, "db": None, "owner": None, "confirm": None,
-                  "superuser": False, "createdb": False, "no_backup": False, "yes": False}
+_OPCOES_PADRAO = {"user": None, "db": None, "owner": None, "confirm": None, "superuser": False, "createdb": False,
+                  "no_backup": False, "dry_run": False, "watch": False, "autocommit": False, "yes": False}
 _COM_VALOR = {"--user": "user", "--db": "db", "--owner": "owner", "--confirm": "confirm"}
 
 
@@ -219,7 +221,7 @@ def _ler_argumentos(args):
             pediu_ajuda = True
         elif a in ("-y", "--yes"):
             op["yes"] = True
-        elif a in ("--superuser", "--createdb", "--no-backup"):
+        elif a in ("--superuser", "--createdb", "--no-backup", "--dry-run", "--watch", "--autocommit"):
             op[a[2:].replace("-", "_")] = True
         elif nome in _COM_VALOR:
             if not valor:

@@ -408,4 +408,91 @@ ratt db user passwd [name]            changes a password (no name: yours)
     "z.pgpass": {"pt": "{n} senha(s) de localhost:{porta} tirada(s) do ~/.pgpass",
                  "en": "{n} localhost:{porta} password(s) removed from ~/.pgpass"},
     "z.setup_agora": {"pt": "rodar o ratt db setup agora?", "en": "run ratt db setup now?"},
+
+    # ── run ──
+    "arg.run": {"pt": "<arquivo.sql>", "en": "<file.sql>"},
+    "ajuda.run": {"pt": "roda um .sql comando por comando  (--dry-run · --watch)",
+                  "en": "runs a .sql file statement by statement  (--dry-run · --watch)"},
+    "ajuda_cmd.run": {
+        "pt": """ratt db run <arquivo.sql> [--db BANCO] [--dry-run] [--watch] [--autocommit]
+
+  Roda o arquivo no banco atual (ou --db), um comando de cada vez, e mostra o que cada um fez:
+  quantas linhas, quanto tempo, e a tabela de um SELECT com o tipo embaixo de cada coluna, o
+  vazio (NULL) em laranja e o texto com espaço sobrando em amarelo.
+
+  O arquivo inteiro é uma transação: se um comando falha, os anteriores são desfeitos, e o erro
+  aponta a linha do arquivo com um ^ embaixo do lugar.
+
+  --dry-run      roda tudo e desfaz no fim: mostra o que o arquivo faria, sem gravar nada
+  --watch        roda de novo cada vez que o arquivo é salvo (Ctrl+C para sair)
+  --autocommit   cada comando grava sozinho — para os que não rodam numa transação
+                 (CREATE DATABASE, VACUUM…); um erro no meio não desfaz os anteriores
+
+  Comandos do psql (\\d, \\i…) não são SQL: aparecem marcados e são pulados.
+  No VS Code: deixe  ratt db run --watch arquivo.sql  aberto no terminal e só salve o arquivo.""",
+        "en": """ratt db run <file.sql> [--db DATABASE] [--dry-run] [--watch] [--autocommit]
+
+  Runs the file on the current database (or --db), one statement at a time, and shows what each
+  did: how many rows, how long, and a SELECT's table with each column's type under its name, NULL
+  in orange and text with stray spaces in yellow.
+
+  The whole file is one transaction: if a statement fails, the earlier ones are undone, and the
+  error points at the file's line with a ^ under the spot.
+
+  --dry-run      runs everything and undoes it at the end: shows what the file would do, saves nothing
+  --watch        runs again every time the file is saved (Ctrl+C to quit)
+  --autocommit   each statement saves on its own — for those that can't run in a transaction
+                 (CREATE DATABASE, VACUUM…); an error midway doesn't undo the earlier ones
+
+  psql commands (\\d, \\i…) aren't SQL: they show up marked and are skipped.
+  In VS Code: keep  ratt db run --watch file.sql  open in the terminal and just save the file.""",
+    },
+    "run.sem_arquivo": {"pt": "diga o arquivo: ratt db run <arquivo.sql>", "en": "name the file: ratt db run <file.sql>"},
+    "run.nao_existe": {"pt": "o arquivo {arquivo} não existe", "en": "file {arquivo} doesn't exist"},
+    "run.sem_banco": {"pt": "nenhum banco atual: use --db <banco>, ou crie um com ratt db new <banco>",
+                      "en": "no current database: use --db <database>, or create one with ratt db new <database>"},
+    "run.sem_acesso": {"pt": "{usuario} não entra no banco {banco} — veja ratt db list e ratt db status",
+                       "en": "{usuario} can't log in to database {banco} — see ratt db list and ratt db status"},
+    "run.modo_ensaio": {"pt": "ensaio (--dry-run)", "en": "dry run"},
+    "run.vazio": {"pt": "o arquivo não tem nenhum comando SQL", "en": "the file has no SQL statements"},
+    "run.meta": {"pt": "comando do psql: pulado (o ratt db run só roda SQL)", "en": "psql command: skipped (ratt db run only runs SQL)"},
+    "run.nenhuma_linha": {"pt": "nenhuma linha", "en": "no rows"},
+    "run.linhas": {"pt": "{n} linhas", "en": "{n} rows"},
+    "run.linhas.um": {"pt": "1 linha", "en": "1 row"},
+    "run.inseridas": {"pt": "{n} linhas inseridas", "en": "{n} rows inserted"},
+    "run.inseridas.um": {"pt": "1 linha inserida", "en": "1 row inserted"},
+    "run.atualizadas": {"pt": "{n} linhas atualizadas", "en": "{n} rows updated"},
+    "run.atualizadas.um": {"pt": "1 linha atualizada", "en": "1 row updated"},
+    "run.apagadas": {"pt": "{n} linhas apagadas", "en": "{n} rows deleted"},
+    "run.apagadas.um": {"pt": "1 linha apagada", "en": "1 row deleted"},
+    "run.mescladas": {"pt": "{n} linhas mescladas", "en": "{n} rows merged"},
+    "run.mescladas.um": {"pt": "1 linha mesclada", "en": "1 row merged"},
+    "run.copiadas": {"pt": "{n} linhas copiadas", "en": "{n} rows copied"},
+    "run.copiadas.um": {"pt": "1 linha copiada", "en": "1 row copied"},
+    "run.inseridas.ensaio": {"pt": "inseriria {n} linhas", "en": "would insert {n} rows"},
+    "run.inseridas.ensaio.um": {"pt": "inseriria 1 linha", "en": "would insert 1 row"},
+    "run.atualizadas.ensaio": {"pt": "atualizaria {n} linhas", "en": "would update {n} rows"},
+    "run.atualizadas.ensaio.um": {"pt": "atualizaria 1 linha", "en": "would update 1 row"},
+    "run.apagadas.ensaio": {"pt": "apagaria {n} linhas", "en": "would delete {n} rows"},
+    "run.apagadas.ensaio.um": {"pt": "apagaria 1 linha", "en": "would delete 1 row"},
+    "run.mescladas.ensaio": {"pt": "mesclaria {n} linhas", "en": "would merge {n} rows"},
+    "run.mescladas.ensaio.um": {"pt": "mesclaria 1 linha", "en": "would merge 1 row"},
+    "run.copiadas.ensaio": {"pt": "copiaria {n} linhas", "en": "would copy {n} rows"},
+    "run.copiadas.ensaio.um": {"pt": "copiaria 1 linha", "en": "would copy 1 row"},
+    "run.nulos": {"pt": "{col}: {n} vazio(s) (NULL) de {de}", "en": "{col}: {n} empty (NULL) of {de}"},
+    "run.pontas": {"pt": "{col}: {n} valor(es) com espaço nas pontas", "en": "{col}: {n} value(s) with leading/trailing spaces"},
+    "run.texto_vazio": {"pt": "{col}: {n} texto(s) vazio(s) '' — não é NULL", "en": "{col}: {n} empty string(s) '' — not NULL"},
+    "run.mais_linhas": {"pt": "mais {n} linhas (mostrando as {mostradas} primeiras)",
+                        "en": "{n} more rows (showing the first {mostradas})"},
+    "run.erro_linha": {"pt": "erro na linha {linha} de {arquivo}", "en": "error on line {linha} of {arquivo}"},
+    "run.desfeitos": {"pt": "os comandos anteriores foram desfeitos: nada foi gravado",
+                      "en": "the earlier statements were undone: nothing was saved"},
+    "run.fora_de_transacao": {"pt": "esse comando não roda dentro de uma transação: rode com --autocommit",
+                              "en": "this statement can't run inside a transaction: use --autocommit"},
+    "run.ensaio_fim": {"pt": "ensaio: {n} comando(s) rodaram e foram desfeitos — nada foi gravado",
+                       "en": "dry run: {n} statement(s) ran and were undone — nothing was saved"},
+    "run.gravado": {"pt": "{n} de {total} comandos · gravado", "en": "{n} of {total} statements · saved"},
+    "run.esperando": {"pt": "esperando {arquivo} ser salvo de novo… (Ctrl+C sai)",
+                      "en": "waiting for {arquivo} to be saved again… (Ctrl+C quits)"},
+    "run.salvo": {"pt": "salvo às {hora}", "en": "saved at {hora}"},
 }

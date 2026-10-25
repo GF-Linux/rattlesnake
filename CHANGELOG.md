@@ -3,6 +3,20 @@
 O `ratt check-update` e o `ratt upgrade` leem este arquivo: cada `## versão` é o que você
 vê antes de responder `[s/N]`.
 
+## 0.7.0
+
+- **ratt db run <arquivo.sql>**: o `.sql` que você escreve no VS Code, rodado no banco atual
+  comando por comando. Cada um mostra o que fez (`3 linhas inseridas · 2 ms`) e um `SELECT`
+  aparece relido: o tipo embaixo de cada coluna, o vazio (NULL) `∅` em laranja, o texto vazio `''`
+  e o espaço sobrando nas pontas em amarelo, com os avisos embaixo da tabela.
+- o arquivo inteiro é uma transação: se um comando falha, os anteriores são desfeitos, e o erro
+  aponta **a linha do arquivo**, com um `^` embaixo do lugar quando o PostgreSQL diz onde foi.
+- `--dry-run` roda tudo e desfaz no fim — "apagaria 2 linhas", sem apagar nada.
+- `--watch` roda de novo a cada vez que o arquivo é salvo: deixe aberto no terminal do VS Code.
+- `--autocommit` para os comandos que não rodam numa transação (`CREATE DATABASE`, `VACUUM`).
+- o `;` dentro de texto, de comentário e de `$$ … $$` não corta o comando; comandos do psql
+  (`\d`, `\i`) aparecem marcados e são pulados; `RAISE NOTICE` aparece embaixo do comando.
+
 ## 0.6.0
 
 - **ratt db reset**: apaga todos os bancos e usuários e deixa o PostgreSQL como antes do setup
