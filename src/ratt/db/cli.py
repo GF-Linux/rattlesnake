@@ -1,18 +1,27 @@
-"""ratt db: o comando do PostgreSQL. Por enquanto, o status e o idioma da interface."""
+"""ratt db: o comando do PostgreSQL — a ajuda, o status, o idioma, e a entrada de todos os outros."""
 import getpass
 import os
 import sys
 
 from ratt import __version__
 from ratt.cli import c, _casa
-from ratt.db import acesso, config, configurar, idioma, sistema, sonda
+from ratt.db import acesso, config, configurar, gerenciar, idioma, sistema, sonda
 from ratt.db.idioma import t
 
-COMANDOS = [("status", "ajuda.status"), ("setup", "ajuda.setup"), ("lang [pt|en]", "ajuda.lang")]
+COMANDOS = [     # (comando, o argumento na ajuda, o que faz)
+    ("status", "", "ajuda.status"),
+    ("setup", "", "ajuda.setup"),
+    ("list", "", "ajuda.list"),
+    ("connect", "arg.connect", "ajuda.connect"),
+    ("new", "arg.new", "ajuda.new"),
+    ("user", "arg.user", "ajuda.user"),
+    ("lang", "arg.lang", "ajuda.lang"),
+]
 
 
 def ajuda():
-    w = max(len(n) for n in [n for n, _ in COMANDOS] + ["RATT_LANG=pt|en"]) + 3
+    nomes = [f"{cmd} {t(arg)}" if arg else cmd for cmd, arg, _ in COMANDOS]
+    w = max(len(n) for n in nomes + ["RATT_LANG=pt|en"]) + 3
     linhas = [
         f"{c('ratt db', 'azul', 'negrito')} {__version__} — {t('slogan')}",
         "",
@@ -20,7 +29,7 @@ def ajuda():
         "",
         c(t("comandos"), "negrito"),
     ]
-    linhas += [f"  {n:<{w}}{c(t(d), 'cinza')}" for n, d in COMANDOS]
+    linhas += [f"  {n:<{w}}{c(t(d), 'cinza')}" for n, (_, _, d) in zip(nomes, COMANDOS)]
     linhas += [
         "",
         c(t("opcoes"), "negrito"),
@@ -43,14 +52,6 @@ def _linha(rotulo, estado, texto, w=16):
     marca, cor = _MARCA[estado]
     corpo = c(texto, "cinza") if estado == "depois" else texto
     print(f"  {c(marca, cor)} {rotulo:<{w}}{corpo}")
-
-
-def _formatar_tamanho(n):
-    for unidade in ("B", "kB", "MB"):
-        if n < 1024:
-            return f"{n:.0f} {unidade}"
-        n /= 1024
-    return f"{n:.1f} GB"
 
 
 def cmd_status(args, op):
@@ -148,7 +149,7 @@ def cmd_status(args, op):
         if not bancos:
             _linha(t("r.bancos"), "info", t("s.nenhum_banco"))
         for i, (nome, dono, tamanho) in enumerate(bancos):
-            tam = _formatar_tamanho(tamanho) if tamanho is not None else t("s.sem_permissao")
+            tam = acesso.tamanho(tamanho) if tamanho is not None else t("s.sem_permissao")
             _linha(t("r.bancos") if i == 0 else "", "info",
                    f"{c(nome, 'negrito')}  {c(t('s.banco', dono=dono) + ' · ' + tam, 'cinza')}")
     elif resposta.porta_aberta:
@@ -183,14 +184,21 @@ def cmd_lang(args, op):
     return 0
 
 
-EXECUTA = {"status": (cmd_status, 0), "setup": (configurar.cmd_setup, 0),
-           "lang": (cmd_lang, 1)}       # comando: (função, máximo de argumentos)
+EXECUTA = {     # comando: (função, máximo de argumentos)
+    "status": (cmd_status, 0),
+    "setup": (configurar.cmd_setup, 0),
+    "list": (gerenciar.cmd_list, 0),
+    "connect": (gerenciar.cmd_connect, 1),
+    "new": (gerenciar.cmd_new, 1),
+    "user": (gerenciar.cmd_user, 2),
+    "lang": (cmd_lang, 1),
+}
 
 
 # ── a entrada ───────────────────────────────────────────────────────────────
 
-_OPCOES_PADRAO = {"user": None, "db": None, "superuser": False, "yes": False}
-_COM_VALOR = {"--user": "user", "--db": "db"}
+_OPCOES_PADRAO = {"user": None, "db": None, "owner": None, "superuser": False, "createdb": False, "yes": False}
+_COM_VALOR = {"--user": "user", "--db": "db", "--owner": "owner"}
 
 
 def _erro_de_uso(msg):
@@ -208,8 +216,8 @@ def _ler_argumentos(args):
             pediu_ajuda = True
         elif a in ("-y", "--yes"):
             op["yes"] = True
-        elif a == "--superuser":
-            op["superuser"] = True
+        elif a in ("--superuser", "--createdb"):
+            op[a[2:]] = True
         elif nome in _COM_VALOR:
             if not valor:
                 i += 1

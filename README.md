@@ -79,6 +79,10 @@ ratt upgrade             procura, mostra o que mudou e pergunta [s/N] antes de i
 ratt sync                reescreve a releitura em todo lugar, com a versão deste ratt
 ratt db status           o PostgreSQL: o que está instalado, ligado e configurado (ratt db -h)
 ratt db setup            o PostgreSQL do zero até o primeiro banco, em Debian/Ubuntu, Fedora/RHEL e Arch
+ratt db list             os bancos, com dono e tamanho
+ratt db connect [banco]  abre o psql no banco; sem nome, escolhe da lista
+ratt db new <banco>      cria um banco (--owner: outro dono)
+ratt db user             os usuários; user add cria, user passwd troca a senha
 ```
 
 O `upgrade` segue o espírito do `dnf upgrade --refresh`: busca a versão no repositório, mostra

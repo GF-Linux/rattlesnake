@@ -232,4 +232,117 @@ TEXTOS = {
                   "en": "fix it and run ratt db setup again: it skips what is already done"},
     "c.conectar": {"pt": "conectar:", "en": "connect:"},
     "c.conferir": {"pt": "conferir:", "en": "check:   "},
+
+    # ── list, connect, new, user ──
+    "arg.connect": {"pt": "[banco]", "en": "[database]"},
+    "arg.new": {"pt": "<banco>", "en": "<database>"},
+    "arg.user": {"pt": "[add|passwd] [nome]", "en": "[add|passwd] [name]"},
+    "arg.lang": {"pt": "[pt|en]", "en": "[pt|en]"},
+    "ajuda.list": {"pt": "os bancos: dono, tamanho e qual é o atual", "en": "the databases: owner, size and which is current"},
+    "ajuda.connect": {"pt": "abre o psql num banco (sem nome, escolhe da lista)",
+                      "en": "opens psql on a database (no name: pick from the list)"},
+    "ajuda.new": {"pt": "cria um banco  (--owner: outro dono)", "en": "creates a database  (--owner: another owner)"},
+    "ajuda.user": {"pt": "os usuários do banco; add cria, passwd troca a senha",
+                   "en": "the database users; add creates one, passwd changes a password"},
+    "ajuda_cmd.list": {
+        "pt": """ratt db list [--user NOME]
+
+  Os bancos que você enxerga, com dono e tamanho. O ● marca o atual: o último que você abriu ou
+  criou, e o que o ratt db connect sugere. Os bancos do sistema (postgres, template0/1) não aparecem.""",
+        "en": """ratt db list [--user NAME]
+
+  The databases you can see, with owner and size. The ● marks the current one: the last you opened
+  or created, and the one ratt db connect suggests. System databases (postgres, template0/1) are hidden.""",
+    },
+    "ajuda_cmd.connect": {
+        "pt": """ratt db connect [banco] [--user NOME]
+
+  Abre o psql no banco. Sem nome, mostra a lista numerada: o número escolhe, Enter abre o atual.
+  O comando do psql aparece antes de abrir — é o mesmo que você digitaria:
+
+    psql -h localhost -U jared estudos     (pela rede, senha do ~/.pgpass)
+    psql -U jared estudos                  (pelo socket, quando o seu usuário do Linux entra direto)
+
+  Para sair do psql:  \q""",
+        "en": """ratt db connect [database] [--user NAME]
+
+  Opens psql on the database. With no name, shows the numbered list: a number picks, Enter opens
+  the current one. The psql command is shown before opening — the same one you would type:
+
+    psql -h localhost -U jared estudos     (over the network, password from ~/.pgpass)
+    psql -U jared estudos                  (local socket, when your Linux user logs in directly)
+
+  To leave psql:  \q""",
+    },
+    "ajuda_cmd.new": {
+        "pt": """ratt db new <banco> [--owner NOME] [-y]
+
+  Cria o banco, com você como dono (ou --owner), e ele passa a ser o atual. O nome fica em
+  minúsculas, como o PostgreSQL guarda. Se o seu usuário não puder dar o banco a outro dono,
+  o ratt faz pelo superusuário postgres, via sudo, e avisa antes.""",
+        "en": """ratt db new <database> [--owner NAME] [-y]
+
+  Creates the database, owned by you (or --owner), and makes it the current one. The name is
+  lowercase, as PostgreSQL stores it. If your user can't give the database to another owner,
+  ratt does it as the postgres superuser, via sudo, and says so first.""",
+    },
+    "ajuda_cmd.user": {
+        "pt": """ratt db user                          os usuários: o que cada um pode, e de quais bancos é dono
+ratt db user add <nome> [--createdb | --superuser]
+                                      cria um usuário com senha (padrão: só entra)
+ratt db user passwd [nome]            troca a senha (sem nome: a sua)
+
+  Criar usuários pede um poder que o seu usuário do setup não tem: o ratt faz pelo superusuário
+  postgres, via sudo, e avisa antes. A senha vira hash SCRAM aqui mesmo, antes de ir ao servidor.
+  Se ela já estava no ~/.pgpass, é atualizada lá; senão, o ratt pergunta se quer guardar.""",
+        "en": """ratt db user                          the users: what each can do, and which databases each owns
+ratt db user add <name> [--createdb | --superuser]
+                                      creates a user with a password (default: login only)
+ratt db user passwd [name]            changes a password (no name: yours)
+
+  Creating users needs a power your setup user doesn't have: ratt does it as the postgres
+  superuser, via sudo, and says so first. The password becomes a SCRAM hash right here, before
+  it reaches the server. If it was in ~/.pgpass it is updated there; if not, ratt asks.""",
+    },
+    "g.sem_acesso": {"pt": "o usuário {usuario} não entra no banco — veja ratt db status",
+                     "en": "user {usuario} can't log in to the database — see ratt db status"},
+    "g.via_postgres": {"pt": "{usuario} não tem permissão para isso: vai pelo superusuário postgres (sudo)",
+                       "en": "{usuario} isn't allowed to do this: going through the postgres superuser (sudo)"},
+    "g.atual": {"pt": "atual", "en": "current"},
+    "g.nenhum_banco": {"pt": "nenhum banco ainda: ratt db new <nome>", "en": "no databases yet: ratt db new <name>"},
+    "g.dica_connect": {"pt": "abrir um:  ratt db connect [banco]", "en": "open one:  ratt db connect [database]"},
+    "g.sair": {"pt": "sair", "en": "quit"},
+    "g.qual": {"pt": "qual banco?", "en": "which database?"},
+    "g.escolha_numero": {"pt": "escolha um número da lista", "en": "pick a number from the list"},
+    "g.sem_psql": {"pt": "o psql não está instalado (no Fedora: postgresql; no Debian/Ubuntu: postgresql-client)",
+                   "en": "psql is not installed (Fedora: postgresql; Debian/Ubuntu: postgresql-client)"},
+    "g.banco_nao_existe": {"pt": "o banco {banco} não existe; estes existem:", "en": "database {banco} doesn't exist; these do:"},
+    "g.sem_terminal_connect": {"pt": "sem terminal para escolher: diga o banco, ratt db connect <banco>",
+                               "en": "no terminal to pick from: name the database, ratt db connect <database>"},
+    "g.new_sem_nome": {"pt": "diga o nome: ratt db new <banco>", "en": "name it: ratt db new <database>"},
+    "g.banco_ja_existe": {"pt": "o banco {banco} já existe — ratt db connect {banco}",
+                          "en": "database {banco} already exists — ratt db connect {banco}"},
+    "g.dono_nao_existe": {"pt": "o usuário {dono} não existe — crie com ratt db user add {dono}",
+                          "en": "user {dono} doesn't exist — create it with ratt db user add {dono}"},
+    "g.banco_criado": {"pt": "banco {banco}, dono {dono} — agora é o atual",
+                       "en": "database {banco}, owned by {dono} — now the current one"},
+    "g.dica_entrar": {"pt": "entrar:  ratt db connect {banco}", "en": "open it:  ratt db connect {banco}"},
+    "g.superusuario": {"pt": "superusuário", "en": "superuser"},
+    "g.cria_bancos": {"pt": "cria bancos", "en": "creates databases"},
+    "g.cria_usuarios": {"pt": "cria usuários", "en": "creates users"},
+    "g.so_entra": {"pt": "só entra", "en": "login only"},
+    "g.nao_entra": {"pt": "não entra (um grupo)", "en": "no login (a group)"},
+    "g.dono_de": {"pt": "dono de {bancos}", "en": "owns {bancos}"},
+    "g.voce": {"pt": "você", "en": "you"},
+    "g.guardar_senha": {"pt": "guardar a senha de {usuario} no ~/.pgpass?", "en": "save {usuario}'s password in ~/.pgpass?"},
+    "g.usuario_ja_existe": {"pt": "o usuário {nome} já existe — para trocar a senha: ratt db user passwd {nome}",
+                            "en": "user {nome} already exists — to change its password: ratt db user passwd {nome}"},
+    "g.usuario_nao_existe": {"pt": "o usuário {nome} não existe — veja ratt db user",
+                             "en": "user {nome} doesn't exist — see ratt db user"},
+    "g.dica_dono": {"pt": "um banco para ele:  ratt db new <banco> --owner {nome}",
+                    "en": "a database for it:  ratt db new <database> --owner {nome}"},
+    "g.senha_trocada": {"pt": "senha de {nome} trocada", "en": "{nome}'s password changed"},
+    "g.add_sem_nome": {"pt": "diga o nome: ratt db user add <nome>", "en": "name it: ratt db user add <name>"},
+    "g.user_sub": {"pt": "ratt db user {nome}? use add, passwd ou nada (a lista)",
+                   "en": "ratt db user {nome}? use add, passwd or nothing (the list)"},
 }

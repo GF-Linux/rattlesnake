@@ -3,6 +3,19 @@
 O `ratt check-update` e o `ratt upgrade` leem este arquivo: cada `## versão` é o que você
 vê antes de responder `[s/N]`.
 
+## 0.5.0
+
+- **ratt db connect**: abre o `psql` num banco. Sem nome, mostra a lista numerada — o número
+  escolhe, Enter abre o atual. O comando do `psql` aparece antes, igual ao que você digitaria.
+- **ratt db list**: os bancos, com dono e tamanho; o ● marca o atual (o último aberto ou criado).
+- **ratt db new <banco>**: cria um banco com você como dono, ou `--owner` outro usuário.
+- **ratt db user**: os usuários, o que cada um pode e de quais bancos é dono. `user add <nome>`
+  cria um usuário com senha (`--createdb`, `--superuser`); `user passwd [nome]` troca a senha e
+  atualiza o `~/.pgpass` se ela estava lá.
+- quando o seu usuário não tem poder para algo (criar outro usuário, dar um banco a outro dono),
+  o ratt avisa e faz pelo superusuário `postgres`, via sudo.
+- a senha vira hash SCRAM no próprio ratt, antes de ir ao servidor: o texto puro não chega lá.
+
 ## 0.4.0
 
 - **ratt db setup**: o PostgreSQL do zero até o primeiro banco, em seis passos — instalar,

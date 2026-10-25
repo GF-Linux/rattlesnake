@@ -62,6 +62,17 @@ def _psql(sql, banco="postgres"):
     return _executar(cmd, entrada=sql, mostrar=False)
 
 
+def garantir_sudo():
+    """Pede a senha do sudo uma vez, se precisar. sudo -n true passa com NOPASSWD ou com a senha
+    ainda lembrada; só então o sudo -v pergunta."""
+    if os.geteuid() == 0:
+        return True
+    sys.stdout.flush()
+    if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0:
+        return True
+    return subprocess.run(["sudo", "-v"]).returncode == 0
+
+
 def identificador(nome):
     return '"' + nome.replace('"', '""') + '"'
 
@@ -320,10 +331,7 @@ def cmd_setup(args, op):
         return 0
     if not _sim(t("c.continuar"), True, sempre):
         return 1
-    sys.stdout.flush()
-    # sudo -n true passa com NOPASSWD ou com a senha ainda lembrada; só então o sudo -v pergunta
-    if os.geteuid() != 0 and subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0 \
-            and subprocess.run(["sudo", "-v"]).returncode != 0:
+    if not garantir_sudo():
         print(c(t("c.sudo_falhou"), "laranja"))
         return 1
     if not sempre:

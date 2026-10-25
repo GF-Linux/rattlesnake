@@ -31,3 +31,14 @@ def bancos(conexao):
         FROM pg_database
         WHERE NOT datistemplate AND datname <> 'postgres'
         ORDER BY datname""").fetchall()
+
+
+def tamanho(n):
+    """Bytes em B, kB, MB ou GB; — quando não há permissão para ver."""
+    if n is None:
+        return "—"
+    for unidade in ("B", "kB", "MB"):
+        if n < 1024:
+            return f"{n:.0f} {unidade}"
+        n /= 1024
+    return f"{n:.1f} GB"

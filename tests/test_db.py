@@ -214,3 +214,33 @@ def test_pgpass(monkeypatch, tmp_path):
     configurar.gravar_pgpass(5432, "jared", "nova")             # trocar a senha não duplica a linha
     configurar.gravar_pgpass(5432, "outro", "x")
     assert arquivo.read_text() == "localhost:5432:*:jared:nova\nlocalhost:5432:*:outro:x\n"
+
+
+# ── list, connect, new, user ────────────────────────────────────────────────
+
+def test_ajuda_lista_os_comandos_novos():
+    pt = _ratt("db", "-h", RATT_LANG="pt").stdout
+    en = _ratt("db", "-h", RATT_LANG="en").stdout
+    for comando in ("list", "connect [banco]", "new <banco>", "user [add|passwd] [nome]"):
+        assert comando in pt, comando
+    for comando in ("connect [database]", "new <database>", "user [add|passwd] [name]"):
+        assert comando in en, comando
+
+
+def test_ajuda_de_cada_comando():
+    for comando in ("status", "setup", "list", "connect", "new", "user", "lang"):
+        p = _ratt("db", comando, "-h", RATT_LANG="pt")
+        assert p.returncode == 0 and p.stdout.startswith(f"ratt db {comando}"), comando
+
+
+def test_opcoes_novas():
+    from ratt.db import cli
+    comando, resto, op, _ = cli._ler_argumentos(["new", "sistema", "--owner=app"])
+    assert (comando, resto, op["owner"]) == ("new", ["sistema"], "app")
+    comando, resto, op, _ = cli._ler_argumentos(["user", "add", "app", "--createdb"])
+    assert (comando, resto, op["createdb"], op["superuser"]) == ("user", ["add", "app"], True, False)
+
+
+def test_tamanho():
+    from ratt.db import acesso
+    assert [acesso.tamanho(n) for n in (None, 512, 8 * 1024 ** 2, 3 * 1024 ** 3)] == ["—", "512 B", "8 MB", "3.0 GB"]
