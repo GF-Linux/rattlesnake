@@ -3,6 +3,17 @@
 O `ratt check-update` e o `ratt upgrade` leem este arquivo: cada `## versão` é o que você
 vê antes de responder `[s/N]`.
 
+## 0.3.0
+
+- **ratt db**: o começo do braço do PostgreSQL. `ratt db status` confere, em ordem, cada peça
+  de que o banco precisa — o sistema, o sudo, a instalação, a pasta de dados, o serviço, a porta,
+  como o login pela rede é feito e se você já entra — e diz o próximo passo. Não muda nada e não
+  pede senha. Reconhece as famílias Debian (Ubuntu, Mint…), Red Hat (Fedora, Rocky, Alma…) e
+  Arch (Manjaro, EndeavourOS…).
+- `ratt db lang pt|en`: a interface do `ratt db` em português ou inglês. Os comandos e o SQL são
+  os mesmos nos dois; `RATT_LANG=en` vale para uma execução.
+- o ratt agora instala o `psycopg`, o driver do PostgreSQL.
+
 ## 0.2.0
 
 - **tuplas**: um `print` que recebe uma tupla com objetos do pandas agora relê **cada item

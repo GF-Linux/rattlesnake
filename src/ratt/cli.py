@@ -43,6 +43,7 @@ COMANDOS = [
     ("check-update", "procura uma versão nova e mostra o que mudou, sem instalar"),
     ("upgrade", "procura, mostra o que mudou e pergunta antes de instalar"),
     ("sync", "reescreve a releitura em todo lugar registrado, com a versão deste ratt"),
+    ("db", "o PostgreSQL: conferir e configurar o banco   (ratt db -h)"),
 ]
 
 
@@ -420,6 +421,9 @@ def _rodar(comando, op):
 
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
+    if args and args[0] == "db":
+        from ratt.db.cli import main as main_db     # só carrega o psycopg quando alguém pede o banco
+        return main_db(args[1:])
     comando, op = _ler_argumentos(args)
     if comando == "versao":
         print(f"ratt {__version__}")

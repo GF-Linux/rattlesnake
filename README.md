@@ -77,6 +77,7 @@ ratt templates           o que é relido, e como aparece
 ratt check-update        procura uma versão nova e mostra o que mudou
 ratt upgrade             procura, mostra o que mudou e pergunta [s/N] antes de instalar
 ratt sync                reescreve a releitura em todo lugar, com a versão deste ratt
+ratt db status           o PostgreSQL: o que está instalado, ligado e configurado (ratt db -h)
 ```
 
 O `upgrade` segue o espírito do `dnf upgrade --refresh`: busca a versão no repositório, mostra
