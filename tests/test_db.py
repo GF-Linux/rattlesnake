@@ -151,3 +151,66 @@ def test_erros_de_uso_saem_com_2():
     assert p.returncode == 2 and "comando desconhecido" in p.stderr
     p = _ratt("db", "status", "a-mais", RATT_LANG="en")
     assert p.returncode == 2 and "unexpected argument" in p.stderr
+
+
+# ── o setup, sem PostgreSQL ─────────────────────────────────────────────────
+
+from ratt.db import configurar      # noqa: E402
+
+HBA_FEDORA = """# TYPE  DATABASE        USER            ADDRESS                 METHOD
+local   all             all                                     peer
+host    all             all             127.0.0.1/32            ident
+host    all             all             ::1/128                 ident
+local   replication     all                                     peer
+host    replication     all             127.0.0.1/32            ident   # comentário com ident
+"""
+
+
+def test_hba_fedora_ident_vira_scram():
+    novo, mudancas = configurar.ajustar_hba(HBA_FEDORA)
+    assert len(mudancas) == 3 and all(antes == "ident" and depois == "scram-sha-256" for _, antes, depois in mudancas)
+    assert "local   all             all                                     peer" in novo
+    assert "host    all             all             127.0.0.1/32            scram-sha-256\n" in novo
+    assert "# comentário com ident" in novo          # o comentário fica como estava
+    assert novo.startswith("# TYPE")
+
+
+def test_hba_arch_trust():
+    novo, mudancas = configurar.ajustar_hba("local all all trust\nhost all all 127.0.0.1/32 trust\n")
+    assert novo == "local all all peer\nhost all all 127.0.0.1/32 scram-sha-256\n"
+    assert [(a, d) for _, a, d in mudancas] == [("trust", "peer"), ("trust", "scram-sha-256")]
+
+
+def test_hba_ja_certo_e_md5_ficam():
+    texto = ("local all postgres peer\nhost all all 127.0.0.1/32 scram-sha-256\n"
+             "host all all 10.0.0.0/8 md5\nhostssl all all 0.0.0.0/0 cert clientcert=verify-full\n")
+    novo, mudancas = configurar.ajustar_hba(texto)
+    assert novo == texto and mudancas == []
+
+
+def test_hba_com_mascara_separada():
+    novo, _ = configurar.ajustar_hba("host all all 127.0.0.1 255.255.255.255 ident\n")
+    assert novo == "host all all 127.0.0.1 255.255.255.255 scram-sha-256\n"
+
+
+def test_nomes():
+    assert configurar.normalizar("estudos", True) == "estudos"
+    assert configurar.normalizar("LHV_Estudos", True) == "lhv_estudos"      # -y aceita as minúsculas
+    assert configurar.normalizar("meu-banco", True) is None
+    assert configurar.normalizar("relatório", True) is None
+    assert configurar.normalizar("1banco", True) is None
+
+
+def test_aspas_no_sql():
+    assert configurar.identificador('a"b') == '"a""b"'
+    assert configurar.literal("d'água") == "'d''água'"
+
+
+def test_pgpass(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    arquivo = configurar.gravar_pgpass(5432, "jared", "a:b\\c")
+    assert arquivo.read_text() == "localhost:5432:*:jared:a\\:b\\\\c\n"
+    assert oct(arquivo.stat().st_mode & 0o777) == "0o600"
+    configurar.gravar_pgpass(5432, "jared", "nova")             # trocar a senha não duplica a linha
+    configurar.gravar_pgpass(5432, "outro", "x")
+    assert arquivo.read_text() == "localhost:5432:*:jared:nova\nlocalhost:5432:*:outro:x\n"

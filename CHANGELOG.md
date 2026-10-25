@@ -3,6 +3,21 @@
 O `ratt check-update` e o `ratt upgrade` leem este arquivo: cada `## versão` é o que você
 vê antes de responder `[s/N]`.
 
+## 0.4.0
+
+- **ratt db setup**: o PostgreSQL do zero até o primeiro banco, em seis passos — instalar,
+  inicializar, ligar (agora e no boot), login por senha, o seu usuário e o primeiro banco. Cada
+  passo mostra o comando antes de rodar e confere antes de fazer: rodar de novo só pula o que já
+  está pronto, e quando está tudo pronto ele diz "nada a fazer" sem pedir a senha do sudo.
+- funciona nas três famílias: Debian/Ubuntu (apt), Fedora/Rocky/Alma/RHEL (dnf) e Arch (pacman).
+  No Fedora troca o `ident` do `pg_hba.conf` por senha (com cópia `.bak`); no Arch inicializa já
+  pedindo senha, em vez do `trust` que o `initdb` usa sem opções.
+- usuário e banco com o nome que você quiser (`--user`, `--db`), em minúsculas como o PostgreSQL
+  guarda; nome inválido é perguntado de novo. A senha pode ficar no `~/.pgpass`.
+- `-y` faz tudo sem perguntar, para repetir a mesma configuração em outra máquina:
+  `ratt db setup -y --user app --db sistema < senha.txt`
+- `ratt db status` passa a conferir o usuário que o setup criou.
+
 ## 0.3.0
 
 - **ratt db**: o começo do braço do PostgreSQL. `ratt db status` confere, em ordem, cada peça

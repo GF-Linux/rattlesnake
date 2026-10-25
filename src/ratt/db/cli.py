@@ -5,10 +5,10 @@ import sys
 
 from ratt import __version__
 from ratt.cli import c, _casa
-from ratt.db import idioma, sistema, sonda
+from ratt.db import acesso, config, configurar, idioma, sistema, sonda
 from ratt.db.idioma import t
 
-COMANDOS = [("status", "ajuda.status"), ("lang [pt|en]", "ajuda.lang")]
+COMANDOS = [("status", "ajuda.status"), ("setup", "ajuda.setup"), ("lang [pt|en]", "ajuda.lang")]
 
 
 def ajuda():
@@ -53,38 +53,14 @@ def _formatar_tamanho(n):
     return f"{n:.1f} GB"
 
 
-def _entrar(pasta_socket, porta, usuario):
-    """Uma conexão aberta e como ela entrou, ou (None, None). Primeiro o socket, depois a rede."""
-    import psycopg
-    tentativas = []
-    if pasta_socket:
-        tentativas.append((dict(host=pasta_socket), "s.como_socket"))
-    tentativas.append((dict(host="localhost"), "s.como_pgpass"))
-    for destino, como in tentativas:
-        try:
-            return psycopg.connect(port=porta, user=usuario, dbname="postgres", connect_timeout=3,
-                                   autocommit=True, **destino), como
-        except psycopg.Error:
-            continue
-    return None, None
-
-
-def _bancos(conexao):
-    return conexao.execute("""
-        SELECT datname, pg_get_userbyid(datdba),
-               CASE WHEN has_database_privilege(oid, 'CONNECT') THEN pg_database_size(oid) END
-        FROM pg_database
-        WHERE NOT datistemplate AND datname <> 'postgres'
-        ORDER BY datname""").fetchall()
-
-
-def cmd_status(args):
+def cmd_status(args, op):
     os_release = sistema.ler_os_release()
     nome_sistema = os_release.get("PRETTY_NAME") or os_release.get("NAME") or "Linux"
     familia = sistema.familia(os_release)
     receita = sistema.RECEITAS.get(familia)
-    porta = int(os.environ.get("PGPORT") or 5432)
-    usuario = getpass.getuser()
+    lembrado = config.ler().get("db") or {}
+    porta = int(os.environ.get("PGPORT") or lembrado.get("porta") or 5432)
+    usuario = lembrado.get("usuario") or getpass.getuser()
     proximo = None
 
     print(f"{c('ratt db status', 'azul', 'negrito')} {c('· ' + nome_sistema, 'cinza')}")
@@ -164,11 +140,11 @@ def cmd_status(args):
     # o seu acesso e os bancos
     conexao, como = (None, None)
     if resposta.porta_aberta:
-        conexao, como = _entrar(sistema.pasta_socket(porta), porta, usuario)
+        conexao, como = acesso.entrar(porta, usuario)
     if conexao:
         with conexao:
             _linha(t("r.acesso"), "ok", t("s.entra", usuario=usuario, como=t(como)))
-            bancos = _bancos(conexao)
+            bancos = acesso.bancos(conexao)
         if not bancos:
             _linha(t("r.bancos"), "info", t("s.nenhum_banco"))
         for i, (nome, dono, tamanho) in enumerate(bancos):
@@ -193,7 +169,7 @@ def cmd_status(args):
 
 # ── o idioma ────────────────────────────────────────────────────────────────
 
-def cmd_lang(args):
+def cmd_lang(args, op):
     if not args:
         print(t("lang.atual", idioma=idioma.atual()))
     elif args[0] not in idioma.IDIOMAS:
@@ -207,27 +183,52 @@ def cmd_lang(args):
     return 0
 
 
-EXECUTA = {"status": (cmd_status, 0), "lang": (cmd_lang, 1)}     # comando: (função, máximo de argumentos)
+EXECUTA = {"status": (cmd_status, 0), "setup": (configurar.cmd_setup, 0),
+           "lang": (cmd_lang, 1)}       # comando: (função, máximo de argumentos)
 
 
 # ── a entrada ───────────────────────────────────────────────────────────────
+
+_OPCOES_PADRAO = {"user": None, "db": None, "superuser": False, "yes": False}
+_COM_VALOR = {"--user": "user", "--db": "db"}
+
 
 def _erro_de_uso(msg):
     print(f"ratt db: {msg} ({t('erro.veja')})", file=sys.stderr)
     raise SystemExit(2)
 
 
-def main(args):
-    comando, resto, pediu_ajuda = None, [], False
-    for a in args:
+def _ler_argumentos(args):
+    comando, resto, op, pediu_ajuda = None, [], dict(_OPCOES_PADRAO), False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        nome, _, valor = a.partition("=")
         if a in ("-h", "--help"):
             pediu_ajuda = True
+        elif a in ("-y", "--yes"):
+            op["yes"] = True
+        elif a == "--superuser":
+            op["superuser"] = True
+        elif nome in _COM_VALOR:
+            if not valor:
+                i += 1
+                if i >= len(args):
+                    _erro_de_uso(t("erro.precisa_valor", nome=nome))
+                valor = args[i]
+            op[_COM_VALOR[nome]] = valor
         elif a.startswith("-"):
             _erro_de_uso(t("erro.opcao", nome=a))
         elif comando is None:
             comando = a
         else:
             resto.append(a)
+        i += 1
+    return comando, resto, op, pediu_ajuda
+
+
+def main(args):
+    comando, resto, op, pediu_ajuda = _ler_argumentos(args)
     if comando is None:
         print(ajuda())
         return 0
@@ -239,4 +240,4 @@ def main(args):
     funcao, maximo = EXECUTA[comando]
     if len(resto) > maximo:
         _erro_de_uso(t("erro.argumento", nome=resto[maximo]))
-    return funcao(resto)
+    return funcao(resto, op)
