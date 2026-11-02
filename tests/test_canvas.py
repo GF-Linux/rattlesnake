@@ -212,3 +212,22 @@ def test_descricao_com_quebra_de_linha_fica_em_um_comentario():
     assert linhas[2] == 'DROP TABLE users";'
     assert linhas[r.linhas_das_operacoes()[1] - 2] == ""
     assert '"a\u2028b\x0bc"' in r.sql_texto()
+
+
+def test_nome_vazio_e_recusado_sem_entrar_no_rascunho():
+    r = rascunho.Rascunho(modelo_png())
+    with pytest.raises(ValueError):
+        r.acrescentar(rascunho.Renomear("t1", None, ""))
+    assert r.operacoes == []
+    assert r.sql_texto() == ""
+
+
+def test_cabecalho_vira_uma_linha_de_comentario():
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.Renomear("t1", None, "pessoas"))
+    texto = r.sql_texto("x\nDROP TABLE users\u2028y\x0bz")
+    linhas = texto.split("\n")
+    assert linhas[0] == "-- x DROP TABLE users y z"
+    assert linhas[1].startswith("-- 1.")
+    assert r.linhas_das_operacoes("x\nDROP") == [2]
+    assert r.sql_texto("-- ok").split("\n")[0] == "-- ok"

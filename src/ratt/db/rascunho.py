@@ -534,6 +534,10 @@ class Rascunho:
         for i in op.refere():
             if not _existe(v, i):
                 raise ValueError(f"{i}: não existe ou foi apagado")
+        try:
+            op.comandos(v)          # um nome vazio ou id solto falha aqui, não no meio do export
+        except KeyError as e:
+            raise ValueError(f"{e}: não existe") from e
         self.operacoes.append(op)
 
     def desfazer(self) -> Optional[Operacao]:
@@ -562,7 +566,11 @@ class Rascunho:
 
     def _linhas(self, cabecalho: str) -> Tuple[List[str], List[int]]:
         """As linhas do texto SQL e a linha (1-based) do comentário de cada operação."""
-        linhas: List[str] = cabecalho.splitlines() if cabecalho else []
+        linhas: List[str] = []
+        if cabecalho:
+            # uma linha só e sempre comentário: o cabeçalho vem de nomes do banco, não pode virar comando
+            cab = " ".join(cabecalho.splitlines())
+            linhas.append(cab if cab.startswith("--") else "-- " + cab)
         marcas: List[int] = []
         m = self.base.copia()
         for n, op in enumerate(self.operacoes, 1):
