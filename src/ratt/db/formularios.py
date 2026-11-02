@@ -114,7 +114,7 @@ class FormBase(ModalScreen):
         sql, avisos, erro = self.query_one("#form_sql", Static), self.query_one("#form_avisos", Static), self.query_one("#erro", Static)
         try:
             op = self.previa()
-            comandos = op.comandos(self.rascunho.vista())
+            comandos = rs.comandos_de(op, self.rascunho.vista())
         except ValueError as e:
             sql.update("")
             avisos.update("")
@@ -380,7 +380,8 @@ class FormLigar(FormBase):
                 yield RadioButton(t("canvas.f.um"), id="um")
             yield Static(t("canvas.f.ao_apagar"))
             yield Select([(x, x) for x in ("NO ACTION", "CASCADE", "SET NULL")], value="NO ACTION", allow_blank=False, id="ao_apagar")
-            yield Checkbox(t("canvas.f.indice"), value=True, id="indice")
+            # índice na coluna da FK: o PostgreSQL não cria sozinho; mas se ela já tem um (ou é a PK), não
+            yield Checkbox(t("canvas.f.indice"), value=self._indice_padrao(), id="indice")
         yield Checkbox(t("canvas.f.nn"), id="como_nn")
         with Vertical(id="grupo_nn"):
             yield Static(t("canvas.f.nome_nn"))
@@ -392,6 +393,21 @@ class FormLigar(FormBase):
     FormLigar #grupo_nn { display: none; }
     FormLigar RadioSet { height: auto; }
     """
+
+    def _indice_padrao(self) -> bool:
+        if self.coluna_id is None:
+            return True                 # coluna nova: ainda sem índice
+        c = self.origem.coluna(self.coluna_id)
+        return not (c.indexada or c.pk)
+
+    def on_radio_set_changed(self, evento) -> None:
+        # "no máximo um" põe UNIQUE, que já cria um índice: outro seria repetido
+        um = self.query_one("#um", RadioButton).value
+        indice = self.query_one("#indice", Checkbox)
+        if um:
+            indice.value = False
+        indice.disabled = um
+        super().on_radio_set_changed(evento)
 
     def on_mount(self) -> None:
         self.query_one("#destino", OptionList).highlighted = None
@@ -444,8 +460,8 @@ class FormLigar(FormBase):
             col_id = self.coluna_id
         ao_apagar = self.query_one("#ao_apagar", Select).value
         lig = Ligacao(self.rascunho.novo_id("k"), self.origem.id, (col_id,), dest.id, (pk.id,), "", str(ao_apagar))
-        return rs.Ligar(lig, nova, unica=self.query_one("#um", RadioButton).value,
-                        indice=self.query_one("#indice", Checkbox).value)
+        unica = self.query_one("#um", RadioButton).value
+        return rs.Ligar(lig, nova, unica=unica, indice=self.query_one("#indice", Checkbox).value and not unica)
 
 
 class FormSimples(FormBase):

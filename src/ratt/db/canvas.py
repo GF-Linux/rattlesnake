@@ -50,12 +50,16 @@ class FonteBanco:
         """`conexao` só serve para injetar uma já pronta (testes); com None o canvas abre a SUA, na primeira
         consulta, para não dividir com a tela do banco a conexão que ela usa em outras threads."""
         self._conexao, self._injetada = conexao, conexao is not None
+        self._fechada = False
         self._trava = threading.Lock()
         self.porta, self.usuario, self.banco = porta, usuario, banco
 
     @property
     def conexao(self):
+        """A conexão (aberta na primeira vez); None depois de `fechar` — a fonte não reabre sozinha."""
         with self._trava:
+            if self._fechada:
+                return None
             if self._conexao is None:
                 self._conexao, _ = acesso.entrar(self.porta, self.usuario, self.banco)
                 if self._conexao is None:
@@ -68,18 +72,25 @@ class FonteBanco:
             if self._conexao is not None and not self._injetada:
                 self._conexao.close()
             self._conexao = None if not self._injetada else self._conexao
+            self._fechada = True
+
+    def _aberta(self):
+        conexao = self.conexao
+        if conexao is None:             # quem chama roda numa thread que trata erro: a tela já saiu
+            raise RuntimeError(t("canvas.fonte_fechada"))
+        return conexao
 
     def esquemas(self) -> List[str]:
-        return catalogo.esquemas_com_tabelas(self.conexao)
+        return catalogo.esquemas_com_tabelas(self._aberta())
 
     def modelo(self, esquema: str) -> _modelo.Modelo:
-        return catalogo.modelo(self.conexao, esquema)
+        return catalogo.modelo(self._aberta(), esquema)
 
     def assinatura(self):
-        return catalogo.assinatura(self.conexao)
+        return catalogo.assinatura(self._aberta(), escritas=False)
 
     def consulta(self) -> checagem.Consulta:
-        return checagem.Consulta(self.conexao)
+        return checagem.Consulta(self._aberta())
 
     def conexao_para_aplicar(self):
         """Uma conexão só para aplicar o rascunho: a da tela segue livre para olhar o banco."""
@@ -442,6 +453,7 @@ class TelaCanvas(Screen):
         self._sem_leitura = False           # a leitura do schema falhou e ainda não deu certo: o vigia tenta de novo
         self._tentando = False              # uma nova tentativa está no ar (o vigia não empilha outra)
         self._contagens: Dict[str, int] = {}    # linhas de cada tabela apagada, contadas ao pôr no rascunho
+        self._avisou_posicoes = False       # já disse que não deu para gravar as posições
         self._ultimo = 0.0
         self._timer = None
 
@@ -745,7 +757,12 @@ class TelaCanvas(Screen):
         """Só as posições do schema inteiro vão ao disco; as do recorte do foco valem enquanto o foco durar."""
         if self.foco:
             return
-        guardar.gravar_posicoes(self.fonte.porta, self.fonte.banco, self.esquema, self.posicoes)
+        try:
+            guardar.gravar_posicoes(self.fonte.porta, self.fonte.banco, self.esquema, self.posicoes)
+        except OSError as erro:         # disco cheio, só leitura: a caixa se move do mesmo jeito; avisa uma vez
+            if not self._avisou_posicoes:
+                self.notify(t("canvas.erro_posicoes", erro=erro), severity="error")
+            self._avisou_posicoes = True
 
     # ── as teclas ───────────────────────────────────────────────────────────
 
@@ -861,6 +878,8 @@ class TelaCanvas(Screen):
         criada = op.tabela.id if isinstance(op, _rascunho.CriarTabela) else op.tabela_id if isinstance(op, _rascunho.LigarNN) else None
         if criada:
             self.selecao = ("tabela", criada)
+            if self.foco:               # em foco, a tabela nova (ainda sem ligação) ficaria fora do recorte
+                self.foco, self._pos_foco = criada, {}
         self._mudou()
 
     def action_nova_tabela(self) -> None:
@@ -911,9 +930,17 @@ class TelaCanvas(Screen):
         else:
             c = tab.coluna(self.selecao[2])
             nome = f"{tab.nome}.{c.nome}"
-            itens = [("renomear", t("canvas.m.renomear")),
-                     ("opcional" if c.obrigatoria else "obrigatoria", t("canvas.m.opcional" if c.obrigatoria else "canvas.m.obrigatoria")),
-                     ("nao_unica" if c.unica else "unica", t("canvas.m.nao_unica" if c.unica else "canvas.m.unica"))]
+            itens = [("renomear", t("canvas.m.renomear"))]
+            # só o que o PostgreSQL aceita: coluna da PK não fica opcional; a unicidade só sai se é uma restrição
+            # UNIQUE com nome (um índice único não sai com DROP CONSTRAINT)
+            if not c.obrigatoria:
+                itens.append(("obrigatoria", t("canvas.m.obrigatoria")))
+            elif not c.pk:
+                itens.append(("opcional", t("canvas.m.opcional")))
+            if not c.unica:
+                itens.append(("unica", t("canvas.m.unica")))
+            elif c.nome_unica:
+                itens.append(("nao_unica", t("canvas.m.nao_unica")))
         sel = self.selecao
         self.app.push_screen(formularios.MenuSelecao(nome, itens), lambda chave: self._do_menu(chave, sel, nome))
 
@@ -928,8 +955,21 @@ class TelaCanvas(Screen):
             self.notify(t("canvas.e.sumiu"), severity="warning")
             return
         if chave == "renomear":
-            form = formularios.FormSimples(r, f, t("canvas.f.renomear", nome=nome),
-                                           lambda novo: _rascunho.Renomear(tid, cid, novo), valor=atual)
+            def renomear(novo):
+                """Nome livre: nem o mesmo, nem um já usado (no schema, para tabela; na tabela, para coluna)."""
+                v = r.vista()
+                if cid is None:
+                    usados = {tb.nome for i, tb in v.tabelas.items() if tb.estado != "apagado" and i != tid}
+                    igual = v.tabelas[tid].nome == novo
+                else:
+                    usados = {c.nome for c in v.tabelas[tid].colunas if c.estado != "apagado" and c.id != cid}
+                    igual = v.tabelas[tid].coluna(cid).nome == novo
+                if igual:
+                    raise ValueError(t("canvas.e.nome_igual"))
+                if novo in usados:
+                    raise ValueError(t("canvas.e.nome_existe", nome=novo))
+                return _rascunho.Renomear(tid, cid, novo)
+            form = formularios.FormSimples(r, f, t("canvas.f.renomear", nome=nome), renomear, valor=atual)
         else:
             sim = chave in ("obrigatoria", "unica")
             classe = _rascunho.Obrigatoria if chave in ("obrigatoria", "opcional") else _rascunho.Unica
@@ -990,15 +1030,15 @@ class TelaCanvas(Screen):
         if not self._pode_enviar():
             return
         passos = self.rascunho.passos()
+        texto = self.rascunho.sql_texto(self._cabecalho())
         pergunta = t("canvas.f.aplicar_pergunta", banco=self.fonte.banco, n=len(passos))
         destrutivas = self._destrutivas(passos)
         if destrutivas:
             pergunta += "\n" + t("canvas.d.titulo")
         # foco em "cancelar": um Enter que sobrou no teclado nunca grava no banco
         self.app.push_screen(
-            formularios.Confirmar(pergunta, destrutivas, t("canvas.f.aplicar"), foco="nao",
-                                  sql=self.rascunho.sql_texto(self._cabecalho())),
-            lambda sim: self._rodar(False) if sim else None)
+            formularios.Confirmar(pergunta, destrutivas, t("canvas.f.aplicar"), foco="nao", sql=texto),
+            lambda sim: self._rodar(False, texto) if sim else None)
 
     def _destrutivas(self, passos) -> List[str]:
         """Uma linha por operação que apaga (tabela, coluna, restrição), no alto da confirmação: o que some junto,
@@ -1025,14 +1065,19 @@ class TelaCanvas(Screen):
         if self._pode_enviar():
             self._rodar(True)
 
-    def _rodar(self, ensaio: bool) -> None:
+    def _rodar(self, ensaio: bool, confirmado: Optional[str] = None) -> None:
         """Entrega o rascunho ao `ratt db run`: a tela se suspende, a pessoa vê a mesma saída e volta com Enter.
-        Tudo o que decide algo depois está em `_concluir`, que roda fora da suspensão (e é testável)."""
+        Tudo o que decide algo depois está em `_concluir`, que roda fora da suspensão (e é testável).
+        `confirmado` é o SQL que a pessoa viu ao confirmar: se o rascunho mudou desde então, pergunta de novo."""
         if not self._pode_enviar():             # o banco pode ter mudado enquanto a confirmação estava aberta
             return
         cabecalho = self._cabecalho()
         texto = self.rascunho.sql_texto(cabecalho)
-        arquivo = guardar.pasta(self.fonte.porta, self.fonte.banco) / f"aplicando-{self.esquema}.sql"
+        if confirmado is not None and texto != confirmado:
+            self.notify(t("canvas.sql_mudou"), severity="warning")
+            self.action_aplicar()
+            return
+        arquivo = guardar.arquivo_aplicando(self.fonte.porta, self.fonte.banco, self.esquema)
         conexao = self.fonte.conexao_para_aplicar()
         if conexao is None:
             self.notify(t("canvas.sem_conexao"), severity="error")
@@ -1077,7 +1122,8 @@ class TelaCanvas(Screen):
     def _concluir(self, codigo: int, indice: Optional[int], ensaio: bool, texto: str) -> None:
         if codigo != 0:
             self._marcar_falha(indice)
-            self.notify(t("canvas.ensaio_falhou" if ensaio else "canvas.aplicar_falhou"), severity="error")
+            chave = "canvas.ensaio_falhou" if ensaio else "canvas.aplicar_falhou"
+            self.notify(t(chave if self.falha is not None else chave + "_sem_marca"), severity="error")
             return
         if ensaio:
             self.falha = None
@@ -1143,7 +1189,7 @@ class TelaCanvas(Screen):
     def action_exportar(self) -> None:
         if not self._pode_enviar():
             return
-        padrao = f"rascunho-{self.fonte.banco}-{self.esquema}.sql"
+        padrao = guardar.nome_exportado(self.fonte.banco, self.esquema)
         # None é Escape (cancela); "" é Enter sem digitar (vale o caminho padrão)
         self.app.push_screen(PerguntarNome(t("canvas.f.caminho"), padrao),
                              lambda valor: None if valor is None else self._exportar(valor or padrao))
@@ -1162,8 +1208,11 @@ class TelaCanvas(Screen):
     def _gravar_exportado(self, caminho: Path) -> None:
         if not self._pode_enviar():             # o banco pode ter mudado enquanto a pergunta estava aberta
             return
+        # o arquivo exportado não leva BEGIN/COMMIT (o `ratt db run` já roda numa transação); o comentário do topo
+        # diz como rodar tudo de uma vez fora do ratt
+        dica = "".join("-- " + linha + "\n" for linha in t("canvas.dica_exportado", arquivo=caminho.name).splitlines())
         try:
-            caminho.write_text(self.rascunho.sql_texto(self._cabecalho()), encoding="utf-8")
+            caminho.write_text(dica + self.rascunho.sql_texto(self._cabecalho()), encoding="utf-8")
         except OSError as erro:
             self.notify(t("canvas.erro_exportar", caminho=caminho, erro=erro), severity="error")
             return

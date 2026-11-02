@@ -133,13 +133,37 @@ class Consulta:
 # ── avisos de uma operação ──
 
 _SINONIMOS = {"int8": "bigint", "int4": "integer", "int": "integer", "int2": "smallint",
-              "varchar": "character varying", "timestamptz": "timestamp with time zone", "bool": "boolean"}
+              "serial": "integer", "serial4": "integer", "bigserial": "bigint", "serial8": "bigint",
+              "smallserial": "smallint", "serial2": "smallint", "decimal": "numeric",
+              "float8": "double precision", "float": "double precision", "float4": "real",
+              "varchar": "character varying", "char": "character", "bpchar": "character",
+              "timestamptz": "timestamp with time zone", "timestamp": "timestamp without time zone",
+              "timetz": "time with time zone", "time": "time without time zone", "bool": "boolean"}
+
+# Famílias: tipos diferentes de uma mesma família o PostgreSQL costuma comparar (int → bigint, varchar → text);
+# de famílias diferentes, não. Um tipo fora da lista é uma família só dele.
+_FAMILIAS = {
+    "numero": {"smallint", "integer", "bigint", "numeric", "real", "double precision", "money"},
+    "texto": {"text", "character varying", "character", "name", "citext"},
+    "tempo": {"date", "timestamp without time zone", "timestamp with time zone", "time without time zone",
+              "time with time zone", "interval"},
+    "booleano": {"boolean"},
+    "uuid": {"uuid"},
+    "json": {"json", "jsonb"},
+}
 
 
 def _tipo_normal(tipo: str) -> str:
-    """O tipo sem modificador `(255)` e com os apelidos do PostgreSQL unidos: o que importa para ligar."""
-    base = re.sub(r"\(.*?\)", "", tipo).strip().lower()
+    """O tipo sem modificador `(255)`, com os espaços normalizados e os apelidos do PostgreSQL unidos."""
+    base = " ".join(re.sub(r"\(.*?\)", "", tipo).lower().split())
     return _SINONIMOS.get(base, base)
+
+
+def _familia(tipo: str) -> str:
+    normal = _tipo_normal(tipo)
+    if normal.endswith("[]"):
+        return "lista de " + _familia(normal[:-2])
+    return next((nome for nome, tipos in _FAMILIAS.items() if normal in tipos), normal)
 
 
 def _id_catalogo(id: str):
@@ -264,10 +288,12 @@ def _ligar(op, r, n: _Contagens, v):
     col = origem.coluna(lig.colunas[0]) or op.nova_coluna
     col_pai = destino.coluna(lig.colunas_destino[0])
     nome = f"{origem.nome}.{col.nome}"
-    if _tipo_normal(col.tipo) != _tipo_normal(col_pai.tipo):
-        n.avisos.append(Aviso(lig.id, "impede", "chk.tipos", {
-            "coluna": nome, "tipo": col.tipo, "pai": f"{destino.nome}.{col_pai.nome}", "tipo_pai": col_pai.tipo}))
-    else:                                   # com tipos diferentes a contagem nem rodaria
+    tipos = {"coluna": nome, "tipo": col.tipo, "pai": f"{destino.nome}.{col_pai.nome}", "tipo_pai": col_pai.tipo}
+    if _familia(col.tipo) != _familia(col_pai.tipo):
+        n.avisos.append(Aviso(lig.id, "impede", "chk.tipos", tipos))
+    else:                                   # de famílias diferentes a contagem nem rodaria
+        if _tipo_normal(col.tipo) != _tipo_normal(col_pai.tipo):
+            n.avisos.append(Aviso(lig.id, "info", "chk.tipos_familia", tipos))
         k = n.orfaos(lig.origem, col.id, lig.destino, col_pai.id, op.nova_coluna)
         if k:
             n.avisos.append(Aviso(lig.id, "impede", "chk.orfaos_impedem", {"n": k, "coluna": nome}))

@@ -58,9 +58,13 @@ def esquemas(conexao):
     return sorted(achados.values(), key=lambda e: (e.nome != "public", e.nome))
 
 
-def assinatura(conexao):
+def assinatura(conexao, escritas: bool = True):
     """Um resumo de tudo o que importa para a tela: objetos, colunas e as escritas em cada tabela.
-    Se mudou entre uma olhada e outra, alguém (um ratt db run, o psql) mexeu no banco."""
+    Se mudou entre uma olhada e outra, alguém (um ratt db run, o psql) mexeu no banco. `escritas=False` deixa de
+    fora os contadores de linhas inseridas/alteradas: o canvas só desenha a estrutura, e com eles ele releria o
+    schema a cada volta do vigia num banco que recebe escritas."""
+    escritas_sql = ("(SELECT coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0) FROM pg_stat_user_tables)"
+                    if escritas else "0")
     return conexao.execute(f"""
         SELECT
           (SELECT md5(coalesce(string_agg(c.oid || c.relname || c.relkind::text, ',' ORDER BY c.oid), ''))
@@ -76,7 +80,7 @@ def assinatura(conexao):
           (SELECT md5(coalesce(string_agg(x.indexrelid || ':' || x.indrelid || ':' || x.indkey::text, ',' ORDER BY x.indexrelid), ''))
              FROM pg_index x JOIN pg_class c ON c.oid = x.indrelid JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE {_SEM_SISTEMA}),
-          (SELECT coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0) FROM pg_stat_user_tables)""").fetchone()
+          {escritas_sql}""").fetchone()
 
 
 def esquemas_com_tabelas(conexao):

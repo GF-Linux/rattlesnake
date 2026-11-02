@@ -36,7 +36,20 @@ xmlforest xmlnamespaces xmlparse xmlpi xmlroot xmlserialize xmltable
 """.split())
 
 _SEGURO = re.compile(r"^[a-z_][a-z0-9_]*$")
-_TIPO = re.compile(r"^[a-z][a-z0-9_ ]*(\(\d+(,\s*\d+)?\))?(\[\])?$")
+# Só nomes de tipo conhecidos (com `(n)` / `(n,m)` e `[]` opcionais): texto livre aqui iria cru para o SQL
+# (`bigint references users`, `text); drop table x; --`).
+_PALAVRAS_TIPO = """
+smallint integer int bigint int2 int4 int8 numeric decimal real float float4 float8 serial serial2 serial4 serial8
+smallserial bigserial money text varchar char character bpchar name citext bit varbit boolean bool date time timetz
+timestamp timestamptz interval uuid json jsonb bytea inet cidr macaddr macaddr8 xml point line lseg box path polygon
+circle tsvector tsquery oid
+""".split()
+_VARIAS_PALAVRAS = ["double precision", "character varying", "bit varying", "timestamp with time zone",
+                    "timestamp without time zone", "time with time zone", "time without time zone"]
+_TIPO = re.compile(
+    r"^(?:(?:timestamp|time)\(\d+\) with(?:out)? time zone|(?:"
+    + "|".join(re.escape(p) for p in sorted(_VARIAS_PALAVRAS + _PALAVRAS_TIPO, key=len, reverse=True))
+    + r")(?:\(\d+(?:,\s*\d+)?\))?)(?:\[\])?$")
 
 _AO_APAGAR = frozenset({"NO ACTION", "RESTRICT", "CASCADE", "SET NULL", "SET DEFAULT"})
 
@@ -47,7 +60,7 @@ def ident(nome: str) -> str:
     """O nome como o PostgreSQL o exige no SQL: sem aspas só se casar `^[a-z_][a-z0-9_]*$` e não for
     palavra reservada; senão entre aspas, com `"` dobrado."""
     if nome == "":
-        raise ValueError("nome vazio")
+        raise ValueError(t("canvas.e.nome_vazio"))
     if _SEGURO.fullmatch(nome) and nome not in _RESERVADAS:
         return nome
     return '"' + nome.replace('"', '""') + '"'
@@ -112,7 +125,7 @@ def _marcar(obj, estado: str) -> None:
 
 def _col_sql(c: Coluna, sem_not_null: bool = False) -> str:
     if not tipo_valido(c.tipo):
-        raise ValueError(f"tipo inválido: {c.tipo!r}")
+        raise ValueError(t("canvas.e.tipo", tipo=c.tipo))
     partes = [ident(c.nome), c.tipo]
     if c.identidade:
         partes.append("GENERATED ALWAYS AS IDENTITY")
@@ -356,7 +369,7 @@ class Ligar(Operacao):
         fk = (f"ALTER TABLE {t_sql} ADD CONSTRAINT {ident(self._nome_fk(origem, cols))} FOREIGN KEY ({lista}) "
               f"REFERENCES {nome_tabela(destino)} ({', '.join(ident(c) for c in dest)})")
         if lig.ao_apagar not in _AO_APAGAR:
-            raise ValueError(f"ao_apagar inválido: {lig.ao_apagar!r}")
+            raise ValueError(t("canvas.e.ao_apagar", valor=lig.ao_apagar))
         if lig.ao_apagar != "NO ACTION":
             fk += f" ON DELETE {lig.ao_apagar}"
         cmds.append(fk)
@@ -402,9 +415,12 @@ class LigarNN(Operacao):
             pks = tab.pk()
             pk = pks[0] if pks else None
             lados.append((tab, pk, cid, kid))
+        # ligar a tabela a ela mesma (seguidores, amigos): `user_a_id` e `user_b_id`, senão as colunas teriam o
+        # mesmo nome
+        sufixos = ("_a_id", "_b_id") if self.a == self.b else ("_id", "_id")
         colunas = []
-        for tab, pk, cid, _ in lados:
-            colunas.append(Coluna(cid, f"{singular(tab.nome)}_id", pk.tipo if pk else "bigint",
+        for (tab, pk, cid, _), sufixo in zip(lados, sufixos):
+            colunas.append(Coluna(cid, f"{singular(tab.nome)}{sufixo}", pk.tipo if pk else "bigint",
                                   obrigatoria=True, pk=True, estado="novo"))
         nova = Tabela(self.tabela_id, m.esquema, self.nome, colunas, estado="novo")
         ligs = []
@@ -432,6 +448,10 @@ class LigarNN(Operacao):
         return cmds
 
     def descricao(self, m: Modelo) -> str:
+        if self.a == self.b:
+            nova, _ = self._construir(m)
+            return t("op.ligar_nn_mesma", a=m.tabelas[self.a].nome, tabela=self.nome,
+                     col_a=nova.colunas[0].nome, col_b=nova.colunas[1].nome)
         return t("op.ligar_nn", a=m.tabelas[self.a].nome, b=m.tabelas[self.b].nome, tabela=self.nome)
 
     def refere(self) -> Set[str]:
@@ -526,6 +546,27 @@ def _existe(m: Modelo, id: str) -> bool:
     if obj.estado == "apagado":
         return False
     return dona is None or dona.estado != "apagado"
+
+
+def comandos_de(op: Operacao, m: Modelo) -> List[str]:
+    """Os comandos da operação, conferidos: cada um tem de ser exatamente UM comando SQL. Um padrão como
+    `1); DROP TABLE users; --` ou um comentário que engoliria o `;` viraria mais de um (ou nenhum fim) no `.sql`."""
+    from .rodar import dividir
+    cmds = op.comandos(m)
+    for cmd in cmds:
+        partes = dividir(cmd + ";")
+        if len(partes) != 1 or partes[0].meta or partes[0].texto != cmd:
+            raise ValueError(t("canvas.e.um_comando"))
+    return cmds
+
+
+def _nome_de(id: str, *modelos: Modelo) -> str:
+    """O nome de um id para uma mensagem (o primeiro modelo que o conhece); o próprio id se nenhum conhece."""
+    for m in modelos:
+        achado = _achar(m, id)
+        if achado is not None and getattr(achado[0], "nome", None):
+            return achado[0].nome
+    return id
 
 
 def _nome_na_base(base: Modelo, id: str) -> Optional[str]:
@@ -631,13 +672,14 @@ class Rascunho:
 
     def acrescentar(self, op: Operacao) -> None:
         v = self.vista()
-        for i in op.refere():
+        for i in sorted(op.refere()):
             if not _existe(v, i):
-                raise ValueError(f"{i}: não existe ou foi apagado")
+                raise ValueError(t("canvas.e.nao_existe", nome=_nome_de(i, v, self.base)))
         try:
-            op.comandos(v)          # um nome vazio ou id solto falha aqui, não no meio do export
+            comandos_de(op, v)      # um nome vazio, um id solto ou SQL a mais falha aqui, não no meio do export
         except KeyError as e:
-            raise ValueError(f"{e}: não existe") from e
+            i = e.args[0] if e.args and isinstance(e.args[0], str) else str(e)
+            raise ValueError(t("canvas.e.nao_existe", nome=_nome_de(i, v, self.base))) from e
         op.nomes = {i: n for i in sorted(op.refere()) for n in [_nome_na_base(self.base, i)] if n is not None}
         self.operacoes.append(op)
 
@@ -654,7 +696,7 @@ class Rascunho:
             try:
                 valida = _valida(m, op, self.base)
                 if valida:
-                    cmds = op.comandos(m)
+                    cmds = comandos_de(op, m)
                     desc = " ".join(op.descricao(m).splitlines())   # uma linha só: vai para um comentário SQL
                     op.aplicar(m)
             except _ERROS_OP:

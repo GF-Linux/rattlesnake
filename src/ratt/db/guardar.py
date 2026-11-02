@@ -109,6 +109,16 @@ def separar_rascunho(porta: int, banco: str, esquema: str) -> Path:
     return destino
 
 
+def arquivo_aplicando(porta: int, banco: str, esquema: str) -> Path:
+    """O `.sql` que o aplicar grava antes de rodar (o nome do schema passa por `_seguro`: nada de `../`)."""
+    return pasta(porta, banco) / f"aplicando-{_seguro(esquema)}.sql"
+
+
+def nome_exportado(banco: str, esquema: str) -> str:
+    """O nome sugerido para exportar o rascunho, na pasta atual: `rascunho-{banco}-{esquema}.sql`, sem barras."""
+    return f"rascunho-{_seguro(banco)}-{_seguro(esquema)}.sql"
+
+
 def guardar_aplicado(porta: int, banco: str, texto: str) -> Path:
     """Guarda o SQL que acabou de ser aplicado em `aplicados/AAAAMMDD-HHMMSS.sql` (nunca sobrescreve)."""
     agora = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")

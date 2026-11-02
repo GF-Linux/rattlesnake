@@ -2186,3 +2186,260 @@ def test_foco_desenha_o_recorte_perto_da_origem_e_corta_em_25(monkeypatch, tmp_p
             # mexer no foco não grava as posições do recorte por cima das do schema inteiro
             assert guardar.ler_posicoes(5432, "teste", "public")["t1"] == (501, 901)
     asyncio.run(roteiro())
+
+
+# ---- revisão final: Minors ------------------------------------------------------------------------------------
+
+def test_m4_tipos_da_mesma_familia_so_informam():
+    r = rascunho.Rascunho(modelo_png())
+    r.base.tabelas["t4"].coluna("t4.c4").tipo = "integer"          # profiles.user_id integer → users.id bigint
+    lig = modelo.Ligacao(r.novo_id("k"), "t4", ("t4.c4",), "t1", ("t1.c1",), "x")
+    consulta = ConsultaFalsa()
+    avisos = checagem.avisos_da_operacao(rascunho.Ligar(lig), r, consulta)
+    assert [(a.chave, a.nivel) for a in avisos] == [("chk.tipos_familia", "info")]
+    assert any(nome == "orfaos" for nome, _ in consulta.chamadas)          # a contagem roda
+    assert checagem._tipo_normal("double   precision") == checagem._tipo_normal("float8")
+    assert checagem._tipo_normal("serial") == "integer" and checagem._tipo_normal("bigserial") == "bigint"
+    assert checagem._tipo_normal("decimal(10,2)") == "numeric"
+    assert checagem._familia("character varying(20)") == checagem._familia("text")
+    assert checagem._familia("integer") != checagem._familia("text")
+    r.base.tabelas["t4"].coluna("t4.c4").tipo = "text"
+    avisos = checagem.avisos_da_operacao(rascunho.Ligar(lig), r, ConsultaFalsa())
+    assert [(a.chave, a.nivel) for a in avisos] == [("chk.tipos", "impede")]
+
+
+def test_m6_tipo_e_padrao_nao_levam_sql_a_mais():
+    for bom in ("bigint", "varchar(255)", "numeric(10,2)", "int[]", "double precision", "character varying(40)",
+                "timestamp with time zone", "timestamp(3) without time zone", "bit varying(5)", "text[]"):
+        assert rascunho.tipo_valido(bom), bom
+    for ruim in ("bigint references users", "text); drop table users; --", "int default 1", "foo bar"):
+        assert not rascunho.tipo_valido(ruim), ruim
+    for padrao in ("1); DROP TABLE users; --", "1 -- x", "1 /* x"):
+        r = rascunho.Rascunho(modelo_png())
+        with pytest.raises(ValueError):
+            r.acrescentar(rascunho.AdicionarColuna("t1", modelo.Coluna(r.novo_id("c"), "x", "int", padrao=padrao)))
+        assert r.operacoes == []
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.AdicionarColuna("t1", modelo.Coluna(r.novo_id("c"), "x", "text", padrao="'a;b'")))
+    d = json.loads(json.dumps(r.para_dict()))
+    d["operacoes"][0]["coluna"]["padrao"] = "1); DROP TABLE users; --"
+    de_novo = rascunho.Rascunho.de_dict(d, modelo_png())
+    assert de_novo.invalidas == {0} and "DROP TABLE" not in de_novo.sql_texto()
+
+
+def test_m9_ligar_nn_a_mesma_tabela():
+    r = rascunho.Rascunho(modelo_png())
+    op = rascunho.LigarNN(r.novo_id("t"), "seguidores", "t1", "t1", (r.novo_id("c"), r.novo_id("c")),
+                          (r.novo_id("k"), r.novo_id("k")))
+    r.acrescentar(op)
+    sql = r.sql_texto()
+    assert "(user_a_id bigint NOT NULL, user_b_id bigint NOT NULL, PRIMARY KEY (user_a_id, user_b_id))" in sql
+    assert "seguidores_user_a_id_fkey" in sql and "seguidores_user_b_id_fkey" in sql
+    assert "user_a_id" in op.descricao(r.base) and "user_b_id" in op.descricao(r.base)
+
+
+def test_m10_erros_do_acrescentar_falam_com_nomes():
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.ApagarTabela("t2"))
+    with pytest.raises(ValueError) as e:
+        r.acrescentar(rascunho.Renomear("t2", None, "x"))
+    assert str(e.value) == t("canvas.e.nao_existe", nome="roles")
+    with pytest.raises(ValueError) as e:
+        r.acrescentar(rascunho.Renomear("t1", None, ""))
+    assert str(e.value) == t("canvas.e.nome_vazio")
+    with pytest.raises(ValueError) as e:
+        r.acrescentar(rascunho.AdicionarColuna("t1", modelo.Coluna(r.novo_id("c"), "x", "foo bar")))
+    assert str(e.value) == t("canvas.e.tipo", tipo="foo bar")
+
+
+def test_m14_fonte_fechada_nao_reabre(monkeypatch):
+    abertas = []
+
+    class Con:
+        def close(self):
+            pass
+    monkeypatch.setattr(canvas.acesso, "entrar", lambda *a, **k: (abertas.append(1) or Con(), ""))
+    f = canvas.FonteBanco(None, 5432, "eu", "bd")
+    f.conexao
+    f.fechar()
+    assert f.conexao is None and len(abertas) == 1
+    with pytest.raises(RuntimeError):
+        f.modelo("public")
+
+
+def test_m13_canvas_vigia_so_a_estrutura(monkeypatch):
+    vistos = []
+    monkeypatch.setattr(canvas.catalogo, "assinatura", lambda con, **k: vistos.append(k) or 1)
+    f = canvas.FonteBanco(object(), 5432, "eu", "bd")
+    f.assinatura()
+    assert vistos == [{"escritas": False}]
+
+
+def test_m2_nome_de_schema_hostil_nao_sai_da_pasta(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    caminho = guardar.arquivo_aplicando(5432, "teste", "../../x")
+    assert caminho.parent == guardar.pasta(5432, "teste") and ".." not in caminho.name and "/" not in caminho.name
+    assert "/" not in guardar.nome_exportado("a/b", "../c") and ".." not in guardar.nome_exportado("a/b", "../c")
+
+
+def test_m1_disco_cheio_ao_mover_avisa_uma_vez(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    avisos = []
+    monkeypatch.setattr(canvas.TelaCanvas, "notify", lambda self, msg, **kw: avisos.append(msg))
+
+    def cheio(*a, **k):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(guardar, "gravar_posicoes", cheio)
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            await piloto.press("tab")
+            for _ in range(3):
+                await piloto.press("shift+down")
+            assert isinstance(app.screen, canvas.TelaCanvas)
+            assert len([a for a in avisos if "No space" in a]) == 1
+    asyncio.run(roteiro())
+
+
+def test_m3_sql_mudou_entre_confirmar_e_rodar_pergunta_de_novo(monkeypatch, tmp_path):
+    _com_rascunho(tmp_path, monkeypatch)
+    rodou = []
+    monkeypatch.setattr(canvas.TelaCanvas, "_sessao", lambda self, *a: rodou.append(1) or (0, None))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            await piloto.press("enter"); await piloto.pause()
+            assert isinstance(app.screen, formularios.Confirmar)
+            tela.rascunho.acrescentar(rascunho.Obrigatoria("t1", "t1.c2", True))   # o rascunho mudou por baixo
+            app.screen.dismiss(True); await piloto.pause()
+            assert rodou == [] and isinstance(app.screen, formularios.Confirmar)   # perguntou de novo
+            assert "SET NOT NULL" in app.screen.sql
+    asyncio.run(roteiro())
+
+
+def test_m5_renomear_recusa_nome_em_uso_e_nome_igual(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            tela._do_menu("renomear", ("tabela", "t1"), "users"); await piloto.pause()
+            form = app.screen
+            for nome, erro in (("roles", t("canvas.e.nome_existe", nome="roles")), ("users", t("canvas.e.nome_igual"))):
+                form.query_one("#nome").value = nome; await piloto.pause()
+                await piloto.click("#por_no_rascunho"); await piloto.pause()
+                assert app.screen is form and erro in str(form.query_one("#erro").render())
+            await piloto.press("escape"); await piloto.pause()
+            tela._do_menu("renomear", ("coluna", "t1", "t1.c2"), "users.first_name"); await piloto.pause()
+            app.screen.query_one("#nome").value = "email"; await piloto.pause()
+            await piloto.click("#por_no_rascunho"); await piloto.pause()
+            assert t("canvas.e.nome_existe", nome="email") in str(app.screen.query_one("#erro").render())
+            app.screen.query_one("#nome").value = "nome"; await piloto.pause()
+            app.screen.por(); await pronto(app)
+            assert isinstance(app.screen, canvas.TelaCanvas), str(app.screen.query_one("#erro").render())
+            assert tela.rascunho.operacoes
+    asyncio.run(roteiro())
+
+
+def test_m7_indice_comeca_desligado_em_coluna_indexada_e_unica_dispensa(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 50)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            r = tela.rascunho
+            tela._abrir(formularios.FormLigar(r, tela.fonte, "t3", "t3.c1")); await piloto.pause()   # já indexada
+            assert app.screen.query_one("#indice").value is False
+            await piloto.press("escape"); await piloto.pause()
+            tela._abrir(formularios.FormLigar(r, tela.fonte, "t4", "t4.c4")); await piloto.pause()   # sem índice
+            form = app.screen
+            assert form.query_one("#indice").value is True
+            form.query_one("#destino").highlighted = 0
+            form.query_one("#um").value = True; await piloto.pause()
+            assert form.query_one("#indice").value is False
+            op = form.previa()
+            assert op.unica and not op.indice
+    asyncio.run(roteiro())
+
+
+def test_m8_menu_nao_oferece_o_que_o_postgres_recusa(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    m = modelo_png()
+    m.tabelas["t1"].coluna("t1.c4").unica = True                  # email: único só por índice, sem restrição
+    m.tabelas["t2"].coluna("t2.c2").unica = True
+    m.tabelas["t2"].coluna("t2.c2").nome_unica = "roles_name_key"
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa(m))
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            for sel, tem, nao_tem in ((("coluna", "t1", "t1.c1"), set(), {"opcional"}),
+                                      (("coluna", "t1", "t1.c4"), {"opcional"}, {"nao_unica", "unica"}),
+                                      (("coluna", "t2", "t2.c2"), {"nao_unica"}, set())):
+                tela._selecionar(sel)
+                tela.action_menu(); await piloto.pause()
+                chaves = {chave for chave, _ in app.screen.itens}
+                assert tem <= chaves and not (nao_tem & chaves), (sel, chaves)
+                await piloto.press("escape"); await piloto.pause()
+    asyncio.run(roteiro())
+
+
+def test_m11_falha_sem_operacao_marcada_nao_diz_que_marcou(monkeypatch, tmp_path):
+    _com_rascunho(tmp_path, monkeypatch)
+    avisos = []
+    monkeypatch.setattr(canvas.TelaCanvas, "notify", lambda self, msg, **kw: avisos.append(msg))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            app.screen._concluir(1, None, False, "")
+            app.screen._concluir(1, None, True, "")
+            app.screen._concluir(1, 0, False, "")
+    asyncio.run(roteiro())
+    assert avisos[-3:] == [t("canvas.aplicar_falhou_sem_marca"), t("canvas.ensaio_falhou_sem_marca"),
+                           t("canvas.aplicar_falhou")]
+
+
+def test_m12_tabela_criada_em_foco_aparece(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa(_hub_tela(30)))
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            assert tela.foco == "t0"
+            tid = tela.rascunho.novo_id("t")
+            op = rascunho.CriarTabela(modelo.Tabela(tid, "public", "pets", [modelo.Coluna(tid + ".c1", "id", "bigint", pk=True)]))
+            tela.rascunho.acrescentar(op)
+            tela._depois_de_editar(op)
+            assert tid in tela.vista.tabelas and tela.selecao == ("tabela", tid)
+    asyncio.run(roteiro())
+
+
+def test_m15_exportado_diz_como_rodar_numa_transacao(monkeypatch, tmp_path):
+    _com_rascunho(tmp_path, monkeypatch)
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            await piloto.press("w"); await piloto.press("enter"); await piloto.pause()
+    asyncio.run(roteiro())
+    texto = (tmp_path / "rascunho-teste-public.sql").read_text()
+    assert texto.startswith("-- ") and "ratt db run rascunho-teste-public.sql" in texto and "psql -1 -f" in texto
+    assert "BEGIN" not in texto and "COMMIT" not in texto
+    from ratt.db.rodar import dividir
+    comandos = dividir(texto)
+    assert len(comandos) == 1 and comandos[0].texto.splitlines()[-1] == "ALTER TABLE public.users RENAME TO pessoas"

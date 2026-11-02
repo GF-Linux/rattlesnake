@@ -262,3 +262,15 @@ def test_sql_do_public_nao_segue_o_search_path(banco, tmp_path):
     assert catalogo.modelo(banco, usuario).por_nome("users") is not None
     assert catalogo.modelo(banco, "public").por_nome("novidade") is not None
     assert catalogo.modelo(banco, usuario).por_nome("novidade") is None
+
+
+def test_assinatura_sem_escritas_nao_muda_com_insert(banco):
+    import time
+    banco.execute(PNG_SQL)
+    antes = catalogo.assinatura(banco, escritas=False)
+    banco.execute("INSERT INTO users (email) VALUES ('a'), ('b')")
+    time.sleep(0.7)             # as estatísticas de escrita chegam ao pg_stat com algum atraso
+    banco.execute("SELECT pg_stat_clear_snapshot()")
+    assert catalogo.assinatura(banco, escritas=False) == antes
+    banco.execute("ALTER TABLE users ADD COLUMN x int")
+    assert catalogo.assinatura(banco, escritas=False) != antes
