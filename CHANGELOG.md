@@ -3,6 +3,29 @@
 O `ratt check-update` e o `ratt upgrade` leem este arquivo: cada `## versão` é o que você
 vê antes de responder `[s/N]`.
 
+## 0.9.0
+
+- **o canvas do ratt db**: `d` na tela do banco abre o diagrama das tabelas, desenhado no
+  terminal. Cada tabela é uma caixa com as colunas e os tipos (`PK` na chave primária); cada
+  chave estrangeira é uma linha entre as caixas, com o pé de galinha (`<`) do lado "muitos" e o
+  `┼` do lado "um". A coluna que aceita vazio ganha um `o` na ponta da linha, e a tabela de
+  junção aparece ligada às duas pontas — o N:N.
+  - Num banco grande, `f` mostra só a tabela escolhida e as vizinhas; `F` mostra tudo de novo.
+    `s` troca o schema. Setas, `PageUp` e `PageDown` rolam; `shift` com as setas move a caixa.
+  - **Editar pelo desenho**: `a` nova tabela, `c` nova coluna, `l` liga duas colunas (ou liga
+    duas tabelas "como N:N", e o ratt cria a tabela de junção), `espaço` abre o menu da coluna
+    (renomear, obrigatória/opcional, única), `x` apaga — e mostra antes o que cai junto — e
+    `u` desfaz.
+  - **O rascunho**: nada vai para o banco ao editar. O SQL do que você fez fica sempre à vista,
+    embaixo do desenho, com os avisos (apagar dado, perder a unicidade…), e é guardado: se você
+    sair e voltar, ele está lá. `r` põe o foco no painel do SQL. Esse SQL é só para ler e
+    exportar; para mexer nele, `w` salva num `.sql`, e aí é o VS Code e o `ratt db run`.
+  - **Aplicar e ensaiar**: `enter` mostra o SQL e pede a confirmação antes de aplicar, tudo numa
+    transação — se um comando falha, nada muda e a operação que falhou aparece marcada.
+    `e` é o ensaio: roda tudo e desfaz no fim, igual ao `--dry-run`.
+- corrigido: a tela do `ratt db` agora percebe quando mudam as restrições, o NOT NULL e os
+  índices (um `ALTER TABLE` pelo `ratt db run` ou pelo `psql`) e se atualiza sozinha.
+
 ## 0.8.0
 
 - **ratt db** (sem comando, num terminal): a tela do banco, no lugar do DBeaver. A árvore à

@@ -77,7 +77,7 @@ ratt templates           o que é relido, e como aparece
 ratt check-update        procura uma versão nova e mostra o que mudou
 ratt upgrade             procura, mostra o que mudou e pergunta [s/N] antes de instalar
 ratt sync                reescreve a releitura em todo lugar, com a versão deste ratt
-ratt db                  a tela do banco: a árvore à esquerda, dados e estrutura à direita
+ratt db                  a tela do banco: a árvore à esquerda, dados e estrutura à direita (d: o diagrama)
 ratt db status           o PostgreSQL: o que está instalado, ligado e configurado (ratt db -h)
 ratt db setup            o PostgreSQL do zero até o primeiro banco, em Debian/Ubuntu, Fedora/RHEL e Arch
 ratt db list             os bancos, com dono e tamanho
@@ -107,6 +107,38 @@ ratt db                       # a tela: a árvore do banco, os dados, a estrutur
 O jeito de trabalhar: o `.sql` aberto no VS Code, `ratt db run --watch arquivo.sql` no terminal
 dele, e a tela (`ratt db`) num terminal ao lado — ela se atualiza sozinha quando o script cria
 uma tabela ou muda dados. Na tela, `p` abre o `psql` no banco e `\q` volta.
+
+### O diagrama das tabelas (o canvas)
+
+Na tela, `d` abre o diagrama do schema: cada tabela é uma caixa, cada chave estrangeira é uma
+linha entre elas — `<` do lado "muitos", `┼` do lado "um", `o` quando a coluna aceita vazio:
+
+```
+┌─ users ───────────────┐         ┌─ users_roles ─────┐             ┌─ roles ──────┐
+│ PK id          bigint ├┼┬──────<┤ PK user_id bigint │           ┌┼┤ PK id bigint │
+│    first_name    text │ o       │ PK role_id bigint ├>──────────┘ │    name text │
+│    last_name     text │ │       └───────────────────┘             └──────────────┘
+│    email         text │ │
+│    password_hash text │ │
+└───────────────────────┘ │
+                          │
+                          │       ┌─ profiles ──────────┐
+                          │       │ PK id        bigint │
+                          │       │    bio         text │
+                          │       │    description text │
+                          └──────<┤    user_id   bigint │
+                                  └─────────────────────┘
+```
+
+As teclas principais: `a` nova tabela, `c` nova coluna, `l` ligar (ou ligar "como N:N"),
+`espaço` o menu da coluna (renomear, obrigatória/opcional, única), `x` apagar (mostrando o que
+cai junto), `u` desfazer, `f` / `F` foco numa tabela e suas vizinhas / tudo, `s` troca o
+schema, setas e `PageUp` / `PageDown` rolam, `shift` com as setas move a caixa, `Esc` volta.
+
+O que você edita vira um rascunho: o SQL fica sempre à vista embaixo do desenho (`r` leva o
+foco até ele), com os avisos. `enter` aplica — mostrando o SQL e pedindo a confirmação —,
+`e` ensaia (roda e desfaz) e `w` salva o SQL num `.sql`. O SQL gerado é só leitura e
+exportação: para editá-lo, `w`, depois o VS Code e o `ratt db run`.
 
 Funciona nas famílias Debian/Ubuntu, Fedora/RHEL e Arch; `ratt db status` diz o que falta e
 `ratt db reset` volta ao antes do setup (com backup e a trava do nome da máquina).
