@@ -73,6 +73,9 @@ def assinatura(conexao):
              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE {_SEM_SISTEMA}),
           (SELECT md5(coalesce(string_agg(k.oid || k.conname || k.contype::text || k.conrelid::text, ',' ORDER BY k.oid), ''))
              FROM pg_constraint k JOIN pg_namespace n ON n.oid = k.connamespace WHERE {_SEM_SISTEMA}),
+          (SELECT md5(coalesce(string_agg(x.indexrelid || ':' || x.indrelid || ':' || x.indkey::text, ',' ORDER BY x.indexrelid), ''))
+             FROM pg_index x JOIN pg_class c ON c.oid = x.indrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE {_SEM_SISTEMA}),
           (SELECT coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0) FROM pg_stat_user_tables)""").fetchone()
 
 
@@ -129,9 +132,16 @@ def modelo(conexao, esquema):
                                   tuple("t%d.c%d" % (confrelid, n) for n in confkey), nome,
                                   _AO_APAGAR.get(apagar, "NO ACTION"))
             m.ligacoes[lig.id] = lig
-    for oid, num in conexao.execute("""
-            SELECT indrelid, indkey[0] FROM pg_index WHERE indrelid = ANY (%s) AND indkey[0] > 0""", (oids,)):
-        colunas_por_id["t%d.c%d" % (oid, num)].indexada = True
+    # um índice único simples (sem WHERE, sem expressão) também garante unicidade, mesmo sem restrição:
+    # a coluna é "unica" (sem nome_unica, não há restrição para apagar)
+    for oid, num, unico in conexao.execute("""
+            SELECT indrelid, indkey[0],
+                   indisunique AND NOT indisprimary AND indpred IS NULL AND indexprs IS NULL AND indnkeyatts = 1
+            FROM pg_index WHERE indrelid = ANY (%s) AND indkey[0] > 0""", (oids,)):
+        c = colunas_por_id["t%d.c%d" % (oid, num)]
+        c.indexada = True
+        if unico:
+            c.unica = True
     return m
 
 

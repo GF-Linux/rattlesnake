@@ -73,7 +73,15 @@ def test_assinatura_ve_restricoes_e_not_null(banco):
     banco.execute("ALTER TABLE profiles ADD CONSTRAINT profiles_user_id_key UNIQUE (user_id)")
     meio = catalogo.assinatura(banco)
     banco.execute("ALTER TABLE profiles ALTER COLUMN bio SET NOT NULL")
-    assert antes != meio != catalogo.assinatura(banco)
+    depois = catalogo.assinatura(banco)
+    assert antes != meio != depois and antes != depois
+
+
+def test_assinatura_ve_indices(banco):
+    banco.execute(PNG_SQL)
+    antes = catalogo.assinatura(banco)
+    banco.execute("CREATE INDEX ON profiles (bio)")
+    assert catalogo.assinatura(banco) != antes
 
 
 def test_sql_do_rascunho_roda_no_banco(banco):
@@ -85,3 +93,51 @@ def test_sql_do_rascunho_roda_no_banco(banco):
     r.acrescentar(rascunho.AdicionarColuna(users.id, modelo.Coluna(r.novo_id("c"), "Data Nasc", "date")))
     banco.execute(r.sql_texto())
     assert catalogo.modelo(banco, "public").por_nome("user").colunas[-1].nome == "Data Nasc"
+
+
+def test_modelo_regras_do_catalogo(banco):
+    banco.execute("""
+        CREATE TABLE pai (id int PRIMARY KEY, a int, b int, c int, UNIQUE (a, b), CONSTRAINT pai_c_key UNIQUE (c));
+        CREATE TABLE filho (id int CONSTRAINT filho_pkey_nome PRIMARY KEY, a int, b int, p1 int, p2 int, u int, x int,
+            CONSTRAINT fk_casc FOREIGN KEY (p1) REFERENCES pai (id) ON DELETE CASCADE,
+            CONSTRAINT fk_nulo FOREIGN KEY (p2) REFERENCES pai (id) ON DELETE SET NULL,
+            CONSTRAINT fk_comp FOREIGN KEY (b, a) REFERENCES pai (b, a));
+        CREATE UNIQUE INDEX filho_u_idx ON filho (u);
+        CREATE INDEX filho_x_idx ON filho (x, a);
+        CREATE TABLE medida (dia date, v int) PARTITION BY RANGE (dia);
+        CREATE TABLE medida_1 PARTITION OF medida FOR VALUES FROM ('2020-01-01') TO ('2021-01-01');
+        CREATE TABLE medida_2 PARTITION OF medida FOR VALUES FROM ('2021-01-01') TO ('2022-01-01');
+        CREATE SCHEMA outro;
+        CREATE TABLE outro.t (pid int REFERENCES public.pai (id));
+        ANALYZE pai;""")
+    m = catalogo.modelo(banco, "public")
+    assert sorted(t.nome for t in m.tabelas.values()) == ["filho", "medida", "pai"]
+    assert m.por_nome("medida").particoes == 2 and m.por_nome("pai").particoes == 0
+    assert m.por_nome("pai").linhas == 0 and m.por_nome("filho").linhas is None
+    pai, filho = m.por_nome("pai"), m.por_nome("filho")
+    assert filho.nome_pk == "filho_pkey_nome" and pai.nome_pk == "pai_pkey"
+    assert len(m.ligacoes) == 3
+    por_nome = {l.nome: l for l in m.ligacoes.values()}
+    assert por_nome["fk_casc"].ao_apagar == "CASCADE" and por_nome["fk_nulo"].ao_apagar == "SET NULL"
+    comp = por_nome["fk_comp"]
+    nome = lambda cid: next(c.nome for t in m.tabelas.values() for c in t.colunas if c.id == cid)
+    assert [nome(c) for c in comp.colunas] == ["b", "a"]
+    assert [nome(c) for c in comp.colunas_destino] == ["b", "a"]
+    assert comp.ao_apagar == "NO ACTION"
+    pa = {c.nome: c for c in pai.colunas}
+    assert not pa["a"].unica and not pa["b"].unica
+    assert pa["c"].unica and pa["c"].nome_unica == "pai_c_key" and not pa["id"].unica
+    fc = {c.nome: c for c in filho.colunas}
+    assert fc["u"].unica and fc["u"].nome_unica is None and fc["u"].indexada
+    assert fc["x"].indexada and not fc["x"].unica and not fc["a"].indexada
+    assert not fc["p1"].indexada and fc["id"].indexada
+    assert catalogo.modelo(banco, "outro").ligacoes == {}
+
+
+def test_indice_unico_da_cardinalidade_um_para_um(banco):
+    banco.execute("""CREATE TABLE a (id int PRIMARY KEY);
+                     CREATE TABLE b (id int PRIMARY KEY, a_id int REFERENCES a (id));
+                     CREATE UNIQUE INDEX ON b (a_id);""")
+    m = catalogo.modelo(banco, "public")
+    (lig,) = m.ligacoes.values()
+    assert modelo.cardinalidade(m, lig) == "1:1"
