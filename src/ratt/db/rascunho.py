@@ -54,9 +54,8 @@ def ident(nome: str) -> str:
 
 
 def nome_tabela(tab: Tabela) -> str:
-    """`tabela` no schema public, `esquema.tabela` fora dele — cada parte por `ident`."""
-    if tab.esquema == "public":
-        return ident(tab.nome)
+    """`esquema.tabela`, sempre — cada parte por `ident`. Sem o schema, o nome seguiria o `search_path`
+    (`"$user", public`): um `DROP TABLE users` pensado para `public.users` apagaria `jared.users` se ela existir."""
     return ident(tab.esquema) + "." + ident(tab.nome)
 
 

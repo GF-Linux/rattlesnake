@@ -238,3 +238,27 @@ def test_executar_nao_acumula_tratador_de_avisos(banco, tmp_path):
     rodar.executar(arquivo, con); rodar.executar(arquivo, con)
     assert len(con._notice_handlers) == 0
     con.close()
+
+
+def test_sql_do_public_nao_segue_o_search_path(banco, tmp_path):
+    """Com um schema do mesmo nome do usuário ("$user" vem antes de public no search_path), o DROP pensado para
+    public.users não pode apagar <usuário>.users, e a tabela nova tem de nascer no public."""
+    import psycopg
+    from psycopg import sql
+    banco.execute(PNG_SQL)
+    usuario = banco.execute("SELECT current_user").fetchone()[0]
+    banco.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(usuario)))
+    banco.execute(sql.SQL("CREATE TABLE {}.users (x int)").format(sql.Identifier(usuario)))
+    r = rascunho.Rascunho(catalogo.modelo(banco, "public"))
+    users = r.base.por_nome("users")
+    r.acrescentar(rascunho.ApagarTabela(users.id, cascata=True))
+    tid = r.novo_id("t")
+    r.acrescentar(rascunho.CriarTabela(modelo.Tabela(tid, "public", "novidade", [
+        modelo.Coluna(f"{tid}.c1", "id", "bigint", obrigatoria=True, identidade=True, pk=True)])))
+    con2 = psycopg.connect(banco.info.dsn)
+    assert canvas.aplicar_rascunho(r, con2, tmp_path / "a.sql", False, "") == (0, None)
+    con2.close()
+    assert catalogo.modelo(banco, "public").por_nome("users") is None
+    assert catalogo.modelo(banco, usuario).por_nome("users") is not None
+    assert catalogo.modelo(banco, "public").por_nome("novidade") is not None
+    assert catalogo.modelo(banco, usuario).por_nome("novidade") is None

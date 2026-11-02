@@ -106,9 +106,11 @@ def test_ident():
     assert rascunho.ident("ação") == '"ação"'
 
 
-def test_nome_tabela_fora_do_public():
+def test_nome_tabela_sempre_com_o_schema():
     t = modelo.Tabela("t9", "vendas", "Pedidos", [])
     assert rascunho.nome_tabela(t) == 'vendas."Pedidos"'
+    assert rascunho.nome_tabela(modelo.Tabela("t1", "public", "users", [])) == "public.users"
+    assert rascunho.nome_tabela(modelo.Tabela("t2", "public", "user", [])) == 'public."user"'
 
 
 def test_adicionar_coluna_sql_e_vista():
@@ -116,7 +118,7 @@ def test_adicionar_coluna_sql_e_vista():
     c = modelo.Coluna(r.novo_id("c"), "birth", "date")
     r.acrescentar(rascunho.AdicionarColuna("t1", c))
     assert r.sql_texto().splitlines()[:2] == ["-- 1. " + r.operacoes[0].descricao(modelo_png()),
-                                             "ALTER TABLE users ADD COLUMN birth date;"]
+                                             "ALTER TABLE public.users ADD COLUMN birth date;"]
     assert r.vista().tabelas["t1"].coluna(c.id).estado == "novo"
 
 
@@ -126,11 +128,11 @@ def test_ligar_com_unica_e_indice():
     lig = modelo.Ligacao(r.novo_id("k"), "t4", ("t4.c4",), "t1", ("t1.c1",), "profiles_user_id_fkey", "CASCADE")
     r.acrescentar(rascunho.Ligar(lig, unica=True, indice=True))
     sql = r.sql_texto()
-    assert "ALTER TABLE profiles DROP CONSTRAINT profiles_user_id_fkey;" in sql
-    assert ("ALTER TABLE profiles ADD CONSTRAINT profiles_user_id_fkey FOREIGN KEY (user_id) "
-            "REFERENCES users (id) ON DELETE CASCADE;") in sql
-    assert "ALTER TABLE profiles ADD CONSTRAINT profiles_user_id_key UNIQUE (user_id);" in sql
-    assert "CREATE INDEX profiles_user_id_idx ON profiles (user_id);" in sql
+    assert "ALTER TABLE public.profiles DROP CONSTRAINT profiles_user_id_fkey;" in sql
+    assert ("ALTER TABLE public.profiles ADD CONSTRAINT profiles_user_id_fkey FOREIGN KEY (user_id) "
+            "REFERENCES public.users (id) ON DELETE CASCADE;") in sql
+    assert "ALTER TABLE public.profiles ADD CONSTRAINT profiles_user_id_key UNIQUE (user_id);" in sql
+    assert "CREATE INDEX profiles_user_id_idx ON public.profiles (user_id);" in sql
     assert modelo.cardinalidade(r.modelo(), r.modelo().ligacoes[lig.id]) == "1:1"
 
 
@@ -141,7 +143,7 @@ def test_criar_tabela_com_identidade():
         modelo.Coluna(f"{tid}.c1", "id", "bigint", obrigatoria=True, identidade=True, pk=True),
         modelo.Coluna(f"{tid}.c2", "total", "numeric", obrigatoria=True, padrao="0")])
     r.acrescentar(rascunho.CriarTabela(t))
-    assert ("CREATE TABLE pedidos (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, "
+    assert ("CREATE TABLE public.pedidos (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, "
             "total numeric NOT NULL DEFAULT 0);") in r.sql_texto()
 
 
@@ -151,7 +153,7 @@ def test_ligar_nn():
                           (r.novo_id("c"), r.novo_id("c")), (r.novo_id("k"), r.novo_id("k")))
     r.acrescentar(op)
     sql = r.sql_texto()
-    assert "CREATE TABLE users_tags (user_id bigint NOT NULL, role_id bigint NOT NULL, PRIMARY KEY (user_id, role_id));" in sql
+    assert "CREATE TABLE public.users_tags (user_id bigint NOT NULL, role_id bigint NOT NULL, PRIMARY KEY (user_id, role_id));" in sql
     assert modelo.juncao(r.modelo(), op.tabela_id)
 
 
@@ -159,8 +161,8 @@ def test_renomear_vale_para_as_seguintes():
     r = rascunho.Rascunho(modelo_png())
     r.acrescentar(rascunho.Renomear("t1", None, "pessoas"))
     r.acrescentar(rascunho.Obrigatoria("t1", "t1.c2", True))
-    assert "ALTER TABLE users RENAME TO pessoas;" in r.sql_texto()
-    assert "ALTER TABLE pessoas ALTER COLUMN first_name SET NOT NULL;" in r.sql_texto()
+    assert "ALTER TABLE public.users RENAME TO pessoas;" in r.sql_texto()
+    assert "ALTER TABLE public.pessoas ALTER COLUMN first_name SET NOT NULL;" in r.sql_texto()
 
 
 def test_apagar_tabela_marca_ligacoes():
@@ -169,7 +171,7 @@ def test_apagar_tabela_marca_ligacoes():
     v = r.vista()
     assert v.tabelas["t1"].estado == "apagado" and v.ligacoes["k3"].estado == "apagado"
     assert "t1" not in r.modelo().tabelas
-    assert "DROP TABLE users CASCADE;" in r.sql_texto()
+    assert "DROP TABLE public.users CASCADE;" in r.sql_texto()
 
 
 def test_nao_aceita_operacao_sobre_apagado():
@@ -191,7 +193,7 @@ def test_nomes_hostis_no_sql():
     r = rascunho.Rascunho(modelo_png())
     r.acrescentar(rascunho.Renomear("t1", None, "user"))
     r.acrescentar(rascunho.AdicionarColuna("t1", modelo.Coluna(r.novo_id("c"), "Data Nasc", "date")))
-    assert 'ALTER TABLE "user" ADD COLUMN "Data Nasc" date;' in r.sql_texto()
+    assert 'ALTER TABLE public."user" ADD COLUMN "Data Nasc" date;' in r.sql_texto()
 
 
 def test_ident_quebra_de_linha_e_vazio():
@@ -208,7 +210,7 @@ def test_descricao_com_quebra_de_linha_fica_em_um_comentario():
     linhas = r.sql_texto().split("\n")
     # o comentário é uma linha só; a quebra no SQL fica dentro do identificador entre aspas
     assert linhas[0] == "-- 1. renomear a tabela users para x DROP TABLE users"
-    assert linhas[1] == 'ALTER TABLE users RENAME TO "x'
+    assert linhas[1] == 'ALTER TABLE public.users RENAME TO "x'
     assert linhas[2] == 'DROP TABLE users";'
     assert linhas[r.linhas_das_operacoes()[1] - 2] == ""
     assert '"a\u2028b\x0bc"' in r.sql_texto()
@@ -1207,7 +1209,7 @@ def test_nova_coluna_pelo_formulario(monkeypatch, tmp_path):
             await pronto(app)
             tela = app.screen
             r = tela.rascunho
-            assert "ALTER TABLE users ADD COLUMN birth date;" in r.sql_texto()
+            assert "ALTER TABLE public.users ADD COLUMN birth date;" in r.sql_texto()
             assert guardar.ler_rascunho(5432, "teste", "public") is not None
             assert t("canvas.rascunho", n=1) in str(tela.query_one("#canvas_titulo").render())
             assert "birth" in tela.vista.tabelas["t1"].colunas[-1].nome
@@ -1303,7 +1305,7 @@ def test_ligar_como_nn_pelo_formulario(monkeypatch, tmp_path):
             await piloto.click("#por_no_rascunho")
             await pronto(app)
             sql = app.screen.rascunho.sql_texto()
-            assert "CREATE TABLE users_profiles" in sql and sql.count("FOREIGN KEY") == 2
+            assert "CREATE TABLE public.users_profiles" in sql and sql.count("FOREIGN KEY") == 2
     asyncio.run(roteiro())
 
 
@@ -1374,7 +1376,7 @@ def test_nova_tabela_pelo_formulario(monkeypatch, tmp_path):
             await piloto.click("#por_no_rascunho")
             await pronto(app)
             sql = app.screen.rascunho.sql_texto()
-            assert "CREATE TABLE tags (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, nome text)" in sql
+            assert "CREATE TABLE public.tags (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, nome text)" in sql
             assert "tags" in [tb.nome for tb in app.screen.vista.tabelas.values()]
     asyncio.run(roteiro())
 
@@ -1422,7 +1424,7 @@ def test_apagar_tabela_com_dependentes_oferece_cascade(monkeypatch, tmp_path):
             await piloto.pause(0.1)
             await piloto.click("#por_no_rascunho")
             await pronto(app)
-            assert "DROP TABLE roles CASCADE;" in app.screen.rascunho.sql_texto()
+            assert "DROP TABLE public.roles CASCADE;" in app.screen.rascunho.sql_texto()
     asyncio.run(roteiro())
 
 
@@ -1603,7 +1605,7 @@ def test_exportar(monkeypatch, tmp_path):
         async with app.run_test(size=(120, 40)) as piloto:
             await piloto.press("w"); await piloto.press("enter"); await piloto.pause()
     asyncio.run(roteiro())
-    assert "ALTER TABLE users RENAME TO pessoas;" in (tmp_path / "rascunho-teste-public.sql").read_text()
+    assert "ALTER TABLE public.users RENAME TO pessoas;" in (tmp_path / "rascunho-teste-public.sql").read_text()
 
 
 def test_exportar_pede_confirmacao_para_sobrescrever(monkeypatch, tmp_path):
