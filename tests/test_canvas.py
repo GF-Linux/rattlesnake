@@ -1997,3 +1997,91 @@ def test_lendo_enquanto_carrega_e_tenta_de_novo_depois_da_falha(monkeypatch, tmp
             app.screen.vigiar(); await pronto(app)
             assert app.screen.carregado and quadro.aviso_vazio == "" and app.screen.vista.tabelas
     asyncio.run(roteiro())
+
+
+def test_apagar_comeca_no_cancelar(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            await _selecionar(piloto, app, "roles")
+            await piloto.press("x"); await piloto.pause()
+            assert isinstance(app.screen, formularios.ConfirmarApagar)
+            assert app.screen.focused is not None and app.screen.focused.id == "cancelar"
+            await piloto.press("enter"); await pronto(app)            # x Enter: nada entra no rascunho
+            assert isinstance(app.screen, canvas.TelaCanvas) and app.screen.rascunho.operacoes == []
+    asyncio.run(roteiro())
+
+
+def test_confirmacao_de_aplicar_lista_o_que_apaga(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    class Fonte(FonteFalsa):
+        def consulta(self):
+            return ConsultaFalsa(linhas=12)
+
+    async def roteiro():
+        app = AppTeste(Fonte())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            await _selecionar(piloto, app, "roles")
+            await piloto.press("x"); await pronto(app); await piloto.pause(0.4); await pronto(app)
+            await piloto.click("#por_no_rascunho"); await pronto(app)
+            tela = app.screen
+            tela.rascunho.acrescentar(rascunho.ApagarColuna("t1", "t1.c5"))
+            tela.rascunho.acrescentar(rascunho.ApagarLigacao("k3"))
+            tela._mudou()
+            await piloto.press("enter"); await piloto.pause()
+            conf = app.screen
+            assert isinstance(conf, formularios.Confirmar)
+            itens = "\n".join(conf.itens)
+            assert t("canvas.d.tabela", n=12) in itens
+            assert t("canvas.d.coluna") in itens and t("canvas.d.restricao") in itens
+            assert itens.index("roles") < itens.index("password_hash")
+            await piloto.press("escape"); await piloto.pause()
+            # reaberto (sem a contagem guardada na memória): diz que não contou
+            app.screen._contagens.clear()
+            await piloto.press("enter"); await piloto.pause()
+            assert t("canvas.d.nao_contado") in "\n".join(app.screen.itens)
+    asyncio.run(roteiro())
+
+
+def test_operacao_guarda_os_nomes_da_base_e_nao_muda_de_alvo():
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.Renomear("t1", None, "pessoas"))
+    r.acrescentar(rascunho.Obrigatoria("t1", "t1.c2", True))
+    r.acrescentar(rascunho.ApagarLigacao("k3"))
+    assert r.operacoes[1].nomes == {"t1": "users", "t1.c2": "first_name"}
+    assert r.operacoes[2].nomes == {"k3": "profiles_user_id_fkey"}
+    assert r.invalidas == set()                       # a renomeação do próprio rascunho não conta
+    d = json.loads(json.dumps(r.para_dict()))
+    assert rascunho.Rascunho.de_dict(d, modelo_png()).operacoes == r.operacoes
+    # `ratt db reset` + setup: o mesmo oid agora é outra tabela, com outro nome
+    outra = modelo_png()
+    outra.tabelas["t1"].nome = "clientes"
+    assert r.rebase(outra) == {0, 1}
+    # a coluna do mesmo attnum agora é outra
+    outra = modelo_png()
+    outra.tabelas["t1"].colunas[1].nome = "apelido"
+    assert r.rebase(outra) == {1}
+    outra = modelo_png()
+    outra.ligacoes["k3"].nome = "outra_fkey"
+    assert r.rebase(outra) == {2}
+    # rascunho antigo, sem `nomes`: não há o que conferir
+    for o in d["operacoes"]:
+        del o["nomes"]
+    velho = rascunho.Rascunho.de_dict(d, modelo_png())
+    outra = modelo_png()
+    outra.tabelas["t1"].nome = "clientes"
+    assert velho.rebase(outra) == set()
+
+
+def test_nomes_malformados_sao_corrompidos():
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.Renomear("t1", None, "pessoas"))
+    d = json.loads(json.dumps(r.para_dict()))
+    d["operacoes"][0]["nomes"] = ["t1"]
+    with pytest.raises(rascunho.RascunhoCorrompido):
+        rascunho.Rascunho.de_dict(d, modelo_png())

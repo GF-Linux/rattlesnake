@@ -712,4 +712,10 @@ ratt db user passwd [name]            changes a password (no name: yours)
     "canvas.lendo": {"pt": "Lendo o banco…", "en": "Reading the database…"},
     "canvas.sem_leitura": {"pt": "Não consegui ler este schema; tento de novo a cada 2 s.",
                            "en": "Could not read this schema; retrying every 2 s."},
+    "canvas.d.titulo": {"pt": "Isto apaga:", "en": "This deletes:"},
+    "canvas.d.tabela": {"pt": "as {n} linhas dela somem junto", "en": "its {n} rows go with it"},
+    "canvas.d.nao_contado": {"pt": "linhas: não contado", "en": "rows: not counted"},
+    "canvas.d.coluna": {"pt": "os valores dela somem de todas as linhas", "en": "its values go from every row"},
+    "canvas.d.restricao": {"pt": "só a regra some, nenhum dado", "en": "only the rule goes, no data"},
+    "canvas.d.cascata": {"pt": " — e, com CASCADE, o que depende dela", "en": " — and, with CASCADE, what depends on it"},
 }

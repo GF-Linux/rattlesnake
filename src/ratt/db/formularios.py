@@ -485,6 +485,7 @@ class ConfirmarApagar(FormBase):
             lig = v.ligacoes[selecao[1]]
             nome = lig.nome or selecao[1]
         self.titulo = t("canvas.f.apagar", nome=nome)
+        self.contagem: Optional[int] = None     # linhas que somem com a tabela, quando a contagem chegou
         # ligações vivas que apontam para a tabela ou coluna: já é motivo para oferecer CASCADE
         if selecao[0] == "tabela":
             self._local = any(k.destino == selecao[1] and k.estado != "apagado" for k in v.ligacoes.values())
@@ -503,10 +504,18 @@ class ConfirmarApagar(FormBase):
         if self._local:
             self.query_one("#cascata").display = True
         super().on_mount()
+        # foco no cancelar: um `x` seguido de Enter nunca põe um DROP no rascunho antes de a pessoa ver a prévia
+        self.query_one("#cancelar", Button).focus()
 
     def depois_dos_avisos(self, avisos) -> None:
         if any(a.chave in ("chk.dependentes", "chk.precisa_cascata") for a in avisos):
             self.query_one("#cascata").display = True
+        if self.selecao[0] == "tabela":
+            # quantas linhas somem, para a confirmação do aplicar repetir; sem aviso e sem "não deu tempo" é zero
+            n = next((a.valores["n"] for a in avisos if a.chave == "chk.linhas_somem"), None)
+            if n is None and not any(a.chave == "chk.sem_tempo" and a.alvo == self.selecao[1] for a in avisos):
+                n = 0
+            self.contagem = n
 
     def operacao(self) -> rs.Operacao:
         cascata = self.query_one("#cascata", Checkbox).value

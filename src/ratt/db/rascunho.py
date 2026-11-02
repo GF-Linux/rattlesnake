@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import copy
 import re
-from dataclasses import asdict, dataclass
-from typing import ClassVar, Iterable, List, Optional, Set, Tuple
+from dataclasses import asdict, dataclass, field
+from typing import ClassVar, Dict, Iterable, List, Optional, Set, Tuple
 
 from .idioma import t
 from .modelo import Coluna, Ligacao, Modelo, Tabela
@@ -149,6 +149,9 @@ class Operacao:
 @dataclass
 class CriarTabela(Operacao):
     tabela: Tabela
+    # nome que cada tabela/coluna/ligação da base tinha quando a operação entrou: se o mesmo id passar a
+    # ter outro nome (o oid reaproveitado depois de um `ratt db reset`), a operação deixa de valer
+    nomes: Dict[str, str] = field(default_factory=dict)
     tipo: ClassVar[str] = "criar_tabela"
 
     def aplicar(self, m: Modelo) -> None:
@@ -183,6 +186,7 @@ class CriarTabela(Operacao):
 class AdicionarColuna(Operacao):
     tabela: str
     coluna: Coluna
+    nomes: Dict[str, str] = field(default_factory=dict)
     tipo: ClassVar[str] = "adicionar_coluna"
 
     def aplicar(self, m: Modelo) -> None:
@@ -208,6 +212,7 @@ class Renomear(Operacao):
     tabela: str
     coluna: Optional[str]
     novo: str
+    nomes: Dict[str, str] = field(default_factory=dict)
     tipo: ClassVar[str] = "renomear"
 
     def aplicar(self, m: Modelo) -> None:
@@ -242,6 +247,7 @@ class Obrigatoria(Operacao):
     tabela: str
     coluna: str
     sim: bool
+    nomes: Dict[str, str] = field(default_factory=dict)
     tipo: ClassVar[str] = "obrigatoria"
 
     def aplicar(self, m: Modelo) -> None:
@@ -268,6 +274,7 @@ class Unica(Operacao):
     tabela: str
     coluna: str
     sim: bool
+    nomes: Dict[str, str] = field(default_factory=dict)
     tipo: ClassVar[str] = "unica"
 
     def _nome(self, tab: Tabela, c: Coluna) -> str:
@@ -306,6 +313,7 @@ class Ligar(Operacao):
     nova_coluna: Optional[Coluna] = None
     unica: bool = False
     indice: bool = True
+    nomes: Dict[str, str] = field(default_factory=dict)
     tipo: ClassVar[str] = "ligar"
 
     def _nomes(self, m: Modelo) -> Tuple[Tabela, Tabela, List[str], List[str]]:
@@ -383,6 +391,7 @@ class LigarNN(Operacao):
     b: str
     colunas_ids: Tuple[str, str]
     ligacoes_ids: Tuple[str, str]
+    nomes: Dict[str, str] = field(default_factory=dict)
     tipo: ClassVar[str] = "ligar_nn"
 
     def _construir(self, m: Modelo) -> Tuple[Tabela, List[Ligacao]]:
@@ -435,6 +444,7 @@ class LigarNN(Operacao):
 @dataclass
 class ApagarLigacao(Operacao):
     ligacao: str
+    nomes: Dict[str, str] = field(default_factory=dict)
     tipo: ClassVar[str] = "apagar_ligacao"
 
     def aplicar(self, m: Modelo) -> None:
@@ -459,6 +469,7 @@ class ApagarColuna(Operacao):
     tabela: str
     coluna: str
     cascata: bool = False
+    nomes: Dict[str, str] = field(default_factory=dict)
     tipo: ClassVar[str] = "apagar_coluna"
 
     def aplicar(self, m: Modelo) -> None:
@@ -484,6 +495,7 @@ class ApagarColuna(Operacao):
 class ApagarTabela(Operacao):
     tabela: str
     cascata: bool = False
+    nomes: Dict[str, str] = field(default_factory=dict)
     tipo: ClassVar[str] = "apagar_tabela"
 
     def aplicar(self, m: Modelo) -> None:
@@ -516,8 +528,32 @@ def _existe(m: Modelo, id: str) -> bool:
     return dona is None or dona.estado != "apagado"
 
 
-def _valida(m: Modelo, op: Operacao) -> bool:
-    return all(_existe(m, i) for i in op.refere())
+def _nome_na_base(base: Modelo, id: str) -> Optional[str]:
+    """O nome que o id tem na base (tabela, coluna ou ligação); None se ela não o conhece."""
+    if id in base.tabelas:
+        return base.tabelas[id].nome
+    if id in base.ligacoes:
+        return base.ligacoes[id].nome
+    tab = base.tabelas.get(id.rsplit(".", 1)[0])     # coluna do catálogo: `t{oid}.c{n}` mora em `t{oid}`
+    c = tab.coluna(id) if tab is not None else None
+    if c is None:
+        achado = _achar(base, id)
+        c = achado[0] if achado is not None and isinstance(achado[0], Coluna) else None
+    return c.nome if c is not None else None
+
+
+def _mesmos_nomes(base: Modelo, op: Operacao) -> bool:
+    """O que a operação refere na base ainda tem o nome de quando ela entrou. Compara com a BASE, não com a
+    vista: uma renomeação feita no próprio rascunho não muda a base e não invalida nada."""
+    for i, nome in op.nomes.items():
+        atual = _nome_na_base(base, i)
+        if atual is not None and atual != nome:
+            return False
+    return True
+
+
+def _valida(m: Modelo, op: Operacao, base: Optional[Modelo] = None) -> bool:
+    return all(_existe(m, i) for i in op.refere()) and (base is None or _mesmos_nomes(base, op))
 
 
 # ── de e para o disco ──
@@ -575,6 +611,8 @@ def _conferir(op: Operacao) -> None:
     for i in op.refere() | op.cria():
         if not isinstance(i, str):
             raise TypeError(f"id inválido: {i!r}")
+    if not isinstance(op.nomes, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in op.nomes.items()):
+        raise TypeError(f"nomes inválidos: {op.nomes!r}")
 
 
 class Rascunho:
@@ -600,6 +638,7 @@ class Rascunho:
             op.comandos(v)          # um nome vazio ou id solto falha aqui, não no meio do export
         except KeyError as e:
             raise ValueError(f"{e}: não existe") from e
+        op.nomes = {i: n for i in sorted(op.refere()) for n in [_nome_na_base(self.base, i)] if n is not None}
         self.operacoes.append(op)
 
     def desfazer(self) -> Optional[Operacao]:
@@ -613,7 +652,7 @@ class Rascunho:
         for op in self.operacoes:
             desc, cmds = op.tipo, []
             try:
-                valida = _valida(m, op)
+                valida = _valida(m, op, self.base)
                 if valida:
                     cmds = op.comandos(m)
                     desc = " ".join(op.descricao(m).splitlines())   # uma linha só: vai para um comentário SQL

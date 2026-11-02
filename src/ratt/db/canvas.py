@@ -432,6 +432,7 @@ class TelaCanvas(Screen):
         self._sem_gravar = False            # não deu para LER o rascunho deste schema: gravar seria por cima do que não se viu
         self._sem_leitura = False           # a leitura do schema falhou e ainda não deu certo: o vigia tenta de novo
         self._tentando = False              # uma nova tentativa está no ar (o vigia não empilha outra)
+        self._contagens: Dict[str, int] = {}    # linhas de cada tabela apagada, contadas ao pôr no rascunho
         self._ultimo = 0.0
         self._timer = None
 
@@ -756,11 +757,13 @@ class TelaCanvas(Screen):
         return self.carregado
 
     def _abrir(self, form) -> None:
-        self.app.push_screen(form, self._depois_de_editar)
+        self.app.push_screen(form, lambda op: self._depois_de_editar(op, form))
 
-    def _depois_de_editar(self, op) -> None:
+    def _depois_de_editar(self, op, form=None) -> None:
         if op is None:
             return
+        if isinstance(op, _rascunho.ApagarTabela) and getattr(form, "contagem", None) is not None:
+            self._contagens[op.tabela] = form.contagem
         criada = op.tabela.id if isinstance(op, _rascunho.CriarTabela) else op.tabela_id if isinstance(op, _rascunho.LigarNN) else None
         if criada:
             self.selecao = ("tabela", criada)
@@ -893,12 +896,36 @@ class TelaCanvas(Screen):
         if not self._pode_enviar():
             return
         passos = self.rascunho.passos()
+        pergunta = t("canvas.f.aplicar_pergunta", banco=self.fonte.banco, n=len(passos))
+        destrutivas = self._destrutivas(passos)
+        if destrutivas:
+            pergunta += "\n" + t("canvas.d.titulo")
         # foco em "cancelar": um Enter que sobrou no teclado nunca grava no banco
         self.app.push_screen(
-            formularios.Confirmar(t("canvas.f.aplicar_pergunta", banco=self.fonte.banco, n=len(passos)),
-                                  [], t("canvas.f.aplicar"), foco="nao",
+            formularios.Confirmar(pergunta, destrutivas, t("canvas.f.aplicar"), foco="nao",
                                   sql=self.rascunho.sql_texto(self._cabecalho())),
             lambda sim: self._rodar(False) if sim else None)
+
+    def _destrutivas(self, passos) -> List[str]:
+        """Uma linha por operação que apaga (tabela, coluna, restrição), no alto da confirmação: o que some junto,
+        com a contagem de linhas quando ela foi feita ao pôr a operação no rascunho."""
+        linhas = []
+        for op, valida, desc, _ in passos:
+            if not valida:
+                continue
+            if isinstance(op, _rascunho.ApagarTabela):
+                n = self._contagens.get(op.tabela)
+                detalhe = t("canvas.d.tabela", n=n) if n is not None else t("canvas.d.nao_contado")
+            elif isinstance(op, _rascunho.ApagarColuna):
+                detalhe = t("canvas.d.coluna")
+            elif isinstance(op, _rascunho.ApagarLigacao) or (isinstance(op, _rascunho.Unica) and not op.sim):
+                detalhe = t("canvas.d.restricao")
+            else:
+                continue
+            if getattr(op, "cascata", False):
+                detalhe += t("canvas.d.cascata")
+            linhas.append(f"{desc} — {detalhe}")
+        return linhas
 
     def action_ensaio(self) -> None:
         if self._pode_enviar():
@@ -973,7 +1000,7 @@ class TelaCanvas(Screen):
         except OSError as e:
             self.notify(t("canvas.erro_gravar", erro=e), severity="error")
         self.rascunho = _rascunho.Rascunho(self.rascunho.modelo())
-        self.falha, self.selecao = None, None
+        self.falha, self.selecao, self._contagens = None, None, {}
         self._persistir()
         self._montar()
         self._aplicando = True
@@ -1114,7 +1141,7 @@ class TelaCanvas(Screen):
             return
         self.esquema, self.selecao, self.foco = nome, None, None
         self.posicoes, self.carregado, self.marca = {}, False, None
-        self.falha, self._sem_gravar = None, False
+        self.falha, self._sem_gravar, self._contagens = None, False, {}
         self._sem_leitura = self._tentando = False
         self.todo = self.vista = _modelo.Modelo(nome)
         self.rascunho = _rascunho.Rascunho(self.todo)
