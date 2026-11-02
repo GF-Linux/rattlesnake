@@ -98,7 +98,7 @@ class TelaBanco(App):
     #detalhes, #texto_relacoes, #texto_sql { padding: 1 1; }
     """
     BINDINGS = [
-        Binding("q", "quit", t("tui.sair")),
+        Binding("q", "sair", t("tui.sair")),
         Binding("r", "recarregar", t("tui.recarregar")),
         Binding("p", "psql", "psql"),
         Binding("d", "diagrama", t("canvas.diagrama")),
@@ -110,6 +110,10 @@ class TelaBanco(App):
         Binding("3", "aba('relacoes')", t("tui.relacoes"), show=False),
         Binding("4", "aba('sql')", "SQL", show=False),
     ]
+
+    # teclas que só valem na tela do banco: com o canvas ou uma pergunta por cima, `d` abriria outro canvas,
+    # `q` fecharia o ratt no meio de um formulário, `b` trocaria o banco debaixo do rascunho
+    SO_NA_BASE = frozenset({"sair", "recarregar", "psql", "diagrama", "trocar_banco", "pagina", "aba"})
 
     def __init__(self, porta, usuario, banco):
         super().__init__()
@@ -379,6 +383,14 @@ class TelaBanco(App):
             self.notify(t("tui.mudou"), timeout=3)
 
     # ── as teclas ───────────────────────────────────────────────────────────
+
+    def check_action(self, action, parameters):
+        if action in self.SO_NA_BASE and self.screen_stack and self.screen is not self.screen_stack[0]:
+            return False
+        return True
+
+    def action_sair(self):
+        self.exit()
 
     def action_recarregar(self):
         self.marca = None

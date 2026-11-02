@@ -8,6 +8,7 @@ do rascunho moram em `formularios.py`. Nada aqui executa DDL: o rascunho só vai
 from __future__ import annotations
 
 import getpass
+import json
 import sys
 import threading
 import time
@@ -427,6 +428,7 @@ class TelaCanvas(Screen):
         self.carregado = False          # já chegou o primeiro modelo deste schema?
         self.falha: Optional[int] = None    # operação que falhou ao aplicar; some na próxima mudança do rascunho
         self._aplicando = False             # entre o commit e a releitura: o vigia não mexe no rascunho
+        self._gravado: Optional[dict] = None    # o rascunho como está no disco, até onde esta tela sabe
         self._ultimo = 0.0
         self._timer = None
 
@@ -459,15 +461,32 @@ class TelaCanvas(Screen):
             novas = self.rascunho.rebase(m) - antes
             if novas:
                 self.notify(t("canvas.invalidas", n=len(novas)), severity="warning")
-            self._persistir()
+            if self.app.screen is self:         # coberta, a tela não grava: quem está por cima pode ter mudado o disco
+                self._persistir(so_se_mudou=True)
         self._montar(primeira)
 
+    def on_screen_resume(self) -> None:
+        """A tela voltou a ser a de cima: se o rascunho no disco não é mais o que ela gravou ou leu (outra tela
+        mexeu nele enquanto esta estava coberta), vale o do disco — um rascunho velho na memória nunca o apaga."""
+        if not self.carregado or self._aplicando:
+            return
+        try:
+            dados = guardar.ler_rascunho(self.fonte.porta, self.fonte.banco, self.esquema)
+        except _rascunho.RascunhoCorrompido:
+            dados = {}                          # diferente de qualquer coisa: `_abrir_rascunho` o põe de lado
+        if dados == self._gravado:
+            return
+        self.rascunho = self._abrir_rascunho(self.rascunho.base)
+        self._montar()
+
     def _abrir_rascunho(self, m: _modelo.Modelo) -> _rascunho.Rascunho:
+        self._gravado = None
         try:
             dados = guardar.ler_rascunho(self.fonte.porta, self.fonte.banco, self.esquema)
             if dados is None:
                 return _rascunho.Rascunho(m)
             r = _rascunho.Rascunho.de_dict(dados, m)
+            self._gravado = dados
         except _rascunho.RascunhoCorrompido:
             try:
                 caminho = guardar.separar_rascunho(self.fonte.porta, self.fonte.banco, self.esquema)
@@ -479,13 +498,20 @@ class TelaCanvas(Screen):
             self.notify(t("canvas.invalidas", n=len(r.invalidas)), severity="warning")
         return r
 
-    def _persistir(self) -> None:
-        """Grava o rascunho a cada mudança; vazio apaga o arquivo."""
+    def _persistir(self, so_se_mudou: bool = False) -> None:
+        """Grava o rascunho a cada mudança; vazio apaga o arquivo. `so_se_mudou`: nada a fazer se o disco já
+        tem exatamente isso (o rebase do vigia não reescreve o arquivo a cada volta)."""
+        dados = self.rascunho.para_dict() if self.rascunho.operacoes else None
+        if dados is not None:
+            dados = json.loads(json.dumps(dados))   # tuplas viram listas: igual ao que se lê do disco
+        if so_se_mudou and dados == self._gravado:
+            return
         try:
-            guardar.gravar_rascunho(self.fonte.porta, self.fonte.banco, self.esquema,
-                                    self.rascunho.para_dict() if self.rascunho.operacoes else None)
+            guardar.gravar_rascunho(self.fonte.porta, self.fonte.banco, self.esquema, dados)
         except OSError as erro:
             self.notify(t("canvas.erro_gravar", erro=erro), severity="error")
+            return
+        self._gravado = dados
 
     def _montar(self, primeira: bool = False) -> None:
         """Refaz `todo` (base + rascunho), o recorte do foco, os avisos e o painel, e redesenha."""

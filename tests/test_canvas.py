@@ -1750,3 +1750,83 @@ def test_trocar_de_esquema_na_janela_nao_toca_o_outro(monkeypatch, tmp_path):
     assert guardar.ler_rascunho(5432, "teste", "outro") is not None
     assert guardar.ler_posicoes(5432, "teste", "outro") == {"t1": (9, 9)}
     assert guardar.ler_rascunho(5432, "teste", "public") is None
+
+
+# ---- revisão final: correções ---------------------------------------------------------------------------------
+
+from ratt.db import tela as _tela
+
+
+class _ConFalsa:
+    def close(self):
+        pass
+
+
+class TelaBancoTeste(_tela.TelaBanco):
+    """A tela do banco sem banco: só o que importa para as teclas que abrem o canvas."""
+
+    def compose(self):
+        from textual.widgets import Static
+        yield Static("base")
+
+    def on_mount(self, evento):
+        evento.prevent_default()            # o on_mount da TelaBanco montaria a árvore e conectaria
+        self.conexao = _ConFalsa()
+
+
+def test_d_dentro_do_canvas_nao_abre_outro(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setattr(canvas, "FonteBanco", lambda *a, **k: FonteFalsa())
+
+    async def roteiro():
+        app = TelaBancoTeste(5432, "u", "teste")
+        async with app.run_test(size=(120, 40)) as piloto:
+            await piloto.press("d"); await pronto(app)
+            assert isinstance(app.screen, canvas.TelaCanvas)
+            for tecla in ("d", "b", "p", "1", "n", "r"):
+                await piloto.press(tecla); await pronto(app)
+            assert sum(isinstance(s, canvas.TelaCanvas) for s in app.screen_stack) == 1
+            assert len(app.screen_stack) == 2
+    asyncio.run(roteiro())
+
+
+def test_q_dentro_de_um_modal_nao_sai(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setattr(canvas, "FonteBanco", lambda *a, **k: FonteFalsa())
+
+    async def roteiro():
+        app = TelaBancoTeste(5432, "u", "teste")
+        async with app.run_test(size=(120, 40)) as piloto:
+            await piloto.press("d"); await pronto(app)
+            await piloto.press("s"); await pronto(app); await piloto.pause()
+            assert isinstance(app.screen, canvas.EscolherEsquema)
+            await piloto.press("q"); await piloto.pause()
+            assert app.is_running and isinstance(app.screen, canvas.EscolherEsquema)
+            await piloto.press("escape"); await piloto.pause()
+            await piloto.press("q"); await piloto.pause()           # no canvas, q volta à tela do banco
+            assert app.is_running and len(app.screen_stack) == 1
+    asyncio.run(roteiro())
+
+
+def test_canvas_coberto_nao_apaga_o_rascunho_de_outro(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    fonte = FonteFalsa()
+
+    async def roteiro():
+        app = AppTeste(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            a = app.screen
+            b = canvas.TelaCanvas(fonte, "public")
+            await app.push_screen(b); await pronto(app)
+            b.rascunho.acrescentar(rascunho.AdicionarColuna("t1", Coluna(b.rascunho.novo_id("c"), "birth", "date")))
+            b._mudou()
+            fonte.sig += 1                       # o banco muda com A coberto: A não grava nada
+            a.vigiar(); await pronto(app)
+            assert guardar.ler_rascunho(5432, "teste", "public") is not None
+            await piloto.press("escape"); await pronto(app)
+            assert app.screen is a and len(a.rascunho.operacoes) == 1      # A releu o disco ao voltar
+            fonte.sig += 1
+            a.vigiar(); await pronto(app)
+            assert len(guardar.ler_rascunho(5432, "teste", "public")["operacoes"]) == 1
+    asyncio.run(roteiro())
