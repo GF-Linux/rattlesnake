@@ -331,3 +331,116 @@ def test_rascunho_corrompido_levanta_so_rascunhocorrompido():
     for d in ruins:
         with pytest.raises(rascunho.RascunhoCorrompido):
             rascunho.Rascunho.de_dict(d, base)
+
+
+# ── Task 5: checagens e avisos ──
+
+from ratt.db import checagem
+
+
+class ConsultaFalsa:
+    def __init__(self, **respostas):
+        self.r = respostas
+        self.chamadas = []
+
+    def __getattr__(self, nome):
+        def f(*args):
+            self.chamadas.append((nome, args))
+            return self.r.get(nome, 0)
+        return f
+
+
+def test_avisos_do_modelo_png():
+    chaves = {(a.alvo, a.chave) for a in checagem.avisos_do_modelo(modelo_png())}
+    assert ("k3", "chk.fk_opcional") in chaves and ("k3", "chk.fk_sem_indice") in chaves
+    assert not any(c == "chk.sem_pk" for _, c in chaves)
+
+
+def test_sem_pk_avisa_e_texto_existe_nos_dois_idiomas():
+    m = modelo_png()
+    m.tabelas["t2"].colunas[0].pk = False
+    avisos = [a for a in checagem.avisos_do_modelo(m) if a.chave == "chk.sem_pk"]
+    assert [(a.alvo, a.nivel) for a in avisos] == [("t2", "atencao")]
+    assert "roles" in avisos[0].texto()
+
+
+def test_obrigatoria_com_nulos_impede():
+    r = rascunho.Rascunho(modelo_png())
+    avisos = checagem.avisos_da_operacao(rascunho.Obrigatoria("t1", "t1.c2", True), r, ConsultaFalsa(nulos=3))
+    assert [(a.nivel, a.chave, a.valores["n"]) for a in avisos] == [("impede", "chk.nulos_impedem", 3)]
+    assert avisos[0].texto()
+
+
+def test_coluna_do_rascunho_e_deduzida_sem_consultar():
+    r = rascunho.Rascunho(modelo_png())
+    c = modelo.Coluna(r.novo_id("c"), "apelido", "text")
+    r.acrescentar(rascunho.AdicionarColuna("t1", c))
+    falsa = ConsultaFalsa(linhas=10)
+    avisos = checagem.avisos_da_operacao(rascunho.Obrigatoria("t1", c.id, True), r, falsa)
+    assert avisos[0].chave == "chk.nulos_impedem" and avisos[0].valores["n"] == 10
+    assert all(nome != "nulos" for nome, _ in falsa.chamadas)
+
+
+def test_usa_o_nome_da_base_depois_de_renomear():
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.Renomear("t1", None, "pessoas"))
+    falsa = ConsultaFalsa()
+    checagem.avisos_da_operacao(rascunho.Unica("t1", "t1.c4", True), r, falsa)
+    assert falsa.chamadas[0] == ("repetidos", ("public", "users", "email"))
+
+
+def test_sem_tempo():
+    r = rascunho.Rascunho(modelo_png())
+    avisos = checagem.avisos_da_operacao(rascunho.Unica("t1", "t1.c4", True), r, ConsultaFalsa(repetidos=None))
+    assert avisos[0].chave == "chk.sem_tempo"
+
+
+def test_tipos_incompativeis():
+    r = rascunho.Rascunho(modelo_png())
+    lig = modelo.Ligacao(r.novo_id("k"), "t4", ("t4.c2",), "t1", ("t1.c1",), "x")     # bio (text) → users.id
+    assert any(a.chave == "chk.tipos" for a in checagem.avisos_da_operacao(rascunho.Ligar(lig), r, ConsultaFalsa()))
+
+
+def test_tipos_equivalentes_nao_avisam_e_orfaos_impedem():
+    r = rascunho.Rascunho(modelo_png())
+    r.base.tabelas["t4"].coluna("t4.c4").tipo = "int8"
+    lig = modelo.Ligacao(r.novo_id("k"), "t4", ("t4.c4",), "t1", ("t1.c1",), "x", )
+    avisos = checagem.avisos_da_operacao(rascunho.Ligar(lig, unica=True), r, ConsultaFalsa(orfaos=2))
+    assert [a.chave for a in avisos] == ["chk.orfaos_impedem", "chk.um_para_um"]
+    assert avisos[0].valores["n"] == 2
+
+
+def test_obrigatoria_sem_padrao_em_tabela_com_linhas():
+    r = rascunho.Rascunho(modelo_png())
+    c = modelo.Coluna(r.novo_id("c"), "x", "int", obrigatoria=True)
+    avisos = checagem.avisos_da_operacao(rascunho.AdicionarColuna("t1", c), r, ConsultaFalsa(linhas=5))
+    assert [(a.nivel, a.chave) for a in avisos] == [("impede", "chk.obrigatoria_sem_padrao")]
+    assert checagem.avisos_da_operacao(rascunho.AdicionarColuna("t1", c), r, ConsultaFalsa(linhas=0)) == []
+
+
+def test_tabela_nova_nao_consulta():
+    r = rascunho.Rascunho(modelo_png())
+    nova = modelo.Tabela(r.novo_id("t"), "public", "nova", [modelo.Coluna(r.novo_id("c"), "id", "int")])
+    r.acrescentar(rascunho.CriarTabela(nova))
+    falsa = ConsultaFalsa(nulos=9, linhas=9)
+    assert checagem.avisos_da_operacao(rascunho.Obrigatoria(nova.id, nova.colunas[0].id, True), r, falsa) == []
+    assert checagem.avisos_da_operacao(rascunho.ApagarTabela(nova.id), r, falsa) == []
+    assert falsa.chamadas == []
+
+
+def test_apagar_tabela_com_dependentes_pede_cascata():
+    r = rascunho.Rascunho(modelo_png())
+    falsa = ConsultaFalsa(dependentes=["tabela profiles (chave estrangeira x)"], linhas=4)
+    avisos = checagem.avisos_da_operacao(rascunho.ApagarTabela("t1"), r, falsa)
+    assert [(a.nivel, a.chave) for a in avisos] == [
+        ("atencao", "chk.dependentes"), ("impede", "chk.precisa_cascata"), ("atencao", "chk.linhas_somem")]
+    assert ("dependentes", (1, None)) in falsa.chamadas
+    avisos = checagem.avisos_da_operacao(rascunho.ApagarTabela("t1", cascata=True), r, falsa)
+    assert [a.chave for a in avisos] == ["chk.dependentes", "chk.linhas_somem"]
+
+
+def test_apagar_coluna_consulta_pelo_attnum():
+    r = rascunho.Rascunho(modelo_png())
+    falsa = ConsultaFalsa()
+    assert checagem.avisos_da_operacao(rascunho.ApagarColuna("t1", "t1.c4"), r, falsa) == []
+    assert ("dependentes", (1, 4)) in falsa.chamadas

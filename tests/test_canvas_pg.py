@@ -141,3 +141,48 @@ def test_indice_unico_da_cardinalidade_um_para_um(banco):
     m = catalogo.modelo(banco, "public")
     (lig,) = m.ligacoes.values()
     assert modelo.cardinalidade(m, lig) == "1:1"
+
+
+# ── Task 5: checagens só de leitura ──
+
+from ratt.db import checagem
+
+
+def test_consulta_real(banco):
+    banco.execute(PNG_SQL)
+    banco.execute("INSERT INTO users (email) VALUES ('a'), ('a'), ('b')")
+    banco.execute("INSERT INTO profiles (user_id) VALUES (1)")
+    c = checagem.Consulta(banco)
+    assert c.linhas("public", "users") == 3 and c.nulos("public", "users", "first_name") == 3
+    assert c.repetidos("public", "users", "email") == 1
+    assert c.orfaos("public", "profiles", "user_id", "public", "users", "id") == 0
+    oid = banco.execute("SELECT 'users'::regclass::oid").fetchone()[0]
+    assert any("profiles" in d for d in c.dependentes(oid))
+
+
+def test_consulta_dependentes_de_coluna_e_view(banco):
+    banco.execute(PNG_SQL)
+    banco.execute("CREATE VIEW v_x AS SELECT email FROM users")
+    c = checagem.Consulta(banco)
+    oid = banco.execute("SELECT 'users'::regclass::oid").fetchone()[0]
+    assert "view v_x" in c.dependentes(oid)
+    attnum = banco.execute("SELECT attnum FROM pg_attribute WHERE attrelid = %s AND attname = 'email'",
+                           (oid,)).fetchone()[0]
+    assert c.dependentes(oid, attnum) == ["view v_x"]
+    attnum = banco.execute("SELECT attnum FROM pg_attribute WHERE attrelid = %s AND attname = 'id'",
+                           (oid,)).fetchone()[0]
+    assert any("chave estrangeira" in d for d in c.dependentes(oid, attnum))
+
+
+def test_consulta_orfaos_e_nome_com_aspas(banco):
+    banco.execute('CREATE TABLE "Pai" (id int)')
+    banco.execute('CREATE TABLE "order" (p int)')
+    banco.execute('INSERT INTO "order" VALUES (1), (2), (NULL)')
+    banco.execute('INSERT INTO "Pai" VALUES (1)')
+    assert checagem.Consulta(banco).orfaos("public", "order", "p", "public", "Pai", "id") == 1
+
+
+def test_consulta_respeita_tempo_limite(banco):
+    banco.execute("CREATE TABLE grande AS SELECT g AS x FROM generate_series(1, 3000000) g")
+    assert checagem.Consulta(banco, limite_ms=1).repetidos("public", "grande", "x") is None
+    assert checagem.Consulta(banco).linhas("public", "grande") == 3000000      # a conexão segue de pé
