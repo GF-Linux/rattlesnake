@@ -7,6 +7,8 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 
+from ratt.db import modelo as _modelo
+
 # os esquemas do próprio PostgreSQL ficam de fora da árvore
 _SEM_SISTEMA = "n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_(toast|temp)'"
 
@@ -64,12 +66,73 @@ def assinatura(conexao):
           (SELECT md5(coalesce(string_agg(c.oid || c.relname || c.relkind::text, ',' ORDER BY c.oid), ''))
              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE c.relkind IN ('r', 'p', 'f', 'v', 'm', 'S') AND {_SEM_SISTEMA}),
-          (SELECT md5(coalesce(string_agg(a.attrelid || a.attname || a.atttypid::text, ',' ORDER BY a.attrelid, a.attnum), ''))
+          (SELECT md5(coalesce(string_agg(a.attrelid || a.attname || a.atttypid::text || a.attnotnull::text, ',' ORDER BY a.attrelid, a.attnum), ''))
              FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r', 'p', 'v', 'm') AND {_SEM_SISTEMA}),
           (SELECT md5(coalesce(string_agg(p.oid::text, ',' ORDER BY p.oid), ''))
              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE {_SEM_SISTEMA}),
+          (SELECT md5(coalesce(string_agg(k.oid || k.conname || k.contype::text || k.conrelid::text, ',' ORDER BY k.oid), ''))
+             FROM pg_constraint k JOIN pg_namespace n ON n.oid = k.connamespace WHERE {_SEM_SISTEMA}),
           (SELECT coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0) FROM pg_stat_user_tables)""").fetchone()
+
+
+def esquemas_com_tabelas(conexao):
+    """Os nomes dos esquemas que não são do sistema, o public primeiro."""
+    nomes = [n for (n,) in conexao.execute(f"SELECT n.nspname FROM pg_namespace n WHERE {_SEM_SISTEMA}")]
+    return sorted(nomes, key=lambda n: (n != "public", n))
+
+
+_AO_APAGAR = {"a": "NO ACTION", "r": "RESTRICT", "c": "CASCADE", "n": "SET NULL", "d": "SET DEFAULT"}
+
+
+def modelo(conexao, esquema):
+    """O esquema inteiro como um Modelo, em quatro consultas — não importa quantas tabelas tenha.
+    Partições ficam de fora (a tabela mãe conta quantas são); chaves estrangeiras para outro
+    esquema também, porque o desenho só tem as tabelas deste."""
+    m = _modelo.Modelo(esquema)
+    por_oid = {}
+    for oid, nome, linhas, particoes in conexao.execute("""
+            SELECT c.oid, c.relname, c.reltuples::bigint,
+                   CASE WHEN c.relkind = 'p' THEN (SELECT count(*) FROM pg_inherits i WHERE i.inhparent = c.oid) ELSE 0 END
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s AND c.relkind IN ('r', 'p', 'f') AND NOT c.relispartition
+            ORDER BY c.relname""", (esquema,)):
+        t = _modelo.Tabela("t%d" % oid, esquema, nome, [], linhas if linhas is not None and linhas >= 0 else None,
+                           int(particoes))
+        m.tabelas[t.id] = t
+        por_oid[oid] = t
+    if not por_oid:
+        return m
+    oids = list(por_oid)
+    for oid, num, nome, tipo, nn, padrao, ident in conexao.execute("""
+            SELECT a.attrelid, a.attnum, a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull,
+                   pg_get_expr(d.adbin, d.adrelid), a.attidentity <> ''
+            FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+            WHERE a.attrelid = ANY (%s) AND a.attnum > 0 AND NOT a.attisdropped
+            ORDER BY a.attrelid, a.attnum""", (oids,)):
+        por_oid[oid].colunas.append(_modelo.Coluna("t%d.c%d" % (oid, num), nome, tipo, nn, padrao, ident))
+    colunas_por_id = {c.id: c for t in por_oid.values() for c in t.colunas}
+    for oid, coid, nome, tipo, conkey, confrelid, confkey, apagar in conexao.execute("""
+            SELECT conrelid, oid, conname, contype, conkey, confrelid, confkey, confdeltype
+            FROM pg_constraint WHERE conrelid = ANY (%s) AND contype IN ('p', 'u', 'f')
+            ORDER BY oid""", (oids,)):
+        ids = tuple("t%d.c%d" % (oid, n) for n in conkey)
+        if tipo == "p":
+            por_oid[oid].nome_pk = nome
+            for i in ids:
+                colunas_por_id[i].pk = True
+        elif tipo == "u" and len(ids) == 1:
+            colunas_por_id[ids[0]].unica = True
+            colunas_por_id[ids[0]].nome_unica = nome
+        elif tipo == "f" and confrelid in por_oid:
+            lig = _modelo.Ligacao("k%d" % coid, "t%d" % oid, ids, "t%d" % confrelid,
+                                  tuple("t%d.c%d" % (confrelid, n) for n in confkey), nome,
+                                  _AO_APAGAR.get(apagar, "NO ACTION"))
+            m.ligacoes[lig.id] = lig
+    for oid, num in conexao.execute("""
+            SELECT indrelid, indkey[0] FROM pg_index WHERE indrelid = ANY (%s) AND indkey[0] > 0""", (oids,)):
+        colunas_por_id["t%d.c%d" % (oid, num)].indexada = True
+    return m
 
 
 @dataclass
