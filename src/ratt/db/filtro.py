@@ -327,7 +327,8 @@ _DOLAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
 
 
 def validar_texto(texto: str) -> None:
-    """O texto livre é uma expressão só: sem `;` nem comentário fora de aspas, aspas e parênteses fechados."""
+    """O texto livre é uma expressão só: sem `;` nem comentário fora de aspas, aspas e parênteses fechados, e sem
+    barra invertida numa string comum `'…'` (E-strings e `$$…$$` têm regras próprias e valem)."""
     if not texto.strip():
         raise ValueError(t("filtro.e.texto_vazio"))
     i, n, nivel = 0, len(texto), 0
@@ -345,6 +346,10 @@ def validar_texto(texto: str) -> None:
                     raise ValueError(t("filtro.e.texto_aspa"))
                 if escapa and texto[i] == "\\":
                     i += 2
+                elif ch == "'" and texto[i] == "\\":
+                    # numa string comum o sentido da barra depende de standard_conforming_strings: o validador e o
+                    # servidor poderiam ver aspas diferentes. Quem precisa de barra usa E'…' ou $$…$$.
+                    raise ValueError(t("filtro.e.texto_barra"))
                 elif texto[i] == ch:
                     if texto.startswith(ch * 2, i):
                         i += 2

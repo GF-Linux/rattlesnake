@@ -313,10 +313,33 @@ def test_espacos_e_vazios_de_fora(banco):
     c = {col.nome: col.id for col in t.colunas}
     consulta = checagem.Consulta(banco)
     g = filtro.Filtro([filtro.Condicao(c["nome"], "comeca", ["G"])])
-    assert [(a.chave, a.valores["n"]) for a in checagem.avisos_do_filtro(g, m, t.id, consulta)] == [("chk.espacos_nas_pontas", 1)]
+    r = rascunho.Rascunho(m)
+    assert [(a.chave, a.valores["n"]) for a in checagem.avisos_do_filtro(g, r, t.id, consulta)] == [("chk.espacos_nas_pontas", 1)]
     d = filtro.Filtro([filtro.Condicao(c["idade"], "diferente", ["30"])])
-    assert [(a.chave, a.valores["n"], a.valores["coluna"]) for a in checagem.avisos_do_filtro(d, m, t.id, consulta)] == \
+    assert [(a.chave, a.valores["n"], a.valores["coluna"]) for a in checagem.avisos_do_filtro(d, r, t.id, consulta)] == \
         [("chk.vazios_de_fora", 1, "idade")]
+
+
+def test_vazios_e_espacos_contam_so_quem_o_filtro_inteiro_deixa_de_fora(banco):
+    """Os exemplos da revisão: com OU, Giovana (idade vazia) entra pela outra condição; com E, só conta quem passaria
+    pelas outras condições."""
+    banco.execute(PESSOAS_SQL)
+    r = rascunho.Rascunho(catalogo.modelo(banco, "public"))
+    t = r.base.por_nome("pessoas")
+    c = {col.nome: col.id for col in t.colunas}
+    consulta = checagem.Consulta(banco)
+    idade = filtro.Condicao(c["idade"], "diferente", ["30"])
+
+    def chaves(*conds, conectivo="E"):
+        return [(a.chave, a.valores["n"]) for a in checagem.avisos_do_filtro(filtro.Filtro(list(conds), conectivo), r, t.id, consulta)]
+    assert chaves(idade, filtro.Condicao(c["nome"], "comeca", ["Gi"]), conectivo="OU") == []
+    assert chaves(idade, filtro.Condicao(c["nome"], "comeca", ["A"])) == []
+    assert chaves(idade, filtro.Condicao(c["nome"], "comeca", ["Gi"])) == [("chk.vazios_de_fora", 1)]
+    g = filtro.Condicao(c["nome"], "comeca", ["G"])
+    # ' Gustavo' (40) sairia de qualquer jeito pela idade; Giovana (G, idade vazia) sai só pelo vazio
+    assert chaves(g, filtro.Condicao(c["idade"], "maior", ["100"])) == [("chk.vazios_de_fora", 1)]
+    assert chaves(g, filtro.Condicao(c["idade"], "maior", ["35"])) == [("chk.vazios_de_fora", 1), ("chk.espacos_nas_pontas", 1)]
+    assert chaves(g, filtro.Condicao(c["idade"], "igual", ["40"]), conectivo="OU") == []   # entra pela idade
 
 
 def test_contagem_e_o_que_o_comando_pega(banco):
@@ -353,7 +376,7 @@ def test_avisos_reais_de_apagar_e_inserir(banco):
     avisos = checagem.avisos_da_operacao(rascunho.Inserir(pedidos.id, {pid: "99"}), r, consulta)
     assert ("impede", "chk.fk_inexistente") in _chaves(avisos)
     avisos = checagem.avisos_da_operacao(rascunho.Apagar(t, filtro.Filtro(texto="xis > 1")), r, consulta)
-    assert ("atencao", "chk.consulta_falhou") in _chaves(avisos) and "xis" in [a for a in avisos if a.chave == "chk.consulta_falhou"][0].texto()
+    assert ("impede", "chk.consulta_falhou") in _chaves(avisos) and "xis" in [a for a in avisos if a.chave == "chk.consulta_falhou"][0].texto()
 
 
 def test_renomeada_no_rascunho_conta_com_o_nome_do_banco(banco):
@@ -394,3 +417,112 @@ def test_pagina_contar_linhas_pai_e_versao(banco):
     assert [v for v, _ in catalogo.linhas_pai(banco, "public", "pedidos", "id", "")] == [1, 2, 3]
     assert catalogo.linhas_pai(banco, "public", "pedidos", "id", "2") == [(2, "2")]
     assert catalogo.versao(banco) == banco.info.server_version >= 130000
+
+
+# ── revisão: nada escapa do somente leitura, cascata em profundidade, tempo na grade ──
+
+_ESCAPES = ("true; COMMIT; DELETE FROM public.pedidos WHERE id = 1; SELECT 1",
+            "true; ROLLBACK; DELETE FROM public.pedidos WHERE id = 2; SELECT 1",
+            "true; COMMIT; DELETE FROM public.pedidos; SELECT 1 --")
+
+
+def _intacto(banco):
+    assert banco.execute("SELECT count(*) FROM public.pedidos").fetchone()[0] == 3
+    assert banco.execute("SELECT current_setting('transaction_read_only'), current_setting('statement_timeout')"
+                         ).fetchone() == ("off", "0")
+
+
+def test_varios_comandos_no_where_nao_escapam(banco):
+    banco.execute(PESSOAS_SQL)
+    c = checagem.Consulta(banco)
+    for onde in _ESCAPES:
+        assert c.contar_onde("public", "pessoas", onde) is None and c.erro()
+        assert c.amostra("public", "pessoas", onde, ["nome"]) is None
+        assert c.antes_depois("public", "pessoas", onde, {"nome": "trim(nome)"}) is None
+        assert c.grupos_repetidos("public", "pessoas", onde, ["nome"]) is None
+        assert c.cascata("public", "pessoas", onde) is None
+        with pytest.raises(psycopg.Error):
+            catalogo.pagina(banco, "public", "pessoas", onde, ["id"], 0, 10)
+        with pytest.raises(psycopg.Error):
+            catalogo.contar_filtrado(banco, "public", "pessoas", onde)
+        _intacto(banco)
+    assert c.contar_onde("public", "pessoas", "nome ILIKE 'G%'") == 2              # o `%` segue sem escape
+
+
+@pytest.mark.parametrize("conforme", ["on", "off"])
+def test_barra_em_string_comum_nao_engana_o_validador(banco, conforme):
+    banco.execute(PESSOAS_SQL)
+    banco.execute(f"SET standard_conforming_strings = {conforme}")
+    r = rascunho.Rascunho(catalogo.modelo(banco, "public"))
+    t = r.base.por_nome("pessoas").id
+    texto = "nome = '\\'' OR true); COMMIT; DELETE FROM public.pedidos; SELECT ('\\''"
+    with pytest.raises(ValueError):
+        filtro.validar_texto(texto)
+    with pytest.raises(ValueError):
+        checagem.avisos_da_operacao(rascunho.Apagar(t, filtro.Filtro(texto=texto)), r, checagem.Consulta(banco))
+    assert checagem.Consulta(banco).contar_onde("public", "pessoas", "(" + texto + ")") is None   # mesmo sem o validador
+    banco.execute("SET standard_conforming_strings = on")
+    _intacto(banco)
+
+
+def _cascata_sql(banco):
+    banco.execute(PESSOAS_SQL)
+    banco.execute("""
+        CREATE TABLE public.itens (id int PRIMARY KEY, pedido_id bigint REFERENCES public.pedidos (id) ON DELETE CASCADE);
+        CREATE TABLE public.notas_item (id int PRIMARY KEY, item_id int REFERENCES public.itens (id) ON DELETE RESTRICT);
+        CREATE SCHEMA outro;
+        CREATE TABLE outro.cartas (id int, pessoa_id bigint REFERENCES public.pessoas (id));
+        CREATE TABLE public.apelidos (id int, pessoa_id bigint NOT NULL REFERENCES public.pessoas (id) ON DELETE SET NULL);
+        CREATE TABLE public.chefes (id int PRIMARY KEY, chefe int REFERENCES public.chefes (id) ON DELETE CASCADE,
+                                    pessoa_id bigint REFERENCES public.pessoas (id) ON DELETE CASCADE);
+        INSERT INTO public.itens VALUES (1, 1), (2, 1), (3, 2), (4, 3);
+        INSERT INTO public.notas_item VALUES (1, 4);
+        INSERT INTO outro.cartas VALUES (1, 3);
+        INSERT INTO public.apelidos VALUES (1, 4);
+        INSERT INTO public.chefes VALUES (1, NULL, 5), (2, 1, NULL), (3, 2, NULL);
+    """)
+
+
+def test_cascata_segue_netos_outro_schema_e_set_null_em_obrigatoria(banco):
+    _cascata_sql(banco)
+    c = checagem.Consulta(banco)
+    assert sorted(c.cascata("public", "pessoas", "id = 1")) == [("public.itens", "CASCADE", 3),
+                                                                 ("public.pedidos", "CASCADE", 2)]
+    assert ("public.notas_item", "RESTRICT", 1) in c.cascata("public", "pessoas", "id = 2")      # neto que impede
+    assert ("outro.cartas", "NO ACTION", 1) in c.cascata("public", "pessoas", "id = 3")         # outro schema
+    assert ("public.apelidos", checagem.NULO_EM_OBRIGATORIA, 1) in c.cascata("public", "pessoas", "id = 4")
+    assert ("public.chefes", "CASCADE", 3) in c.cascata("public", "pessoas", "id = 5")          # o ciclo termina
+    r = rascunho.Rascunho(catalogo.modelo(banco, "public"))
+    t = r.base.por_nome("pessoas").id
+    for onde, chave in (("id = 2", "chk.impede_filhos"), ("id = 3", "chk.impede_filhos"), ("id = 4", "chk.cascata_nulo_impede")):
+        avisos = checagem.avisos_da_operacao(rascunho.Apagar(t, filtro.Filtro(texto=onde)), r, c)
+        assert ("impede", chave) in _chaves(avisos), onde
+        with pytest.raises(psycopg.Error):                       # e o PostgreSQL recusa de verdade
+            with banco.transaction(force_rollback=True):
+                banco.execute(f"DELETE FROM public.pessoas WHERE {onde}")
+    avisos = checagem.avisos_da_operacao(rascunho.Apagar(t, filtro.Filtro(texto="id = 1")), r, c)
+    assert not any(a.nivel == "impede" for a in avisos)
+    assert [(a.valores["tabela"], a.valores["n"]) for a in avisos if a.chave == "chk.cascata_apaga"] == \
+        [("public.pedidos", 2), ("public.itens", 3)]
+
+
+def test_alterar_unica_nao_se_acusa_a_si_mesma(banco):
+    r, t, c = preparar(banco)
+    consulta = checagem.Consulta(banco)
+    op = rascunho.Alterar(t, filtro.Filtro(texto="id = 2"), {c["email"]: rascunho.Mudanca("valor", "ana@x.com"),
+                                                            c["idade"]: rascunho.Mudanca("valor", "99")})
+    avisos = checagem.avisos_da_operacao(op, r, consulta)
+    assert checagem.contagem(avisos) == 1 and not any(a.nivel == "impede" for a in avisos)
+    op = rascunho.Alterar(t, filtro.Filtro(texto="id = 1"), {c["email"]: rascunho.Mudanca("valor", "ana@x.com")})
+    assert ("impede", "chk.ja_existe") in _chaves(checagem.avisos_da_operacao(op, r, consulta))
+
+
+def test_grade_com_tempo_limite(banco):
+    banco.execute("CREATE TABLE grande AS SELECT g AS x, g::text AS t FROM generate_series(1, 3000000) g")
+    assert catalogo.contar_filtrado(banco, "public", "grande", "x % 7 = 3", limite_ms=1) is None
+    with pytest.raises(psycopg.errors.QueryCanceled):
+        catalogo.pagina(banco, "public", "grande", "x % 7 = 3", ["t"], 0, 10, limite_ms=1)
+    assert catalogo.linhas_pai(banco, "public", "grande", "x", "77", limite_ms=1) is None
+    assert catalogo.contar_filtrado(banco, "public", "grande", "x <= 10") == 10        # a conexão segue de pé
+    assert catalogo.linhas_pai(banco, "public", "grande", "x", "", limite=2) == [(1, "1"), (2, "2")]
+    assert banco.execute("SELECT current_setting('statement_timeout')").fetchone()[0] == "0"

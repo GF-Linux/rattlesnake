@@ -323,7 +323,8 @@ def test_e_string_depois_de_nome_com_dolar_ou_acento():
     for nome in ("a$", "café", "x$y"):
         sql = f"SELECT {nome}E'\\'; SELECT 2"       # identificador + string comum: a barra não escapa a aspa
         assert [c.texto for c in rodar.dividir(sql)] == [f"SELECT {nome}E'\\'", "SELECT 2"], nome
-        filtro.validar_texto(f"{nome}E'\\' = 'x'")
+        with pytest.raises(ValueError):                 # barra numa string comum: o sentido depende do servidor
+            filtro.validar_texto(f"{nome}E'\\' = 'x'")
     assert [c.texto for c in rodar.dividir("SELECT E'\\'; SELECT 2")] == ["SELECT E'\\'; SELECT 2"]   # E de verdade
     with pytest.raises(ValueError):
         filtro.validar_texto("E'\\'; DROP TABLE x")
@@ -621,12 +622,13 @@ def test_apagar_com_filhos_que_impedem_e_sugestao_de_soft_delete():
     assert [(a.nivel, a.valores["n"], a.valores["tabela"]) for a in impede] == [("impede", 2, "public.pedidos")]
     assert ("info", "chk.soft_delete") in _chaves(avisos)                 # pessoas tem `ativo`
     nome, args = [c for c in falsa.chamadas if c[0] == "cascata"][0]
-    assert args[2] == "nome ILIKE 'G%'" and [l.id for l in args[3]] == ["k1"]
-    for acao, chave in (("CASCADE", "chk.cascata_apaga"), ("SET NULL", "chk.cascata_esvazia"),
-                        ("SET DEFAULT", "chk.cascata_padrao")):
+    assert args == ("public", "pessoas", "nome ILIKE 'G%'")
+    for acao, nivel, chave in (("CASCADE", "atencao", "chk.cascata_apaga"), ("SET NULL", "atencao", "chk.cascata_esvazia"),
+                               ("SET DEFAULT", "atencao", "chk.cascata_padrao"), ("RESTRICT", "impede", "chk.impede_filhos"),
+                               (checagem.NULO_EM_OBRIGATORIA, "impede", "chk.cascata_nulo_impede")):
         avisos = checagem.avisos_da_operacao(rascunho.Apagar("t1", _G()), r,
                                              ConsultaFalsa(contar_onde=1, cascata=[("public.pedidos", acao, 3)]))
-        assert ("atencao", chave) in _chaves(avisos)
+        assert (nivel, chave) in _chaves(avisos), acao
     avisos = checagem.avisos_da_operacao(rascunho.Apagar("t1", _G()), r,
                                          ConsultaFalsa(contar_onde=1, cascata=[("public.pedidos", "RESTRICT", 0)]))
     assert not any(a.chave == "chk.impede_filhos" for a in avisos)
@@ -670,8 +672,11 @@ def test_alterar_contagem_obrigatoria_e_unica():
     assert ("info", "chk.linhas_alteradas") in ch and checagem.contagem(avisos) == 3
     assert ("impede", "chk.unica_varias") in ch and ("impede", "chk.obrigatoria_recebe_vazio") in ch
     op = rascunho.Alterar("t1", _G(), {"t1.c4": rascunho.Mudanca("valor", "a@x.com")})
-    avisos = checagem.avisos_da_operacao(op, r, ConsultaFalsa(contar_onde=1, valor_valido=True, ja_existe=1))
+    falsa = ConsultaFalsa(contar_onde=1, valor_valido=True)
+    avisos = checagem.avisos_da_operacao(op, r, falsa)
     assert ("impede", "chk.ja_existe") in _chaves(avisos) and ("impede", "chk.unica_varias") not in _chaves(avisos)
+    # quem o próprio UPDATE pega não conta como "já existe": só as linhas fora do WHERE dele
+    assert ("contar_onde", ("public", "pessoas", f"email = 'a@x.com' AND ({op.onde(r.base)}) IS NOT TRUE")) in falsa.chamadas
     op = rascunho.Alterar("t2", filtro.Filtro(), {"t2.c2": rascunho.Mudanca("valor", "42")})
     avisos = checagem.avisos_da_operacao(op, r, ConsultaFalsa(contar_onde=2, valor_valido=True, ja_existe=0))
     assert ("impede", "chk.fk_inexistente") in _chaves(avisos)
@@ -722,7 +727,7 @@ def test_coluna_do_rascunho_so_depois_de_aplicar_sem_consultar():
         assert not any(a.chave == "chk.aproximada" for a in avisos)
         assert falsa.chamadas == []
     falsa = ConsultaFalsa()
-    assert _chaves(checagem.avisos_do_filtro(f, r.base, "t1", falsa)) == [("info", "chk.so_depois_de_aplicar")]
+    assert _chaves(checagem.avisos_do_filtro(f, r, "t1", falsa)) == [("info", "chk.so_depois_de_aplicar")]
     assert falsa.chamadas == []
 
 
@@ -744,24 +749,51 @@ def test_sem_tempo_e_consulta_que_falhou():
     avisos = checagem.avisos_da_operacao(rascunho.Apagar("t1", filtro.Filtro(texto="xis > 1")), r,
                                          ConsultaFalsa(contar_onde=None, cascata=[], erro="column \"xis\" does not exist"))
     falhou = [a for a in avisos if a.chave == "chk.consulta_falhou"]
-    assert falhou and "xis" in falhou[0].texto()
+    assert falhou and "xis" in falhou[0].texto() and falhou[0].nivel == "impede"   # o aplicar falharia igual
 
 
 def test_avisos_do_filtro_sem_banco():
-    m = modelo_pessoas()
+    r = rascunho.Rascunho(modelo_pessoas())
     f = filtro.Filtro([filtro.Condicao("t1.c3", "fora_lista", ["", "7"])])
     falsa = ConsultaFalsa(contar_onde=1)
-    avisos = checagem.avisos_do_filtro(f, m, "t1", falsa)
+    avisos = checagem.avisos_do_filtro(f, r, "t1", falsa)
     assert ("atencao", "chk.fora_lista_vazio") in _chaves(avisos)
     vazios = [a for a in avisos if a.chave == "chk.vazios_de_fora"]
     assert [(a.valores["n"], a.valores["coluna"]) for a in vazios] == [(1, "idade")]
-    assert ("contar_onde", ("public", "pessoas", "idade IS NULL")) in falsa.chamadas
+    assert ("contar_onde", ("public", "pessoas", "idade IS NULL AND (idade NOT IN (NULL, 7)) IS NOT TRUE")) in falsa.chamadas
     falsa = ConsultaFalsa(contar_onde=1)
-    avisos = checagem.avisos_do_filtro(_G(), m, "t1", falsa)
+    avisos = checagem.avisos_do_filtro(_G(), r, "t1", falsa)
     assert _chaves(avisos) == [("atencao", "chk.espacos_nas_pontas")]
-    assert falsa.chamadas == [("contar_onde", ("public", "pessoas", "trim(nome) ILIKE 'G%' AND NOT (nome ILIKE 'G%')"))]
-    assert checagem.avisos_do_filtro(_G(), m, "t1", ConsultaFalsa(contar_onde=0)) == []
-    assert checagem.avisos_do_filtro(filtro.Filtro(texto="idade > 1"), m, "t1", ConsultaFalsa()) == []
+    assert falsa.chamadas == [("contar_onde", ("public", "pessoas",
+                                              "(trim(nome) ILIKE 'G%') IS TRUE AND (nome ILIKE 'G%') IS NOT TRUE"))]
+    assert checagem.avisos_do_filtro(_G(), r, "t1", ConsultaFalsa(contar_onde=0)) == []
+    assert checagem.avisos_do_filtro(filtro.Filtro(texto="idade > 1"), r, "t1", ConsultaFalsa()) == []
+
+
+def test_vazios_de_fora_so_conta_quem_sai_por_causa_da_condicao():
+    r = rascunho.Rascunho(modelo_pessoas())
+    idade, gi = filtro.Condicao("t1.c3", "diferente", ["30"]), filtro.Condicao("t1.c2", "comeca", ["Gi"])
+    falsa = ConsultaFalsa(contar_onde=0)
+    checagem.avisos_do_filtro(filtro.Filtro([idade, gi]), r, "t1", falsa)          # E: as outras condições valendo
+    assert ("contar_onde", ("public", "pessoas", "(nome ILIKE 'Gi%') AND idade IS NULL AND "
+                                                 "((idade <> 30) AND (nome ILIKE 'Gi%')) IS NOT TRUE")) in falsa.chamadas
+    falsa = ConsultaFalsa(contar_onde=0)
+    checagem.avisos_do_filtro(filtro.Filtro([idade, gi], conectivo="OU"), r, "t1", falsa)   # OU: a condição sozinha bastaria
+    assert ("contar_onde", ("public", "pessoas", "idade IS NULL AND ((idade <> 30) OR (nome ILIKE 'Gi%')) IS NOT TRUE")) \
+        in falsa.chamadas
+    falsa = ConsultaFalsa(contar_onde=0)
+    checagem.avisos_do_filtro(filtro.Filtro([_G().condicoes[0], idade], conectivo="OU"), r, "t1", falsa)
+    assert ("contar_onde", ("public", "pessoas", "((trim(nome) ILIKE 'G%') OR (idade <> 30)) IS TRUE AND "
+                                                 "((nome ILIKE 'G%') OR (idade <> 30)) IS NOT TRUE")) in falsa.chamadas
+
+
+def test_barra_em_string_comum_e_recusada_no_texto_livre():
+    for ruim in ("nome = 'a\\b'", "nome = '\\'' OR true); COMMIT; DELETE FROM public.pedidos; SELECT ('\\''",
+                 "nome = U&'d\\0061t'"):
+        with pytest.raises(ValueError):
+            filtro.validar_texto(ruim)
+    for bom in ("nome = E'a\\\\b'", "nome = E'it\\'s'", "nome = $$a\\b$$", '"co\\l" = 1', "nome = 'sem barra'"):
+        filtro.validar_texto(bom)
 
 
 def test_tipo_seguro_para_o_cast():

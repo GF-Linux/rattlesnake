@@ -307,60 +307,78 @@ def somente_leitura(conexao, limite_ms=None):
 
 def onde_sql(onde):
     """` WHERE <onde>` como SQL cru ("" sem filtro). O texto vem de `filtro.where` (valores já citados) ou é o
-    WHERE que a pessoa escreveu; por isso a consulta roda sem parâmetros (um `%` do LIKE não vira marcador)."""
+    WHERE que a pessoa escreveu. Quem o usa roda a consulta com `executar`: sem parâmetros (um `%` do LIKE não vira
+    marcador) e pelo protocolo estendido (um `; COMMIT; DELETE …` escondido no WHERE é recusado, não executado)."""
     from psycopg import sql
     return sql.SQL(" WHERE ") + sql.SQL(onde) if onde else sql.SQL("")
 
 
-def pagina(conexao, esquema, tabela, onde, ordem, deslocamento, limite):
-    """(colunas, tipos, linhas) de uma página das linhas filtradas, em transação somente leitura. `ordem` são as
-    colunas da chave primária; vazia, a página sai sem ORDER BY (a ordem não é estável)."""
+def executar(alvo, consulta, params=None):
+    """`execute` sempre pelo protocolo estendido (`prepare=True`): ele aceita um comando só. O protocolo simples,
+    que o psycopg usa quando não há parâmetros, rodaria vários — e um `COMMIT` no meio sairia da transação
+    somente leitura. `alvo` é a conexão ou um cursor."""
+    return alvo.execute(consulta, params, prepare=True)
+
+
+def pagina(conexao, esquema, tabela, onde, ordem, deslocamento, limite, limite_ms=5000):
+    """(colunas, tipos, linhas) de uma página das linhas filtradas, em transação somente leitura e com tempo limite
+    (`QueryCanceled` se passar). `ordem` são as colunas da chave primária; vazia, a página sai sem ORDER BY (a
+    ordem não é estável)."""
     from psycopg import sql
     por = sql.SQL(" ORDER BY {}").format(sql.SQL(", ").join(map(sql.Identifier, ordem))) if ordem else sql.SQL("")
     consulta = sql.SQL("SELECT * FROM {}{}{} LIMIT {} OFFSET {}").format(
         sql.Identifier(esquema, tabela), onde_sql(onde), por, sql.Literal(int(limite)), sql.Literal(int(deslocamento)))
-    with somente_leitura(conexao):
+    with somente_leitura(conexao, limite_ms):
         with conexao.cursor() as cur:
-            cur.execute(consulta)
+            executar(cur, consulta)
             nomes = [d.name for d in cur.description]
             tipos = [getattr(conexao.adapters.types.get(d.type_code), "name", str(d.type_code)) for d in cur.description]
             return nomes, tipos, cur.fetchall()
 
 
-def contar_filtrado(conexao, esquema, tabela, onde):
+def contar_filtrado(conexao, esquema, tabela, onde, limite_ms=2000):
+    """Quantas linhas o filtro pega; None se o tempo acabar (tabela grande demais para contar de graça)."""
+    import psycopg
     from psycopg import sql
     consulta = sql.SQL("SELECT count(*) FROM {}{}").format(sql.Identifier(esquema, tabela), onde_sql(onde))
-    with somente_leitura(conexao):
-        return conexao.execute(consulta).fetchone()[0]
+    try:
+        with somente_leitura(conexao, limite_ms):
+            return executar(conexao, consulta).fetchone()[0]
+    except psycopg.errors.QueryCanceled:
+        return None
 
 
-def linhas_pai(conexao, esquema, tabela, chave, busca, limite=50):
-    """[(valor da chave, rótulo)] das linhas de uma tabela pai, para escolher o valor de uma chave estrangeira.
-    O rótulo são as duas primeiras colunas de texto (fora a chave), ou a própria chave se não houver; `busca`
-    procura (ILIKE, com `%`, `_` e `\\` tomados ao pé da letra) em toda coluna de texto e na chave."""
+def linhas_pai(conexao, esquema, tabela, chave, busca, limite=50, limite_ms=2000):
+    """[(valor da chave, rótulo)] das linhas de uma tabela pai, para escolher o valor de uma chave estrangeira; None
+    se o tempo acabar. O rótulo são as duas primeiras colunas de texto (fora a chave), ou a própria chave se não
+    houver; `busca` procura (ILIKE, com `%`, `_` e `\\` tomados ao pé da letra) em toda coluna de texto e na chave."""
+    import psycopg
     from psycopg import sql
     from ratt.db import filtro
-    with somente_leitura(conexao):
-        tipos = conexao.execute("""
-            SELECT a.attname, format_type(a.atttypid, a.atttypmod)
-            FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped
-            ORDER BY a.attnum""", (esquema, tabela)).fetchall()
-        textos = [sql.Identifier(nome) for nome, tipo in tipos if nome != chave and filtro.familia(tipo) == "texto"]
-        k = sql.Identifier(chave)
-        como_texto = sql.SQL("{}::text").format(k)
-        rotulo = como_texto
-        if textos:
-            rotulo = sql.SQL("coalesce(nullif(concat_ws(' · ', {}), ''), {})").format(
-                sql.SQL(", ").join(textos[:2]), como_texto)
-        onde = sql.SQL("")
-        if busca.strip():
-            padrao = sql.SQL(filtro.padrao_like(busca, "contem"))
-            onde = sql.SQL(" WHERE ") + sql.SQL(" OR ").join(
-                sql.SQL("{} ILIKE {}").format(campo, padrao) for campo in textos + [como_texto])
-        consulta = sql.SQL("SELECT {} AS _ratt_valor, {} AS _ratt_rotulo FROM {}{} ORDER BY 1 LIMIT {}").format(
-            k, rotulo, sql.Identifier(esquema, tabela), onde, sql.Literal(int(limite)))
-        return [tuple(linha) for linha in conexao.execute(consulta)]
+    try:
+        with somente_leitura(conexao, limite_ms):
+            tipos = conexao.execute("""
+                SELECT a.attname, format_type(a.atttypid, a.atttypmod)
+                FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped
+                ORDER BY a.attnum""", (esquema, tabela)).fetchall()
+            textos = [sql.Identifier(nome) for nome, tipo in tipos if nome != chave and filtro.familia(tipo) == "texto"]
+            k = sql.Identifier(chave)
+            como_texto = sql.SQL("{}::text").format(k)
+            rotulo = como_texto
+            if textos:
+                rotulo = sql.SQL("coalesce(nullif(concat_ws(' · ', {}), ''), {})").format(
+                    sql.SQL(", ").join(textos[:2]), como_texto)
+            onde = sql.SQL("")
+            if busca.strip():
+                padrao = sql.SQL(filtro.padrao_like(busca, "contem"))
+                onde = sql.SQL(" WHERE ") + sql.SQL(" OR ").join(
+                    sql.SQL("{} ILIKE {}").format(campo, padrao) for campo in textos + [como_texto])
+            consulta = sql.SQL("SELECT {} AS _ratt_valor, {} AS _ratt_rotulo FROM {}{} ORDER BY 1 LIMIT {}").format(
+                k, rotulo, sql.Identifier(esquema, tabela), onde, sql.Literal(int(limite)))
+            return [tuple(linha) for linha in executar(conexao, consulta)]
+    except psycopg.errors.QueryCanceled:
+        return None
 
 
 def versao(conexao):

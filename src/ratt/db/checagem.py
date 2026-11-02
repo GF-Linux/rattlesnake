@@ -2,14 +2,16 @@
 
 Dois tipos: os estáticos, lidos só do modelo (tabela sem PK, FK sem índice), e os de uma operação,
 que contam no banco (NULLs, repetidos, órfãos, dependentes) antes de a operação entrar no rascunho.
-Tudo aqui é leitura: cada consulta roda numa transação `READ ONLY` com `statement_timeout` curto (nem uma
-função que escreva, chamada num WHERE escrito à mão, consegue mudar o banco). Um aviso "impede" não bloqueia
-nada; diz o que o PostgreSQL recusaria e por quê, e a pessoa decide.
+Tudo aqui é leitura: cada consulta roda numa transação `READ ONLY` com `statement_timeout` curto, pelo protocolo
+estendido (um comando só: um `; COMMIT; …` no meio de um WHERE é recusado). O READ ONLY barra escritas em
+tabelas e sequências; não barra todo efeito colateral que uma função chamada num WHERE escrito à mão possa ter
+(advisory locks, `pg_terminate_backend`, escrita num servidor estrangeiro) — esse WHERE é SQL da pessoa. Um aviso
+"impede" não bloqueia nada; diz o que o PostgreSQL recusaria e por quê, e a pessoa decide.
 """
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
 import psycopg
@@ -18,7 +20,7 @@ from psycopg import sql
 from . import catalogo, filtro
 from . import rascunho as rs
 from .idioma import t
-from .modelo import Ligacao, Modelo, opcional
+from .modelo import Modelo, opcional
 
 
 @dataclass
@@ -71,6 +73,10 @@ class Dependente:
 
 # ── contagens no banco, só leitura ──
 
+NULO_EM_OBRIGATORIA = "SET NULL → NOT NULL"
+_ACOES = {"a": "NO ACTION", "r": "RESTRICT", "c": "CASCADE", "n": "SET NULL", "d": "SET DEFAULT"}
+_PROFUNDIDADE = 8           # níveis de CASCADE seguidos (um ciclo nos dados para aqui)
+
 # Nome de tipo como o `format_type` do catálogo escreve: nomes simples ou entre aspas (com `""` dobrado), um
 # schema opcional, `(n)`/`(n,m)`, as palavras fixas dos tipos de hora e de intervalo e `[]`. Só isso pode ir
 # colado num CAST: qualquer outra coisa (`date); DROP …`) é recusada antes de chegar ao banco.
@@ -110,7 +116,7 @@ class Consulta:
         self._erro = None
         try:
             with catalogo.somente_leitura(self.conexao, self.limite_ms):
-                return self.conexao.execute(consulta, params).fetchall()
+                return catalogo.executar(self.conexao, consulta, params).fetchall()
         except psycopg.errors.QueryCanceled:
             return None
         except psycopg.Error as e:
@@ -189,25 +195,66 @@ class Consulta:
         n = len(colunas)
         return [(tuple(l[:n]), tuple(l[n:])) for l in linhas]
 
-    def cascata(self, esquema, tabela, onde: str, ligacoes: List[Ligacao],
-                m: Modelo) -> Optional[List[Tuple[str, str, int]]]:
-        """Para cada chave estrangeira que chega na tabela: (tabela filha, ação ao apagar, quantas linhas filhas
-        referem as linhas que o WHERE pega). A tabela pai fica sem apelido na subconsulta: o WHERE de um filtro com
-        "existe em" a cita pelo nome completo."""
-        pai = sql.Identifier(esquema, tabela)
-        achados = []
-        for lig in ligacoes:
-            filha = m.tabelas[lig.origem]
-            destino = m.tabelas[lig.destino]
-            minhas = [sql.SQL("_ratt_f.{}").format(sql.Identifier(filha.coluna(i).nome)) for i in lig.colunas]
-            delas = [sql.SQL("{}.{}").format(pai, sql.Identifier(destino.coluna(i).nome)) for i in lig.colunas_destino]
-            linhas = self._rodar(sql.SQL("SELECT count(*) FROM {} AS _ratt_f WHERE ({}) IN (SELECT {} FROM {}{})").format(
-                sql.Identifier(filha.esquema, filha.nome), sql.SQL(", ").join(minhas), sql.SQL(", ").join(delas),
-                pai, catalogo.onde_sql(onde)), engolir=True)
-            if linhas is None:
-                return None
-            achados.append((f"{filha.esquema}.{filha.nome}", lig.ao_apagar, int(linhas[0][0])))
-        return achados
+    def _grafo(self) -> Optional[Dict[int, List[tuple]]]:
+        """Todas as chaves estrangeiras do banco (de qualquer schema), por tabela pai: (oid da filha, esquema,
+        nome, colunas da filha, colunas do pai, ação ao apagar, o SET NULL cai numa coluna NOT NULL). As cópias
+        que o PostgreSQL faz nas partições (`conparentid`) ficam de fora: a tabela mãe já conta por elas."""
+        anula = ("CASE WHEN cardinality(coalesce(k.confdelsetcols, '{}')) > 0 THEN k.confdelsetcols ELSE k.conkey END"
+                 if self.versao() >= 150000 else "k.conkey")           # ON DELETE SET NULL (colunas), do PG 15
+        linhas = self._rodar(
+            "SELECT k.confrelid, k.conrelid, n.nspname::text, c.relname::text, "
+            "ARRAY(SELECT a.attname::text FROM unnest(k.conkey) WITH ORDINALITY u(num, o) "
+            "      JOIN pg_attribute a ON a.attrelid = k.conrelid AND a.attnum = u.num ORDER BY u.o), "
+            "ARRAY(SELECT a.attname::text FROM unnest(k.confkey) WITH ORDINALITY u(num, o) "
+            "      JOIN pg_attribute a ON a.attrelid = k.confrelid AND a.attnum = u.num ORDER BY u.o), "
+            "k.confdeltype::text, "
+            "EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = k.conrelid AND a.attnotnull "
+            f"        AND a.attnum = ANY ({anula})) "
+            "FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE k.contype = 'f' AND k.conparentid = 0 ORDER BY k.oid", engolir=True)
+        if linhas is None:
+            return None
+        grafo: Dict[int, List[tuple]] = {}
+        for pai, *resto in linhas:
+            grafo.setdefault(pai, []).append(tuple(resto))
+        return grafo
+
+    def cascata(self, esquema, tabela, onde: str, ligacoes=None, m=None) -> Optional[List[Tuple[str, str, int]]]:
+        """O que apagar as linhas do WHERE faz nas outras tabelas: [(tabela filha, ação, quantas linhas)], só as que
+        têm alguma. As chaves estrangeiras vêm do catálogo (de qualquer schema, não só do `Modelo`), e a CASCADE é
+        seguida até os netos (até `_PROFUNDIDADE` níveis). A ação é a da chave (`CASCADE`, `SET NULL`, `SET DEFAULT`,
+        `NO ACTION`, `RESTRICT`), salvo `NULO_EM_OBRIGATORIA`: SET NULL numa coluna NOT NULL, que o PostgreSQL
+        recusaria. CASCADE soma por tabela (uma linha alcançada por dois caminhos conta duas vezes). `ligacoes` e
+        `m` ficam pela interface antiga e não são usados. None se o tempo acabar ou o WHERE falhar."""
+        inicio = self._rodar("SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                             "WHERE n.nspname = %s AND c.relname = %s", (esquema, tabela), engolir=True)
+        grafo = self._grafo() if inicio else None
+        if not inicio or grafo is None:
+            return None
+        somas: Dict[Tuple[str, str], int] = {}
+        fila = [(inicio[0][0], sql.Identifier(esquema, tabela), onde, 0)]
+        while fila:
+            pai_oid, pai, pred, nivel = fila.pop(0)
+            for filha_oid, f_esquema, f_nome, minhas, delas, tipo, nulo_obrigatoria in grafo.get(pai_oid, []):
+                filha = sql.Identifier(f_esquema, f_nome)
+                pega = sql.SQL("({}) IN (SELECT {} FROM {}{})").format(
+                    sql.SQL(", ").join(sql.SQL("{}.{}").format(filha, sql.Identifier(c)) for c in minhas),
+                    sql.SQL(", ").join(sql.SQL("{}.{}").format(pai, sql.Identifier(c)) for c in delas),
+                    pai, catalogo.onde_sql(pred))
+                linhas = self._rodar(sql.SQL("SELECT count(*) FROM {} WHERE {}").format(filha, pega), engolir=True)
+                if linhas is None:
+                    return None
+                k = int(linhas[0][0])
+                if not k:
+                    continue
+                acao = _ACOES.get(tipo, "NO ACTION")
+                if acao == "SET NULL" and nulo_obrigatoria:
+                    acao = NULO_EM_OBRIGATORIA
+                chave = (f"{f_esquema}.{f_nome}", acao)
+                somas[chave] = somas.get(chave, 0) + k
+                if acao == "CASCADE" and nivel + 1 < _PROFUNDIDADE:      # as filhas apagadas apagam as delas
+                    fila.append((filha_oid, filha, pega.as_string(self.conexao), nivel + 1))
+        return [(t_, a, n) for (t_, a), n in somas.items()]
 
     def versao(self) -> int:
         return catalogo.versao(self.conexao)
@@ -529,10 +576,7 @@ class _Dados:
                             pai=f"{vista_pai.nome}.{vista_pai.coluna(col_pai.id).nome}")
 
     def cascata(self, onde: str) -> None:
-        ligs = [l for l in self.base.ligacoes.values() if l.destino == self.op.tabela]
-        if not ligs:
-            return
-        achados = self.consulta.cascata(self.tab_base.esquema, self.tab_base.nome, onde, ligs, self.base)
+        achados = self.consulta.cascata(self.tab_base.esquema, self.tab_base.nome, onde)
         if achados is None:
             self.falhou(self.op.tabela)
             return
@@ -540,7 +584,8 @@ class _Dados:
             if not k:
                 continue
             chave, nivel = {"CASCADE": ("chk.cascata_apaga", "atencao"), "SET NULL": ("chk.cascata_esvazia", "atencao"),
-                            "SET DEFAULT": ("chk.cascata_padrao", "atencao")}.get(acao, ("chk.impede_filhos", "impede"))
+                            "SET DEFAULT": ("chk.cascata_padrao", "atencao"),
+                            NULO_EM_OBRIGATORIA: ("chk.cascata_nulo_impede", "impede")}.get(acao, ("chk.impede_filhos", "impede"))
             self.avisar(self.op.tabela, nivel, chave, n=k, tabela=filha)
 
 
@@ -548,7 +593,7 @@ def _sem_resposta(consulta, avisar, alvo) -> None:
     erro = getattr(consulta, "erro", None)
     motivo = erro() if callable(erro) else None
     if motivo:
-        avisar(alvo, "atencao", "chk.consulta_falhou", erro=motivo)
+        avisar(alvo, "impede", "chk.consulta_falhou", erro=motivo)     # o aplicar falharia do mesmo jeito
     else:
         avisar(alvo, "info", "chk.sem_tempo")
 
@@ -596,8 +641,11 @@ def _alterar(d: _Dados) -> None:
         if _unica_sozinha(tab, c):
             if n is not None and n > 1:
                 d.avisar(c.id, "impede", "chk.unica_varias", coluna=c.nome, n=n)
-            elif n:                         # quem já tem o valor fica de fora do UPDATE e continua com ele
-                d.ja_existe(c, mud.valor, literal)
+            elif n:                         # quem já tem o valor e fica fora do UPDATE continua com ele
+                col = rs.ident(d.tab_base.coluna(i).nome)
+                k = d.contar(f"{col} = {literal} AND ({onde}) IS NOT TRUE", c.id)
+                if k:
+                    d.avisar(c.id, "impede", "chk.ja_existe", coluna=c.nome, valor=mud.valor, n=k)
         d.pai_existe(c, mud.valor)
 
 
@@ -671,9 +719,11 @@ def avisos_da_operacao(op, r: rs.Rascunho, consulta) -> List[Aviso]:
 
 # ── avisos do filtro ──
 
-def avisos_do_filtro(f: filtro.Filtro, m: Modelo, tabela_id: str, consulta) -> List[Aviso]:
-    """As armadilhas do filtro, contadas no banco. `m` é o modelo com os nomes do banco (a base do rascunho): uma
-    coluna que só existe no rascunho deixa as contagens para depois de aplicar."""
+def avisos_do_filtro(f: filtro.Filtro, r: rs.Rascunho, tabela_id: str, consulta) -> List[Aviso]:
+    """As armadilhas do filtro, contadas no banco com os nomes da base do rascunho (o que o banco tem agora): uma
+    coluna que só existe no rascunho deixa as contagens para depois de aplicar. Cada contagem é de quem o filtro
+    INTEIRO deixa de fora só por causa da armadilha: com OU, quem entra por outra condição não conta."""
+    m = r.base
     avisos: List[Aviso] = []
 
     def avisar(alvo, nivel, chave, **valores):
@@ -684,8 +734,16 @@ def avisos_do_filtro(f: filtro.Filtro, m: Modelo, tabela_id: str, consulta) -> L
         avisar(tabela_id, "atencao", "chk.fora_lista_vazio")
     tab = m.tabelas.get(tabela_id)
     if tab is None or any(rs._nome_na_base(m, i) is None for i in filtro.refere(f, tabela_id)):
-        avisar(tabela_id, "info", "chk.so_depois_de_aplicar", tabela=tab.nome if tab is not None else tabela_id)
+        vista = r.vista().tabelas.get(tabela_id)
+        avisar(tabela_id, "info", "chk.so_depois_de_aplicar", tabela=vista.nome if vista is not None else tabela_id)
         return avisos
+    if f.vazio() or (f.texto is not None and f.texto.strip()):
+        return avisos
+    try:
+        inteiro = filtro.where(f, m, tabela_id)
+    except ValueError:
+        return avisos
+    fora = f"({inteiro}) IS NOT TRUE"
 
     def contar(onde, alvo):
         n = consulta.contar_onde(tab.esquema, tab.nome, onde)
@@ -693,26 +751,39 @@ def avisos_do_filtro(f: filtro.Filtro, m: Modelo, tabela_id: str, consulta) -> L
             _sem_resposta(consulta, avisar, alvo)
         return n
 
-    for cid in filtro.deixa_vazios_de_fora(f, m, tabela_id):
-        col = tab.coluna(cid)
-        k = contar(f"{rs.ident(col.nome)} IS NULL", cid)
+    # vazio: quem passaria pelo resto do filtro (com a condição trocada por TRUE), tem NULL e acaba de fora
+    nulas = filtro.deixa_vazios_de_fora(f, m, tabela_id)
+    restos: Dict[str, List[str]] = {}
+    for j, c in enumerate(f.condicoes):
+        if c.existe is not None:
+            continue
+        ids = ([] if c.operador in ("vazio", "preenchido", "verdadeiro", "falso") else [c.coluna]) + \
+              ([c.outra_coluna] if c.outra_coluna is not None else [])
+        outras = f.condicoes[:j] + f.condicoes[j + 1:]
+        resto = "" if f.conectivo == "OU" or not outras else filtro.where(filtro.Filtro(outras), m, tabela_id)
+        for cid in ids:
+            if cid in nulas:
+                restos.setdefault(cid, []).append(resto)
+    for cid in nulas:
+        if cid not in restos:
+            continue
+        partes = [f"{rs.ident(tab.coluna(cid).nome)} IS NULL", fora]
+        if all(restos[cid]):                # algum resto vazio quer dizer TRUE: não restringe
+            ou = " OR ".join(f"({x})" for x in restos[cid])
+            partes.insert(0, f"({ou})" if len(restos[cid]) > 1 else ou)
+        k = contar(" AND ".join(partes), cid)
         if k:
-            avisar(cid, "atencao", "chk.vazios_de_fora", n=k, coluna=col.nome)
-    if f.texto is not None and f.texto.strip():
-        return avisos
-    for c in f.condicoes:
+            avisar(cid, "atencao", "chk.vazios_de_fora", n=k, coluna=tab.coluna(cid).nome)
+    # espaço nas pontas: quem o filtro pegaria com a coluna aparada e não pega
+    for j, c in enumerate(f.condicoes):
         col = tab.coluna(c.coluna) if c.existe is None and c.outra_coluna is None else None
         if col is None or c.transformacao or c.operador not in ("contem", "comeca", "termina") \
                 or filtro.familia(col.tipo) != "texto":
             continue
-        try:                                # quem casaria sem o espaço sobrando nas pontas e não casa com ele
-            aparado = filtro.where(filtro.Filtro([filtro.Condicao(c.coluna, c.operador, c.valores, "trim",
-                                                                  diferenciar=c.diferenciar)]), m, tabela_id)
-            cru = filtro.where(filtro.Filtro([filtro.Condicao(c.coluna, c.operador, c.valores,
-                                                              diferenciar=c.diferenciar)]), m, tabela_id)
-        except ValueError:
-            continue
-        k = contar(f"{aparado} AND NOT ({cru})", col.id)
+        trocadas = list(f.condicoes)
+        trocadas[j] = replace(c, transformacao="trim")
+        aparado = filtro.where(filtro.Filtro(trocadas, f.conectivo), m, tabela_id)
+        k = contar(f"({aparado}) IS TRUE AND {fora}", col.id)
         if k:
             avisar(col.id, "atencao", "chk.espacos_nas_pontas", n=k, coluna=col.nome)
     return avisos

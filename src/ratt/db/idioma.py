@@ -590,6 +590,8 @@ ratt db user passwd [name]            changes a password (no name: yours)
                             "en": "{n} row(s) of {tabela} lose the link (ON DELETE SET NULL)"},
     "chk.cascata_padrao": {"pt": "{n} linha(s) de {tabela} voltam ao valor padrão (ON DELETE SET DEFAULT)",
                            "en": "{n} row(s) of {tabela} go back to the default (ON DELETE SET DEFAULT)"},
+    "chk.cascata_nulo_impede": {"pt": "{n} linha(s) de {tabela} ficariam com a ligação vazia, mas a coluna é obrigatória: o PostgreSQL recusaria apagar",
+                                "en": "{n} row(s) of {tabela} would lose the link, but the column is required: PostgreSQL would refuse to delete"},
     "chk.impede_filhos": {"pt": "{n} linha(s) de {tabela} apontam para estas: o PostgreSQL recusaria apagar",
                           "en": "{n} row(s) of {tabela} point at these: PostgreSQL would refuse to delete"},
     "chk.soft_delete": {"pt": "{coluna} existe: talvez seja um UPDATE dela em vez de apagar",
@@ -887,6 +889,7 @@ ratt db user passwd [name]            changes a password (no name: yours)
     "filtro.e.texto_aspa": {"pt": "aspas ou $$ sem fechar", "en": "unclosed quote or $$"},
     "filtro.e.texto_parenteses": {"pt": "parênteses desbalanceados", "en": "unbalanced parentheses"},
     "filtro.e.texto_varios": {"pt": "a condição precisa ser uma expressão só", "en": "the condition must be a single expression"},
+    "filtro.e.texto_barra": {"pt": "barra invertida numa string '…': use E'…' ou $$…$$", "en": "backslash in a '…' string: use E'…' or $$…$$"},
     "filtro.e.chave": {"pt": "chave desconhecida no filtro: {campo}", "en": "unknown key in the filter: {campo}"},
     "filtro.e.forma": {"pt": "filtro mal formado", "en": "malformed filter"},
 }
