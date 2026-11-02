@@ -210,5 +210,5 @@ def test_descricao_com_quebra_de_linha_fica_em_um_comentario():
     assert linhas[0] == "-- 1. renomear a tabela users para x DROP TABLE users"
     assert linhas[1] == 'ALTER TABLE users RENAME TO "x'
     assert linhas[2] == 'DROP TABLE users";'
-    assert linhas[r.linhas_das_operacoes()[1] - 1] == ""
+    assert linhas[r.linhas_das_operacoes()[1] - 2] == ""
     assert '"a\u2028b\x0bc"' in r.sql_texto()
