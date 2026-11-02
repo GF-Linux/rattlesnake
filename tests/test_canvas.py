@@ -231,3 +231,86 @@ def test_cabecalho_vira_uma_linha_de_comentario():
     assert linhas[1].startswith("-- 1.")
     assert r.linhas_das_operacoes("x\nDROP") == [2]
     assert r.sql_texto("-- ok").split("\n")[0] == "-- ok"
+
+
+# ── Task 3: dependências, banco que mudou, disco ──
+
+import json
+
+from ratt.db import guardar
+
+
+def test_dependentes_e_tirar():
+    r = rascunho.Rascunho(modelo_png())
+    tid = r.novo_id("t")
+    r.acrescentar(rascunho.CriarTabela(modelo.Tabela(tid, "public", "tags", [
+        modelo.Coluna(f"{tid}.c1", "id", "bigint", obrigatoria=True, identidade=True, pk=True)])))
+    cid = r.novo_id("c")
+    r.acrescentar(rascunho.AdicionarColuna(tid, modelo.Coluna(cid, "nome", "text")))
+    r.acrescentar(rascunho.Obrigatoria(tid, cid, True))
+    r.acrescentar(rascunho.Renomear("t1", None, "pessoas"))           # independente
+    assert r.dependentes(0) == [1, 2]
+    r.tirar([0] + r.dependentes(0))
+    assert len(r.operacoes) == 1 and "RENAME TO pessoas" in r.sql_texto()
+
+
+def test_rebase_marca_invalidas_sem_perder():
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.Renomear("t2", None, "papeis"))
+    r.acrescentar(rascunho.Renomear("t1", None, "pessoas"))
+    nova = modelo_png(); del nova.tabelas["t2"]                       # alguém apagou roles pelo psql
+    assert r.rebase(nova) == {0}
+    assert r.invalidas == {0}
+    assert len(r.operacoes) == 2 and "papeis" not in r.sql_texto() and "pessoas" in r.sql_texto()
+    assert "-- 2. " in r.sql_texto() and r.linhas_das_operacoes()[0] == 0
+    assert r.operacao_da_linha(1) == 1
+
+
+def test_json_ida_e_volta():
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.AdicionarColuna("t1", modelo.Coluna(r.novo_id("c"), "birth", "date")))
+    de_novo = rascunho.Rascunho.de_dict(json.loads(json.dumps(r.para_dict())), modelo_png())
+    assert de_novo.sql_texto() == r.sql_texto() and de_novo.novo_id("c") == "novo-c2"
+
+
+def test_json_ida_e_volta_de_todas_as_operacoes():
+    r = rascunho.Rascunho(modelo_png())
+    tid = r.novo_id("t")
+    r.acrescentar(rascunho.CriarTabela(modelo.Tabela(tid, "public", "tags", [
+        modelo.Coluna(f"{tid}.c1", "id", "bigint", obrigatoria=True, identidade=True, pk=True)])))
+    r.acrescentar(rascunho.Ligar(modelo.Ligacao(r.novo_id("k"), "t1", ("t1.c2",), "t2", ("t2.c1",), "",
+                                                "CASCADE"), unica=True))
+    r.acrescentar(rascunho.LigarNN(r.novo_id("t"), "users_tags", "t1", tid,
+                                   (r.novo_id("c"), r.novo_id("c")), (r.novo_id("k"), r.novo_id("k"))))
+    r.acrescentar(rascunho.Unica("t1", "t1.c4", True))
+    r.acrescentar(rascunho.ApagarTabela("t2", True))
+    de_novo = rascunho.Rascunho.de_dict(json.loads(json.dumps(r.para_dict())), modelo_png())
+    assert de_novo.operacoes == r.operacoes
+    assert de_novo.sql_texto() == r.sql_texto()
+
+
+def test_json_a_mao_nao_injeta_sql():
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.Ligar(modelo.Ligacao("novo-k1", "t1", ("t1.c2",), "t2", ("t2.c1",), "")))
+    d = json.loads(json.dumps(r.para_dict()))
+    d["operacoes"][0]["ligacao"]["ao_apagar"] = "CASCADE; DROP TABLE users"
+    de_novo = rascunho.Rascunho.de_dict(d, modelo_png())
+    assert de_novo.invalidas == {0}
+    assert "DROP TABLE" not in de_novo.sql_texto()
+    r2 = rascunho.Rascunho(modelo_png())
+    r2.acrescentar(rascunho.AdicionarColuna("t1", modelo.Coluna("novo-c1", "x", "text")))
+    d = r2.para_dict()
+    d["operacoes"][0]["coluna"]["tipo"] = "text); DROP TABLE users; --"
+    assert rascunho.Rascunho.de_dict(d, modelo_png()).invalidas == {0}
+
+
+def test_guardar(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    guardar.gravar_posicoes(5432, "estudos", "public", {"t1": (3, 4)})
+    assert guardar.ler_posicoes(5432, "estudos", "public") == {"t1": (3, 4)}
+    guardar.gravar_rascunho(5432, "estudos", "public", {"a": 1})
+    assert guardar.ler_rascunho(5432, "estudos", "public") == {"a": 1}
+    guardar.gravar_rascunho(5432, "estudos", "public", None)
+    assert guardar.ler_rascunho(5432, "estudos", "public") is None
+    assert guardar.guardar_aplicado(5432, "estudos", "SELECT 1;").read_text() == "SELECT 1;"
+    assert not list(tmp_path.rglob("*.tmp"))

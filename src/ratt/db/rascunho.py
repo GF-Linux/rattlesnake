@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import copy
 import re
-from dataclasses import dataclass
-from typing import ClassVar, List, Optional, Set, Tuple
+from dataclasses import asdict, dataclass
+from typing import ClassVar, Iterable, List, Optional, Set, Tuple
 
 from .idioma import t
 from .modelo import Coluna, Ligacao, Modelo, Tabela
@@ -37,6 +37,8 @@ xmlforest xmlnamespaces xmlparse xmlpi xmlroot xmlserialize xmltable
 
 _SEGURO = re.compile(r"^[a-z_][a-z0-9_]*$")
 _TIPO = re.compile(r"^[a-z][a-z0-9_ ]*(\(\d+(,\s*\d+)?\))?(\[\])?$")
+
+_AO_APAGAR = frozenset({"NO ACTION", "RESTRICT", "CASCADE", "SET NULL", "SET DEFAULT"})
 
 TIPOS = ("bigint", "integer", "numeric", "text", "boolean", "date", "timestamptz", "uuid", "jsonb")
 
@@ -110,6 +112,8 @@ def _marcar(obj, estado: str) -> None:
 
 
 def _col_sql(c: Coluna, sem_not_null: bool = False) -> str:
+    if not tipo_valido(c.tipo):
+        raise ValueError(f"tipo inválido: {c.tipo!r}")
     partes = [ident(c.nome), c.tipo]
     if c.identidade:
         partes.append("GENERATED ALWAYS AS IDENTITY")
@@ -344,7 +348,9 @@ class Ligar(Operacao):
             cmds.append(f"ALTER TABLE {t_sql} ADD COLUMN {_col_sql(self.nova_coluna)}")
         fk = (f"ALTER TABLE {t_sql} ADD CONSTRAINT {ident(self._nome_fk(origem, cols))} FOREIGN KEY ({lista}) "
               f"REFERENCES {nome_tabela(destino)} ({', '.join(ident(c) for c in dest)})")
-        if lig.ao_apagar and lig.ao_apagar != "NO ACTION":
+        if lig.ao_apagar not in _AO_APAGAR:
+            raise ValueError(f"ao_apagar inválido: {lig.ao_apagar!r}")
+        if lig.ao_apagar != "NO ACTION":
             fk += f" ON DELETE {lig.ao_apagar}"
         cmds.append(fk)
         if self.unica:
@@ -515,6 +521,47 @@ def _valida(m: Modelo, op: Operacao) -> bool:
     return all(_existe(m, i) for i in op.refere())
 
 
+# ── de e para o disco ──
+
+# Campos que não são texto/número/booleano: como voltam de um dict.
+_CAMPOS = {
+    CriarTabela: {"tabela": "Tabela"},
+    AdicionarColuna: {"coluna": "Coluna"},
+    Ligar: {"ligacao": "Ligacao", "nova_coluna": "Coluna?"},
+    LigarNN: {"colunas_ids": "tupla", "ligacoes_ids": "tupla"},
+}
+_TIPOS_OP = {cls.tipo: cls for cls in (CriarTabela, AdicionarColuna, Renomear, Obrigatoria, Unica, Ligar,
+                                       LigarNN, ApagarLigacao, ApagarColuna, ApagarTabela)}
+
+
+def _op_para_dict(op: Operacao) -> dict:
+    d = {"tipo": op.tipo}
+    d.update(asdict(op))
+    return d
+
+
+def _op_de_dict(d: dict) -> Operacao:
+    cls = _TIPOS_OP[d["tipo"]]
+    campos = {k: v for k, v in d.items() if k != "tipo"}
+    for nome, como in _CAMPOS.get(cls, {}).items():
+        v = campos.get(nome)
+        if v is None:
+            continue
+        if como == "Tabela":
+            v = dict(v)
+            v["colunas"] = [Coluna(**c) for c in v["colunas"]]
+            campos[nome] = Tabela(**v)
+        elif como.startswith("Coluna"):
+            campos[nome] = Coluna(**v)
+        elif como == "Ligacao":
+            v = dict(v)
+            v["colunas"], v["colunas_destino"] = tuple(v["colunas"]), tuple(v["colunas_destino"])
+            campos[nome] = Ligacao(**v)
+        else:
+            campos[nome] = tuple(v)
+    return cls(**campos)
+
+
 class Rascunho:
     """A base (o que está no banco) mais a lista de operações que a pessoa fez em cima dela."""
 
@@ -543,13 +590,60 @@ class Rascunho:
     def desfazer(self) -> Optional[Operacao]:
         return self.operacoes.pop() if self.operacoes else None
 
+    def _percorrer(self) -> Tuple[Modelo, List[Tuple[Operacao, bool, str, List[str]]]]:
+        """Aplica as operações uma a uma na cópia da base. Cada passo: (operação, válida, descrição, comandos).
+        Inválida é a que refere id que não existe (ou já foi apagado) *naquele ponto* ou cujo SQL não se gera."""
+        m = self.base.copia()
+        passos = []
+        for op in self.operacoes:
+            valida, desc, cmds = _valida(m, op), op.tipo, []
+            if valida:
+                try:
+                    cmds = op.comandos(m)
+                    desc = " ".join(op.descricao(m).splitlines())   # uma linha só: vai para um comentário SQL
+                    op.aplicar(m)
+                except (KeyError, ValueError):
+                    valida, cmds = False, []
+            passos.append((op, valida, desc, cmds))
+        return m, passos
+
     def vista(self) -> Modelo:
         """A base copiada com as operações válidas aplicadas, itens tocados marcados."""
-        m = self.base.copia()
-        for op in self.operacoes:
-            if _valida(m, op):
-                op.aplicar(m)
-        return m
+        return self._percorrer()[0]
+
+    @property
+    def invalidas(self) -> Set[int]:
+        """Índices das operações que não valem sobre a base de agora; seguem na lista, fora do resto."""
+        return {i for i, (_, valida, _, _) in enumerate(self._percorrer()[1]) if not valida}
+
+    def rebase(self, base: Modelo) -> Set[int]:
+        """Troca a base (o banco mudou) sem perder nenhuma operação e devolve as que deixaram de valer."""
+        self.base = base
+        return self.invalidas
+
+    def dependentes(self, i: int) -> List[int]:
+        """Índices posteriores que, direta ou transitivamente, referem ids criados pela operação `i`."""
+        criados = set(self.operacoes[i].cria())
+        achados = []
+        for j in range(i + 1, len(self.operacoes)):
+            op = self.operacoes[j]
+            if op.refere() & criados:
+                achados.append(j)
+                criados |= op.cria()
+        return achados
+
+    def tirar(self, indices: Iterable[int]) -> None:
+        fora = set(indices)
+        self.operacoes = [op for i, op in enumerate(self.operacoes) if i not in fora]
+
+    def para_dict(self) -> dict:
+        return {"operacoes": [_op_para_dict(op) for op in self.operacoes], "proximo": self.proximo}
+
+    @classmethod
+    def de_dict(cls, d: dict, base: Modelo) -> "Rascunho":
+        r = cls(base, [_op_de_dict(o) for o in d.get("operacoes", [])], int(d.get("proximo", 1)))
+        r.rebase(base)
+        return r
 
     def modelo(self) -> Modelo:
         """A vista sem o que está apagado: como o banco ficaria."""
@@ -572,23 +666,18 @@ class Rascunho:
             cab = " ".join(cabecalho.splitlines())
             linhas.append(cab if cab.startswith("--") else "-- " + cab)
         marcas: List[int] = []
-        m = self.base.copia()
-        for n, op in enumerate(self.operacoes, 1):
-            if n > 1:
+        vazio = True
+        for n, (op, valida, desc, cmds) in enumerate(self._percorrer()[1], 1):
+            if not valida:
+                marcas.append(0)
+                continue
+            if not vazio:
                 linhas.append("")
-            valida = _valida(m, op)
-            try:
-                desc = op.descricao(m) if valida else op.tipo
-            except KeyError:
-                desc = op.tipo
-            # uma linha só: um nome com quebra de linha não pode virar comando solto no .sql
-            desc = " ".join(desc.splitlines())
+            vazio = False
             marcas.append(len(linhas) + 1)
             linhas.append(f"-- {n}. {desc}")
-            if valida:
-                for cmd in op.comandos(m):
-                    linhas.extend((cmd + ";").split("\n"))
-                op.aplicar(m)
+            for cmd in cmds:
+                linhas.extend((cmd + ";").split("\n"))
         return linhas, marcas
 
     def sql_texto(self, cabecalho: str = "") -> str:
@@ -599,12 +688,11 @@ class Rascunho:
         return self._linhas(cabecalho)[1]
 
     def operacao_da_linha(self, linha: int) -> int:
-        """Índice (0-based) da operação a que a linha do texto pertence; -1 se não há operações."""
-        marcas = self.linhas_das_operacoes()
-        if not marcas:
-            return -1
-        idx = 0
-        for i, ln in enumerate(marcas):
-            if ln <= linha:
+        """Índice (0-based) da operação a que a linha do texto pertence; -1 se não há operação válida."""
+        idx = -1
+        for i, ln in enumerate(self.linhas_das_operacoes()):
+            if ln and ln <= linha:
                 idx = i
+        if idx < 0 and self.operacoes:
+            return next((i for i, ln in enumerate(self.linhas_das_operacoes()) if ln), -1)
         return idx
