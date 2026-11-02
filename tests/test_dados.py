@@ -398,9 +398,19 @@ def test_alterar_outras_mudancas():
     r.acrescentar(rascunho.Alterar("t1", filtro.Filtro(), {"t1.c4": rascunho.Mudanca("branco_vazio"),
                                                             "t1.c2": rascunho.Mudanca("maiusculas")}))
     sql = r.sql_texto()
-    assert "UPDATE public.pessoas SET idade = 50, email = NULL, nome = email;" in sql
-    assert ("UPDATE public.pessoas SET email = NULLIF(trim(email), ''), nome = upper(nome) WHERE "
-            "email IS DISTINCT FROM NULLIF(trim(email), '') OR nome IS DISTINCT FROM upper(nome);") in sql
+    assert ("UPDATE public.pessoas SET idade = 50, email = NULL, nome = email WHERE idade IS DISTINCT FROM 50 "
+            "OR email IS DISTINCT FROM NULL OR nome IS DISTINCT FROM email;") in sql
+    bv = "CASE WHEN trim(email) = '' THEN NULL ELSE email END"
+    assert (f"UPDATE public.pessoas SET email = {bv}, nome = upper(nome) WHERE "
+            f"email IS DISTINCT FROM {bv} OR nome IS DISTINCT FROM upper(nome);") in sql
+
+
+def test_alterar_misto_pula_quem_nao_muda_nenhuma_coluna():
+    r = rascunho.Rascunho(modelo_pessoas())
+    r.acrescentar(rascunho.Alterar("t1", filtro.Filtro(), {"t1.c3": rascunho.Mudanca("valor", "99"),
+                                                            "t1.c2": rascunho.Mudanca("trim")}))
+    assert ("UPDATE public.pessoas SET idade = 99, nome = trim(nome) WHERE idade IS DISTINCT FROM 99 "
+            "OR nome IS DISTINCT FROM trim(nome);") in r.sql_texto()
 
 
 def test_alterar_sem_mudancas_ou_tipo_ruim_nao_entra():
@@ -423,7 +433,8 @@ def test_apagar_e_duplicatas():
     sql = r.sql_texto()
     assert "DELETE FROM public.pessoas WHERE nome ILIKE 'G%';" in sql
     assert ("DELETE FROM public.pessoas WHERE (id) IN (SELECT id FROM (SELECT id, row_number() OVER "
-            "(PARTITION BY lower(trim(email)) ORDER BY id) AS rn FROM public.pessoas) AS d WHERE rn > 1);") in sql
+            "(PARTITION BY lower(trim(email)) ORDER BY id) AS _ratt_rn FROM public.pessoas WHERE email IS NOT NULL "
+            "AND trim(email) <> '') AS d WHERE d._ratt_rn > 1);") in sql
 
 
 def test_apagar_sem_filtro():
@@ -443,10 +454,45 @@ def test_duplicatas_maior_recente_n_e_ctid():
     r2.acrescentar(rascunho.ApagarDuplicatas("t1", filtro.Filtro(), ("t1.c2",)))
     sql = r.sql_texto()
     assert ("DELETE FROM public.pessoas WHERE (id) IN (SELECT id FROM (SELECT id, row_number() OVER "
-            "(PARTITION BY nome, idade ORDER BY id DESC) AS rn FROM public.pessoas WHERE ativo IS TRUE) AS d WHERE rn > 1);") in sql
-    assert "(PARTITION BY nome ORDER BY nascimento DESC NULLS LAST, id) AS rn" in sql and "WHERE rn > 2);" in sql
-    assert ("DELETE FROM public.pessoas WHERE (ctid) IN (SELECT ctid FROM (SELECT ctid, row_number() OVER "
-            "(PARTITION BY nome ORDER BY ctid) AS rn FROM public.pessoas) AS d WHERE rn > 1);") in r2.sql_texto()
+            "(PARTITION BY nome, idade ORDER BY id DESC) AS _ratt_rn FROM public.pessoas WHERE nome IS NOT NULL AND "
+            "idade IS NOT NULL AND ativo IS TRUE) AS d WHERE d._ratt_rn > 1);") in sql
+    assert "(PARTITION BY nome ORDER BY nascimento DESC NULLS LAST, id) AS _ratt_rn" in sql and "d._ratt_rn > 2);" in sql
+    assert ("DELETE FROM public.pessoas WHERE (tableoid, ctid) IN (SELECT tableoid, ctid FROM (SELECT tableoid, ctid, "
+            "row_number() OVER (PARTITION BY nome ORDER BY tableoid, ctid) AS _ratt_rn FROM public.pessoas WHERE "
+            "nome IS NOT NULL) AS d WHERE d._ratt_rn > 1);") in r2.sql_texto()
+
+
+def test_duplicatas_filtro_ou_vai_entre_parenteses():
+    r = rascunho.Rascunho(modelo_pessoas())
+    f = filtro.Filtro([filtro.Condicao("t1.c2", "comeca", ["G"]), filtro.Condicao("t1.c3", "maior", ["40"])], conectivo="OU")
+    r.acrescentar(rascunho.ApagarDuplicatas("t1", f, ("t1.c2",)))
+    assert "WHERE nome IS NOT NULL AND ((nome ILIKE 'G%') OR (idade > 40))) AS d" in r.sql_texto()
+
+
+def test_duplicatas_refere_a_ordem_so_quando_recente_e_pk_apagada_invalida():
+    f = filtro.Filtro()
+    assert "t1.c5" not in rascunho.ApagarDuplicatas("t1", f, ("t1.c4",), ordem="t1.c5").refere()
+    r = rascunho.Rascunho(modelo_pessoas())
+    r.acrescentar(rascunho.ApagarDuplicatas("t1", f, ("t1.c4",)))
+    r.base.tabelas["t1"].colunas[0].estado = "apagado"
+    assert r.invalidas == {0}
+
+
+def test_json_com_campos_de_tipo_errado_e_rejeitado():
+    for extra in ({"vista": -1}, {"vista": True}, {"vista": "3"}, {"normalizar": "sim"}, {"manter": "xis"},
+                  {"n": 0}, {"manter": "recente"}):
+        op = {"tipo": "apagar_duplicatas", "tabela": "t1", "filtro": {}, "por": ["t1.c4"]}
+        op.update(extra)
+        with pytest.raises(rascunho.RascunhoCorrompido):
+            rascunho.Rascunho.de_dict({"operacoes": [op]}, modelo_pessoas())
+
+
+def test_descricao_do_inserir_no_singular():
+    r = rascunho.Rascunho(modelo_pessoas())
+    r.acrescentar(rascunho.Inserir("t1", {"t1.c2": "x"}))
+    r.acrescentar(rascunho.Inserir("t1", {"t1.c2": "x", "t1.c3": "1"}))
+    d = [p[2] for p in r.passos()]
+    assert "(1 valor)" in d[0] and "(2 valores)" in d[1]
 
 
 def test_duplicatas_argumentos_ruins():

@@ -44,7 +44,7 @@ def test_barra_invertida_com_standard_conforming_strings_desligado(banco):
     banco.execute(r.sql_texto().split("DELETE")[0])
     assert "C:\\x" in nomes(banco)
     banco.execute("DELETE" + r.sql_texto().split("DELETE")[1])
-    assert "C:\\x" not in nomes(banco)
+    assert nomes(banco) == ["Gabriel", "Ana", "Giovana", " Gustavo", "O'Brien"]      # só ela saiu
     banco.execute("RESET standard_conforming_strings")
 
 
@@ -153,3 +153,64 @@ def test_o_rascunho_inteiro_roda_em_ordem(banco):
     r.acrescentar(rascunho.Apagar(t, filtro.Filtro([filtro.Condicao(c["email"], "vazio")])))
     banco.execute(r.sql_texto())
     assert nomes(banco) == ["Gabriel", "Ana", " Gustavo", "O'Brien", "Zé"]
+
+
+def test_alterar_misto_atualiza_quem_muda_qualquer_coluna(banco):
+    r, t, c = preparar(banco)
+    banco.execute("UPDATE public.pessoas SET idade = 99 WHERE id IN (1, 2, 3)")
+    banco.execute("UPDATE public.pessoas SET nome = nome || ' ' WHERE id = 1")
+    r.acrescentar(rascunho.Alterar(t, filtro.Filtro(), {c["idade"]: rascunho.Mudanca("valor", "99"),
+                                                        c["nome"]: rascunho.Mudanca("trim")}))
+    cur = banco.execute(r.sql_texto())
+    assert cur.rowcount == 3                                  # 1 (nome com espaço), 4 e 5 (idade diferente de 99)
+    assert banco.execute("SELECT count(*) FROM public.pessoas WHERE idade IS DISTINCT FROM 99").fetchone() == (0,)
+    assert nomes(banco)[0] == "Gabriel"
+
+
+def test_branco_vazio_nao_apara_o_que_nao_e_branco(banco):
+    r, t, c = preparar(banco)
+    banco.execute("UPDATE public.pessoas SET email = '  ' WHERE id = 3")
+    banco.execute("UPDATE public.pessoas SET email = ' ab@x ' WHERE id = 1")
+    r.acrescentar(rascunho.Alterar(t, filtro.Filtro(), {c["email"]: rascunho.Mudanca("branco_vazio")}))
+    banco.execute(r.sql_texto())
+    assert banco.execute("SELECT email FROM public.pessoas WHERE id IN (1, 3) ORDER BY id").fetchall() == [(" ab@x ",), (None,)]
+
+
+def test_duplicatas_nao_tratam_vazio_como_igual(banco):
+    r, t, c = preparar(banco)
+    banco.execute("TRUNCATE public.pessoas CASCADE")
+    banco.execute("INSERT INTO public.pessoas (nome, email) VALUES ('n1', NULL), ('n2', NULL), ('v1', ''), "
+                  "('v2', '  '), ('a1', 'a@x'), ('a2', ' A@X')")
+    r.acrescentar(rascunho.ApagarDuplicatas(t, filtro.Filtro(), (c["email"],), normalizar=True))
+    banco.execute(r.sql_texto())
+    assert nomes(banco) == ["n1", "n2", "v1", "v2", "a1"]
+    r2 = rascunho.Rascunho(catalogo.modelo(banco, "public"))       # sem normalizar também deixa os NULL em paz
+    r2.acrescentar(rascunho.ApagarDuplicatas(t, filtro.Filtro(), (c["email"],)))
+    banco.execute(r2.sql_texto())
+    assert nomes(banco) == ["n1", "n2", "v1", "v2", "a1"]
+
+
+def test_duplicatas_particionada_sem_chave_so_apaga_dentro_do_filtro(banco):
+    banco.execute("CREATE TABLE public.ev (regiao text, k int) PARTITION BY LIST (regiao)")
+    banco.execute("CREATE TABLE public.ev_n PARTITION OF public.ev FOR VALUES IN ('n')")
+    banco.execute("CREATE TABLE public.ev_s PARTITION OF public.ev FOR VALUES IN ('s')")
+    banco.execute("INSERT INTO public.ev VALUES ('n', 1), ('n', 1), ('s', 7), ('s', 8)")
+    m = catalogo.modelo(banco, "public")
+    tab = m.por_nome("ev")
+    cid = {x.nome: x.id for x in tab.colunas}
+    r = rascunho.Rascunho(m)
+    r.acrescentar(rascunho.ApagarDuplicatas(tab.id, filtro.Filtro([filtro.Condicao(cid["regiao"], "igual", ["n"])]),
+                                            (cid["k"],)))
+    assert banco.execute(r.sql_texto()).rowcount == 1
+    assert banco.execute("SELECT regiao, k FROM public.ev ORDER BY 1, 2").fetchall() == [("n", 1), ("s", 7), ("s", 8)]
+
+
+def test_duplicatas_com_chave_chamada_rn(banco):
+    banco.execute("CREATE TABLE public.q (rn int PRIMARY KEY, v text)")
+    banco.execute("INSERT INTO public.q VALUES (1, 'a'), (2, 'a'), (3, 'b')")
+    m = catalogo.modelo(banco, "public")
+    tab = m.por_nome("q")
+    r = rascunho.Rascunho(m)
+    r.acrescentar(rascunho.ApagarDuplicatas(tab.id, filtro.Filtro(), (tab.colunas[1].id,)))
+    banco.execute(r.sql_texto())
+    assert banco.execute("SELECT rn FROM public.q ORDER BY 1").fetchall() == [(1,), (3,)]

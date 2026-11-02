@@ -544,7 +544,7 @@ class ApagarTabela(Operacao):
 # O filtro vem de `filtro.py`, que importa este módulo: por isso o import é feito dentro das funções.
 
 _LIMPEZAS = {"trim": "trim({})", "minusculas": "lower({})", "maiusculas": "upper({})",
-             "branco_vazio": "NULLIF(trim({}), '')"}
+             "branco_vazio": "CASE WHEN trim({0}) = '' THEN NULL ELSE {0} END"}
 _MUDANCAS = ("valor", "vazio", "coluna") + tuple(_LIMPEZAS)
 _MANTER = ("menor", "maior", "recente")
 
@@ -574,7 +574,17 @@ def _descricao_filtro(f, m: Modelo, tabela_id: str) -> str:
 def _chaves(tab: Tabela) -> List[str]:
     """As colunas que identificam a linha: a PK, ou `ctid` (o último recurso) numa tabela sem ela."""
     pk = tab.pk()
-    return [ident(c.nome) for c in pk] if pk else ["ctid"]
+    if any(c.estado == "apagado" for c in pk):
+        raise ValueError(t("op.e.pk_apagada"))
+    # `ctid` sozinho se repete entre partições e filhas de herança: a linha é (tableoid, ctid)
+    return [ident(c.nome) for c in pk] if pk else ["tableoid", "ctid"]
+
+
+def _com_filtro(f, onde: str, extra: List[str]) -> str:
+    """O WHERE (sem a palavra) com condições nossas e o filtro, que vai entre parênteses se tiver `OR` solto."""
+    if onde and len(f.condicoes) > 1 and not (f.texto or "").strip():
+        onde = f"({onde})"
+    return " AND ".join(extra + ([onde] if onde else []))
 
 
 @dataclass
@@ -600,7 +610,8 @@ class Inserir(Operacao):
         return [f"INSERT INTO {nome_tabela(tab)} ({', '.join(cols)}) VALUES ({', '.join(vals)})"]
 
     def descricao(self, m: Modelo) -> str:
-        return t("op.inserir", tabela=m.tabelas[self.tabela].nome, n=len(self.valores))
+        return t("op.inserir_um" if len(self.valores) == 1 else "op.inserir", tabela=m.tabelas[self.tabela].nome,
+                 n=len(self.valores))
 
     def refere(self) -> Set[str]:
         return {self.tabela} | set(self.valores)
@@ -652,14 +663,11 @@ class Alterar(Operacao):
             c = _coluna_de(tab, i)
             expr = self._expressao(tab, c, mud)
             sets.append(f"{ident(c.nome)} = {expr}")
-            if mud.tipo in _LIMPEZAS:
-                mudam.append(f"{ident(c.nome)} IS DISTINCT FROM {expr}")
+            mudam.append(f"{ident(c.nome)} IS DISTINCT FROM {expr}")   # só entra quem muda de verdade
         onde = _onde(self.filtro, m, self.tabela)
-        if mudam:
-            if onde and len(self.filtro.condicoes) > 1 and not (self.filtro.texto or "").strip():
-                onde = f"({onde})"
-            quem = " OR ".join(mudam)
-            onde = f"{onde} AND ({quem})" if onde else quem
+        quem = " OR ".join(mudam)
+        onde = _com_filtro(self.filtro, onde, [])
+        onde = f"{onde} AND ({quem})" if onde else quem
         sql = f"UPDATE {nome_tabela(tab)} SET {', '.join(sets)}"
         return [sql + (f" WHERE {onde}" if onde else "")]
 
@@ -721,11 +729,16 @@ class ApagarDuplicatas(Operacao):
             raise ValueError(t("op.e.manter", valor=str(self.manter)))
         if isinstance(self.n, bool) or not isinstance(self.n, int) or self.n < 1:
             raise ValueError(t("op.e.n", valor=str(self.n)))
-        grupo = []
+        grupo, vazios = [], []
         for i in self.por:
             c = _coluna_de(tab, i)
             nome = ident(c.nome)
-            grupo.append(f"lower(trim({nome}))" if self.normalizar and filtro.familia(c.tipo) == "texto" else nome)
+            vazios.append(f"{nome} IS NOT NULL")                   # vazio não é repetido: fica fora da comparação
+            if self.normalizar and filtro.familia(c.tipo) == "texto":
+                vazios.append(f"trim({nome}) <> ''")
+                grupo.append(f"lower(trim({nome}))")
+            else:
+                grupo.append(nome)
         chaves = _chaves(tab)
         if self.manter == "recente":
             if not self.ordem:
@@ -736,11 +749,10 @@ class ApagarDuplicatas(Operacao):
         else:
             ordem = chaves
         lista = ", ".join(chaves)
-        onde = _onde(self.filtro, m, self.tabela)
-        de = nome_tabela(tab) + (f" WHERE {onde}" if onde else "")
+        onde = _com_filtro(self.filtro, _onde(self.filtro, m, self.tabela), vazios)
         return [f"DELETE FROM {nome_tabela(tab)} WHERE ({lista}) IN (SELECT {lista} FROM (SELECT {lista}, "
-                f"row_number() OVER (PARTITION BY {', '.join(grupo)} ORDER BY {', '.join(ordem)}) AS rn "
-                f"FROM {de}) AS d WHERE rn > {self.n})"]
+                f"row_number() OVER (PARTITION BY {', '.join(grupo)} ORDER BY {', '.join(ordem)}) AS _ratt_rn "
+                f"FROM {nome_tabela(tab)} WHERE {onde}) AS d WHERE d._ratt_rn > {self.n})"]
 
     def descricao(self, m: Modelo) -> str:
         tab = m.tabelas[self.tabela]
@@ -748,7 +760,7 @@ class ApagarDuplicatas(Operacao):
                  filtro=_descricao_filtro(self.filtro, m, self.tabela))
 
     def refere(self) -> Set[str]:
-        return {self.tabela} | set(self.por) | ({self.ordem} if self.ordem else set()) \
+        return {self.tabela} | set(self.por) | ({self.ordem} if self.manter == "recente" and self.ordem else set()) \
             | _refere_filtro(self.filtro, self.tabela)
 
 
@@ -886,6 +898,16 @@ def _conferir(op: Operacao) -> None:
     if isinstance(op, Inserir) and (not isinstance(op.valores, dict) or not all(
             v is None or isinstance(v, str) for v in op.valores.values())):
         raise TypeError(f"valores inválidos: {op.valores!r}")
+    if hasattr(op, "vista") and op.vista is not None and (
+            isinstance(op.vista, bool) or not isinstance(op.vista, int) or op.vista < 0):
+        raise TypeError(f"vista inválida: {op.vista!r}")
+    if isinstance(op, ApagarDuplicatas):
+        if not isinstance(op.normalizar, bool) or op.manter not in _MANTER:
+            raise TypeError("normalizar ou manter inválido")
+        if isinstance(op.n, bool) or not isinstance(op.n, int) or op.n < 1:
+            raise TypeError(f"n inválido: {op.n!r}")
+        if op.manter == "recente" and not isinstance(op.ordem, str):
+            raise TypeError("falta a coluna de ordem")
     if isinstance(op, Alterar) and not all(isinstance(x.tipo, str) and (x.valor is None or isinstance(x.valor, str))
                                            for x in op.mudancas.values()):
         raise TypeError("mudanças inválidas")

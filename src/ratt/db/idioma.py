@@ -586,6 +586,8 @@ ratt db user passwd [name]            changes a password (no name: yours)
     "op.apagar_coluna": {"pt": "apagar a coluna {coluna} de {tabela}", "en": "drop column {coluna} from {tabela}"},
     "op.apagar_tabela": {"pt": "apagar a tabela {tabela}", "en": "drop table {tabela}"},
     "op.inserir": {"pt": "inserir uma linha em {tabela} ({n} valores)", "en": "insert a row into {tabela} ({n} values)"},
+    "op.inserir_um": {"pt": "inserir uma linha em {tabela} ({n} valor)", "en": "insert a row into {tabela} ({n} value)"},
+    "op.e.pk_apagada": {"pt": "a chave primária perdeu uma coluna no rascunho", "en": "the primary key lost a column in the draft"},
     "op.alterar": {"pt": "alterar {colunas} em {tabela} ({filtro})", "en": "change {colunas} in {tabela} ({filtro})"},
     "op.apagar_linhas": {"pt": "apagar linhas de {tabela} ({filtro})", "en": "delete rows from {tabela} ({filtro})"},
     "op.apagar_duplicatas": {"pt": "apagar duplicatas de {tabela} repetidas por {colunas} ({filtro})",

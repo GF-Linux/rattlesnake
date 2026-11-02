@@ -37,7 +37,7 @@ def _processo_vivo(pid):
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except PermissionError:
+    except (PermissionError, OverflowError):
         return True         # existe, é de outro usuário
     return True
 
@@ -83,6 +83,8 @@ def banco():
     finally:
         if conexao is not None:
             conexao.close()
-        if criado:
-            admin.execute('DROP DATABASE IF EXISTS "%s" WITH (FORCE)' % nome)
-        admin.close()
+        try:
+            if criado:
+                admin.execute('DROP DATABASE IF EXISTS "%s" WITH (FORCE)' % nome)
+        finally:
+            admin.close()
