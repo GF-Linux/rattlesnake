@@ -861,12 +861,19 @@ class AppTeste(App):
         self.push_screen(canvas.TelaCanvas(self.fonte, "public"))
 
 
+async def pronto(app):
+    """Espera as leituras do banco (feitas em thread) terminarem e chegarem à tela."""
+    await app.workers.wait_for_complete()
+    await asyncio.sleep(0.05)
+
+
 def test_canvas_abre_e_seleciona(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
 
     async def roteiro():
         app = AppTeste(FonteFalsa())
         async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
             tela = app.screen
             await piloto.press("tab")
             assert tela.selecao[0] == "tabela"
@@ -881,6 +888,7 @@ def test_mover_pelo_teclado_guarda_posicao(monkeypatch, tmp_path):
     async def roteiro():
         app = AppTeste(FonteFalsa())
         async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
             await piloto.press("tab")
             tid = app.screen.selecao[1]
             antes = app.screen.posicoes[tid]
@@ -895,6 +903,7 @@ def test_terminal_pequeno_e_vazio(monkeypatch, tmp_path):
     async def roteiro():
         app = AppTeste(FonteFalsa(modelo.Modelo("public", {}, {})))
         async with app.run_test(size=(80, 24)) as piloto:
+            await pronto(app)
             await piloto.pause()
             assert t("canvas.vazio") in app.screen.query_one(canvas.Quadro).aviso_vazio
             await piloto.resize_terminal(60, 20)
@@ -909,9 +918,258 @@ def test_redesenha_quando_o_banco_muda(monkeypatch, tmp_path):
         fonte = FonteFalsa()
         app = AppTeste(fonte)
         async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
             del fonte.m.tabelas["t4"]
             fonte.sig = 2
             app.screen.vigiar()
             await piloto.pause(0.3)
             assert "t4" not in app.screen.vista.tabelas
+    asyncio.run(roteiro())
+
+
+# ---- a tela do canvas: rodada de correções ------------------------------------------------------------------
+
+def modelo_largo(n, prefixo="tab"):
+    """n tabelas soltas, sem ligações, cada uma com algumas colunas: bem maior que um terminal de 80x24."""
+    tabelas = {}
+    for k in range(n):
+        tid = "t%d" % (k + 1)
+        tabelas[tid] = Tabela(tid, "public", "%s%02d_com_nome_comprido" % (prefixo, k), [
+            Coluna("%s.c1" % tid, "id", "bigint", obrigatoria=True, pk=True),
+            Coluna("%s.c2" % tid, "descricao_longa", "character varying(255)"),
+            Coluna("%s.c3" % tid, "criado_em", "timestamp with time zone")], nome_pk="pk%d" % k)
+    return Modelo("public", tabelas, {})
+
+
+def test_setas_rolam_o_quadro_sem_selecao(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa(modelo_largo(12)))
+        async with app.run_test(size=(80, 24)) as piloto:
+            await pronto(app)
+            q = app.screen.query_one(canvas.Quadro)
+            assert app.screen.selecao is None and q.max_scroll_y > 0
+            antes = q.scroll_offset
+            await piloto.press("down")
+            await piloto.pause(0.1)
+            assert q.scroll_offset.y > antes.y
+            await piloto.press("pagedown")
+            await piloto.pause(0.1)
+            assert q.scroll_offset.y > antes.y + 2
+            await piloto.press("home")
+            await piloto.pause(0.1)
+            assert q.scroll_offset.y == 0
+            await piloto.press("end")
+            await piloto.pause(0.1)
+            assert q.scroll_offset.y == q.max_scroll_y
+            # com uma tabela selecionada, ↑/↓ andam pelas colunas e não rolam
+            await piloto.press("home")
+            await piloto.press("tab")
+            await piloto.press("down")
+            assert app.screen.selecao[0] == "coluna"
+    asyncio.run(roteiro())
+
+
+def test_setas_horizontais_rolam(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        m = modelo_png()
+        app = AppTeste(FonteFalsa(m))
+        async with app.run_test(size=(40, 24)) as piloto:
+            await pronto(app)
+            q = app.screen.query_one(canvas.Quadro)
+            assert q.max_scroll_x > 0
+            await piloto.press("right")
+            await piloto.pause(0.1)
+            assert q.scroll_offset.x > 0
+            await piloto.press("left")
+            await piloto.pause(0.1)
+            assert q.scroll_offset.x == 0
+    asyncio.run(roteiro())
+
+
+def test_erro_ao_ler_o_banco_nao_derruba_a_tela(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    avisos = []
+    monkeypatch.setattr(canvas.TelaCanvas, "notify", lambda self, msg, **kw: avisos.append((msg, kw.get("severity"))))
+
+    class Quebrada(FonteFalsa):
+        def modelo(self, esquema):
+            raise RuntimeError("a conexão caiu")
+
+    async def roteiro():
+        app = AppTeste(Quebrada())
+        async with app.run_test(size=(80, 24)) as piloto:
+            await pronto(app)
+            assert isinstance(app.screen, canvas.TelaCanvas)
+            assert t("canvas.vazio") in app.screen.query_one(canvas.Quadro).aviso_vazio
+            assert avisos and avisos[0][1] == "error" and "a conexão caiu" in avisos[0][0]
+    asyncio.run(roteiro())
+
+
+def test_resposta_de_outro_schema_e_descartada(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        fonte = FonteFalsa()
+        app = AppTeste(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            antes = set(tela.vista.tabelas)
+
+            def virando(esquema):
+                tela.esquema = "outro"          # a tela trocou de schema com a consulta ainda no ar
+                m = fonte.m.copia()
+                del m.tabelas["t4"]
+                return m
+            fonte.modelo = virando
+            fonte.sig = 2
+            tela.vigiar()
+            await pronto(app)
+            assert set(tela.vista.tabelas) == antes
+    asyncio.run(roteiro())
+
+
+def test_fonte_banco_tem_conexao_propria_e_fecha(monkeypatch):
+    abertas = []
+
+    class Con:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    def entrar(porta, usuario, banco="postgres"):
+        c = Con()
+        abertas.append((porta, usuario, banco, c))
+        return c, "s.como_socket"
+    monkeypatch.setattr(canvas.acesso, "entrar", entrar)
+    f = canvas.FonteBanco(None, 5432, "eu", "bd")
+    assert abertas == []                         # preguiçosa
+    assert f.conexao is f.conexao and len(abertas) == 1 and abertas[0][:3] == (5432, "eu", "bd")
+    f.fechar()
+    assert abertas[0][3].closed
+
+
+def test_sql_visivel_e_quadro_rola_em_80x24(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa(modelo_largo(12)))
+        async with app.run_test(size=(80, 24)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            sql = tela.query_one("#canvas_sql").region
+            quadro = tela.query_one(canvas.Quadro)
+            assert sql.height > 0 and sql.bottom <= 24 and sql.y >= quadro.region.bottom
+            assert quadro.virtual_size.height > quadro.size.height
+            assert quadro.max_scroll_y > 0
+            await piloto.resize_terminal(60, 20)
+            await piloto.pause(0.1)
+            assert tela.query_one("#canvas_sql").region.bottom <= 20
+    asyncio.run(roteiro())
+
+
+def test_arrastar_pelo_titulo_move_limita_e_guarda(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            q = tela.query_one(canvas.Quadro)
+            tid = "t1"
+            x0, y0, _, _ = q.desenho.caixas[tid]
+            ini = (x0 + 4, y0 - q.scroll_offset.y)
+            await piloto.mouse_down(q, offset=ini)
+            await piloto.hover(q, offset=(ini[0] + 10, ini[1] + 3))
+            await piloto.pause(0.2)
+            await piloto.mouse_up(q, offset=(ini[0] + 10, ini[1] + 3))
+            await piloto.pause(0.1)
+            assert tela.selecao == ("tabela", tid)
+            assert tela.posicoes[tid] == (x0 + 10, y0 + 3)
+            assert guardar.ler_posicoes(5432, "teste", "public")[tid] == (x0 + 10, y0 + 3)
+            # arrastar para além do canto: trava em x>=4, y>=2
+            x1, y1, _, _ = q.desenho.caixas[tid]
+            ini = (x1 + 4, y1 - q.scroll_offset.y)
+            await piloto.mouse_down(q, offset=ini)
+            await piloto.hover(q, offset=(2, 0))
+            await piloto.pause(0.2)
+            await piloto.mouse_up(q, offset=(2, 0))
+            await piloto.pause(0.1)
+            assert tela.posicoes[tid] == (canvas.MIN_X, canvas.MIN_Y)
+            assert guardar.ler_posicoes(5432, "teste", "public")[tid] == (canvas.MIN_X, canvas.MIN_Y)
+    asyncio.run(roteiro())
+
+
+def test_schema_grande_abre_em_foco(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    m = modelo_largo(30)
+    # tab00 é a primeira pelo nome: t1 e t2 ligam nela; t3 liga em t2 (2 saltos: fora do recorte)
+    m.ligacoes["k1"] = Ligacao("k1", "t2", ("t2.c1",), "t1", ("t1.c1",), "a")
+    m.ligacoes["k2"] = Ligacao("k2", "t3", ("t3.c1",), "t2", ("t2.c1",), "b")
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa(m))
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            assert set(tela.vista.tabelas) == {"t1", "t2"}
+            await piloto.press("F")
+            await piloto.pause(0.1)
+            assert len(tela.vista.tabelas) == 30
+    asyncio.run(roteiro())
+
+
+def test_trocar_de_schema(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    class Dois(FonteFalsa):
+        def esquemas(self):
+            return ["public", "outro"]
+
+        def modelo(self, esquema):
+            if esquema == "outro":
+                return modelo_largo(1)
+            return self.m.copia()
+
+    async def roteiro():
+        app = AppTeste(Dois())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            assert len(app.screen.vista.tabelas) == 4
+            await piloto.press("s")
+            await pronto(app)
+            await piloto.pause(0.1)
+            await piloto.press("down")
+            await piloto.press("enter")
+            await piloto.pause(0.1)
+            await pronto(app)
+            tela = app.screen
+            assert isinstance(tela, canvas.TelaCanvas) and tela.esquema == "outro"
+            assert list(tela.vista.tabelas) == ["t1"]
+    asyncio.run(roteiro())
+
+
+def test_tabela_selecionada_some_do_banco(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        fonte = FonteFalsa()
+        app = AppTeste(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            tela.selecao = ("coluna", "t4", "t4.c2")
+            tela.redesenhar()
+            del fonte.m.tabelas["t4"]
+            del fonte.m.ligacoes["k3"]
+            fonte.sig = 2
+            tela.vigiar()
+            await pronto(app)
+            assert "t4" not in tela.vista.tabelas and tela.selecao is None
     asyncio.run(roteiro())

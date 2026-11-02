@@ -600,6 +600,8 @@ ratt db user passwd [name]            changes a password (no name: yours)
     "canvas.k.foco": {"pt": "foco", "en": "focus"},
     "canvas.k.tudo": {"pt": "tudo", "en": "show all"},
     "canvas.k.voltar": {"pt": "voltar", "en": "back"},
+    "canvas.k.rolar": {"pt": "rolar: setas/PgUp/PgDn", "en": "scroll: arrows/PgUp/PgDn"},
+    "canvas.erro_banco": {"pt": "Não consegui ler o banco: {erro}", "en": "Could not read the database: {erro}"},
     "canvas.qual_esquema": {"pt": "Qual schema?", "en": "Which schema?"},
     "canvas.qual_foco": {"pt": "Foco em qual tabela? (parte do nome)", "en": "Focus on which table? (part of the name)"},
     "canvas.foco_nao_achou": {"pt": "Nenhuma tabela com «{nome}».", "en": "No table matching \u00ab{nome}\u00bb."},

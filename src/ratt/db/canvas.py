@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -39,7 +40,27 @@ class FonteBanco:
     """O que a tela precisa do banco: esquemas, o modelo, a assinatura para notar mudanças e as consultas."""
 
     def __init__(self, conexao, porta: int, usuario: str, banco: str):
-        self.conexao, self.porta, self.usuario, self.banco = conexao, porta, usuario, banco
+        """`conexao` só serve para injetar uma já pronta (testes); com None o canvas abre a SUA, na primeira
+        consulta, para não dividir com a tela do banco a conexão que ela usa em outras threads."""
+        self._conexao, self._injetada = conexao, conexao is not None
+        self._trava = threading.Lock()
+        self.porta, self.usuario, self.banco = porta, usuario, banco
+
+    @property
+    def conexao(self):
+        with self._trava:
+            if self._conexao is None:
+                self._conexao, _ = acesso.entrar(self.porta, self.usuario, self.banco)
+                if self._conexao is None:
+                    raise RuntimeError(t("run.sem_acesso", usuario=self.usuario, banco=self.banco))
+            return self._conexao
+
+    def fechar(self) -> None:
+        """Fecha a conexão que a fonte abriu (a injetada é de quem a deu)."""
+        with self._trava:
+            if self._conexao is not None and not self._injetada:
+                self._conexao.close()
+            self._conexao = None if not self._injetada else self._conexao
 
     def esquemas(self) -> List[str]:
         return catalogo.esquemas_com_tabelas(self.conexao)
@@ -98,6 +119,7 @@ class Quadro(ScrollView):
             self.tabela_id, self.x, self.y = tabela_id, x, y
 
     DEFAULT_CSS = "Quadro { height: 1fr; }"
+    can_focus = False           # as teclas são da tela: o ScrollView focado tomaria as setas para rolar
 
     def __init__(self, **kw):
         super().__init__(**kw)
@@ -230,8 +252,14 @@ class TelaCanvas(Screen):
     BINDINGS = [
         Binding("tab", "tabela(1)", t("canvas.k.proxima")),
         Binding("shift+tab", "tabela(-1)", t("canvas.k.anterior"), show=False),
-        Binding("up", "coluna(-1)", t("canvas.k.coluna_acima"), show=False),
-        Binding("down", "coluna(1)", t("canvas.k.coluna_abaixo"), show=False),
+        Binding("up", "vertical(-1)", t("canvas.k.coluna_acima"), show=False),
+        Binding("down", "vertical(1)", t("canvas.k.coluna_abaixo"), show=False),
+        Binding("left", "rolar(-4,0)", show=False),
+        Binding("right", "rolar(4,0)", show=False),
+        Binding("pageup", "pagina(-1)", t("canvas.k.rolar")),
+        Binding("pagedown", "pagina(1)", show=False),
+        Binding("home", "pagina(-2)", show=False),
+        Binding("end", "pagina(2)", show=False),
         Binding("shift+up", "mover(0,-1)", t("canvas.k.mover")),
         Binding("shift+down", "mover(0,1)", show=False),
         Binding("shift+left", "mover(-2,0)", show=False),
@@ -256,6 +284,7 @@ class TelaCanvas(Screen):
         self.foco: Optional[str] = None
         self.avisos: Dict[str, str] = {}
         self.marca = None
+        self.carregado = False          # já chegou o primeiro modelo deste schema?
         self._ultimo = 0.0
         self._timer = None
 
@@ -266,9 +295,14 @@ class TelaCanvas(Screen):
         yield Footer()
 
     def on_mount(self):
-        self.marca = self.fonte.assinatura()
-        self.carregar(self.fonte.modelo(self.esquema), primeira=True)
+        self.redesenhar()
+        self.ler(self.esquema)
         self.set_interval(2.0, self.vigiar)
+
+    def on_unmount(self):
+        fechar = getattr(self.fonte, "fechar", None)
+        if fechar:
+            fechar()
 
     # ── o modelo e as posições ──────────────────────────────────────────────
 
@@ -427,12 +461,21 @@ class TelaCanvas(Screen):
         self.app.pop_screen()
 
     def action_esquema(self) -> None:
-        def escolhido(nome):
-            if nome and nome != self.esquema:
-                self.esquema, self.selecao = nome, None
-                self.marca = self.fonte.assinatura()
-                self.carregar(self.fonte.modelo(nome), primeira=True)
-        self.app.push_screen(EscolherEsquema(self.fonte.esquemas(), self.esquema), escolhido)
+        self.listar_esquemas()
+
+    def action_vertical(self, passo: int) -> None:
+        """↑/↓ andam pelas colunas da tabela selecionada; sem seleção de tabela ou coluna, rolam o quadro."""
+        if self.selecao and self.selecao[0] in ("tabela", "coluna"):
+            self.action_coluna(passo)
+        else:
+            self.action_rolar(0, passo * 2)
+
+    def action_rolar(self, dx: int, dy: int) -> None:
+        self.query_one(Quadro).scroll_relative(x=dx, y=dy, animate=False)
+
+    def action_pagina(self, onde: int) -> None:
+        q = self.query_one(Quadro)
+        {-2: q.scroll_home, 2: q.scroll_end, -1: q.scroll_page_up, 1: q.scroll_page_down}[onde](animate=False)
 
     def action_foco(self) -> None:
         def nome_dado(nome):
@@ -454,19 +497,57 @@ class TelaCanvas(Screen):
             self.foco = None
             self.carregar(self.todo)
 
-    # ── olhar o banco de tempos em tempos ───────────────────────────────────
+    # ── ler o banco (sempre fora da thread da tela) ─────────────────────────
 
     @work(thread=True, exclusive=True, group="vigia_canvas")
-    def vigiar(self):
+    def ler(self, esquema: str, so_se_mudou: bool = False):
+        """Lê o modelo de `esquema`. Se a tela já trocou de schema ou saiu quando a resposta chega, ela é descartada."""
+        avisar = not self.carregado
         try:
             marca = self.fonte.assinatura()
-            if marca == self.marca:
+            if so_se_mudou and marca == self.marca:
                 return
-            m = self.fonte.modelo(self.esquema)
-        except Exception:
+            m = self.fonte.modelo(esquema)
+        except Exception as erro:
+            if avisar:                  # o poller falha em silêncio; quem abre ou troca de schema precisa saber
+                self.app.call_from_thread(self._falhou, esquema, erro)
             return
-        self.app.call_from_thread(self._atualizar, marca, m)
+        self.app.call_from_thread(self._chegou, esquema, marca, m)
 
-    def _atualizar(self, marca, m) -> None:
+    def vigiar(self):
+        if self.carregado:
+            self.ler(self.esquema, so_se_mudou=True)
+
+    def _chegou(self, esquema, marca, m) -> None:
+        if not self.is_attached or esquema != self.esquema:
+            return
         self.marca = marca
-        self.carregar(m)
+        primeira, self.carregado = not self.carregado, True
+        self.carregar(m, primeira=primeira)
+
+    def _falhou(self, esquema, erro) -> None:
+        if self.is_attached and esquema == self.esquema:
+            linhas = str(erro).strip().splitlines()
+            self.notify(t("canvas.erro_banco", erro=linhas[0] if linhas else type(erro).__name__), severity="error")
+
+    @work(thread=True, exclusive=True, group="esquemas_canvas")
+    def listar_esquemas(self):
+        try:
+            nomes = self.fonte.esquemas()
+        except Exception as erro:
+            self.app.call_from_thread(self._falhou, self.esquema, erro)
+            return
+        self.app.call_from_thread(self._escolher_esquema, nomes)
+
+    def _escolher_esquema(self, nomes) -> None:
+        if self.is_attached:
+            self.app.push_screen(EscolherEsquema(nomes, self.esquema), self.trocar_esquema)
+
+    def trocar_esquema(self, nome) -> None:
+        if not nome or nome == self.esquema:
+            return
+        self.esquema, self.selecao, self.foco = nome, None, None
+        self.posicoes, self.carregado, self.marca = {}, False, None
+        self.todo = self.vista = _modelo.Modelo(nome)
+        self.redesenhar()
+        self.ler(nome)

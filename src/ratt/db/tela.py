@@ -408,7 +408,7 @@ class TelaBanco(App):
             return
         from ratt.db import canvas
         esquema = self.atual.esquema if self.atual else "public"
-        self.push_screen(canvas.TelaCanvas(canvas.FonteBanco(self.conexao, self.porta, self.usuario, self.banco), esquema))
+        self.push_screen(canvas.TelaCanvas(canvas.FonteBanco(None, self.porta, self.usuario, self.banco), esquema))
 
     def action_trocar_banco(self):
         conexao, _ = acesso.entrar(self.porta, self.usuario)
