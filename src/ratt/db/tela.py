@@ -101,6 +101,7 @@ class TelaBanco(App):
         Binding("q", "quit", t("tui.sair")),
         Binding("r", "recarregar", t("tui.recarregar")),
         Binding("p", "psql", "psql"),
+        Binding("d", "diagrama", t("canvas.diagrama")),
         Binding("b", "trocar_banco", t("tui.banco")),
         Binding("n", "pagina(1)", t("tui.proxima")),
         Binding("N,shift+n", "pagina(-1)", t("tui.anterior")),
@@ -401,6 +402,13 @@ class TelaBanco(App):
             print(f"$ {' '.join(cmd)}   ({t('tui.volta_com_q')})", flush=True)
             subprocess.run(cmd)
         self.action_recarregar()
+
+    def action_diagrama(self):
+        if not self.conexao:
+            return
+        from ratt.db import canvas
+        esquema = self.atual.esquema if self.atual else "public"
+        self.push_screen(canvas.TelaCanvas(canvas.FonteBanco(self.conexao, self.porta, self.usuario, self.banco), esquema))
 
     def action_trocar_banco(self):
         conexao, _ = acesso.entrar(self.porta, self.usuario)

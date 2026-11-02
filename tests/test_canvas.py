@@ -821,3 +821,97 @@ def test_duas_opcionais_na_mesma_coluna_ficam_opcionais():
 
 def test_tres_opcionais_na_mesma_coluna_ficam_opcionais():
     _confere_os(3)
+
+
+# ---- a tela do canvas (Task 8) -------------------------------------------------------------------------------
+
+import asyncio
+
+from textual.app import App
+
+from ratt.db import canvas, guardar
+from ratt.db.idioma import t
+
+
+class FonteFalsa:
+    def __init__(self, m=None):
+        self.m = m or modelo_png()
+        self.porta, self.banco = 5432, "teste"
+        self.sig = 1
+
+    def esquemas(self):
+        return ["public"]
+
+    def modelo(self, esquema):
+        return self.m.copia()
+
+    def assinatura(self):
+        return self.sig
+
+    def consulta(self):
+        return ConsultaFalsa()
+
+
+class AppTeste(App):
+    def __init__(self, fonte):
+        super().__init__()
+        self.fonte = fonte
+
+    def on_mount(self):
+        self.push_screen(canvas.TelaCanvas(self.fonte, "public"))
+
+
+def test_canvas_abre_e_seleciona(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            tela = app.screen
+            await piloto.press("tab")
+            assert tela.selecao[0] == "tabela"
+            await piloto.press("down")
+            assert tela.selecao[0] == "coluna"
+    asyncio.run(roteiro())
+
+
+def test_mover_pelo_teclado_guarda_posicao(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await piloto.press("tab")
+            tid = app.screen.selecao[1]
+            antes = app.screen.posicoes[tid]
+            await piloto.press("shift+down")
+            assert guardar.ler_posicoes(5432, "teste", "public")[tid] == (antes[0], antes[1] + 1)
+    asyncio.run(roteiro())
+
+
+def test_terminal_pequeno_e_vazio(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa(modelo.Modelo("public", {}, {})))
+        async with app.run_test(size=(80, 24)) as piloto:
+            await piloto.pause()
+            assert t("canvas.vazio") in app.screen.query_one(canvas.Quadro).aviso_vazio
+            await piloto.resize_terminal(60, 20)
+            await piloto.pause()
+    asyncio.run(roteiro())
+
+
+def test_redesenha_quando_o_banco_muda(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        fonte = FonteFalsa()
+        app = AppTeste(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            del fonte.m.tabelas["t4"]
+            fonte.sig = 2
+            app.screen.vigiar()
+            await piloto.pause(0.3)
+            assert "t4" not in app.screen.vista.tabelas
+    asyncio.run(roteiro())
