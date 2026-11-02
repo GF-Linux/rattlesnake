@@ -1,6 +1,10 @@
 """As operações de dados do rascunho contra um PostgreSQL de verdade (o fixture `banco` cria um banco descartável)."""
 from conftest import PESSOAS_SQL
-from ratt.db import catalogo, filtro, rascunho
+import psycopg
+import pytest
+
+from ratt.db import catalogo, checagem, filtro, rascunho
+from test_dados import modelo_pessoas
 
 
 def preparar(banco):
@@ -214,3 +218,179 @@ def test_duplicatas_com_chave_chamada_rn(banco):
     r.acrescentar(rascunho.ApagarDuplicatas(tab.id, filtro.Filtro(), (tab.colunas[1].id,)))
     banco.execute(r.sql_texto())
     assert banco.execute("SELECT rn FROM public.q ORDER BY 1").fetchall() == [(1,), (3,)]
+
+
+# ── contagens, amostras e avisos: só leitura ──
+
+def _chaves(avisos):
+    return [(a.nivel, a.chave) for a in avisos]
+
+
+def test_contagens_reais(banco):
+    banco.execute(PESSOAS_SQL); c = checagem.Consulta(banco)
+    m = catalogo.modelo(banco, "public")
+    lig_pedidos = next(l for l in m.ligacoes.values() if m.tabelas[l.origem].nome == "pedidos")
+    onde = filtro.where(filtro.Filtro([filtro.Condicao("t1.c2", "comeca", ["G"])]), modelo_pessoas(), "t1")
+    assert c.contar_onde("public", "pessoas", onde) == 2              # ' Gustavo' não começa com G
+    assert c.contar_onde("public", "pessoas", "") == 5
+    assert c.cascata("public", "pessoas", "id = 1", [lig_pedidos], m) == [("public.pedidos", "CASCADE", 2)]
+    assert c.valor_valido("date", "2026-02-30") is False and c.valor_valido("date", "2026-02-28") is True
+    c.forcar_cast = True; assert c.valor_valido("integer", "x") is False
+    assert c.valor_valido("date", "2026-02-30") is False and c.valor_valido("integer", "12") is True
+    assert c.ja_existe("public", "pessoas", "email", "'ana@x.com'") == 1
+
+
+def test_valor_valido_tipo_ruim_nao_vira_sql(banco):
+    banco.execute(PESSOAS_SQL)
+    for forcar in (False, True):
+        c = checagem.Consulta(banco)
+        c.forcar_cast = forcar
+        assert c.valor_valido("date); DELETE FROM public.pedidos; --", "1") is None and c.erro()
+        assert c.valor_valido("tipo_que_nao_existe", "1") is None and c.erro()
+    assert banco.execute("SELECT count(*) FROM public.pedidos").fetchone()[0] == 3
+
+
+def test_consulta_nunca_escreve(banco):
+    banco.execute(PESSOAS_SQL)
+    assert checagem.Consulta(banco).contar_onde("public", "pessoas", "(SELECT count(*) FROM (DELETE FROM public.pedidos RETURNING 1) d) > 0") is None
+    assert banco.execute("SELECT count(*) FROM public.pedidos").fetchone()[0] == 3
+
+
+def test_funcao_que_escreve_no_where_e_barrada(banco):
+    banco.execute(PESSOAS_SQL)
+    banco.execute("CREATE FUNCTION apaga() RETURNS bigint LANGUAGE sql AS 'DELETE FROM public.pedidos RETURNING 1'")
+    banco.execute("CREATE SEQUENCE seq")
+    c = checagem.Consulta(banco)
+    assert c.contar_onde("public", "pessoas", "apaga() > 0") is None
+    assert "read-only" in c.erro() or "leitura" in c.erro()          # a mensagem vem no idioma do servidor
+    assert c.contar_onde("public", "pessoas", "nextval('seq') > 0") is None
+    assert c.amostra("public", "pessoas", "apaga() > 0", ["nome"]) is None
+    assert banco.execute("SELECT count(*) FROM public.pedidos").fetchone()[0] == 3
+    assert banco.execute("SELECT last_value, is_called FROM seq").fetchone() == (1, False)
+    with pytest.raises(psycopg.Error):
+        catalogo.pagina(banco, "public", "pessoas", "apaga() > 0", ["id"], 0, 10)
+    with pytest.raises(psycopg.Error):
+        catalogo.contar_filtrado(banco, "public", "pessoas", "apaga() > 0")
+    assert banco.execute("SELECT count(*) FROM public.pedidos").fetchone()[0] == 3
+
+
+def test_dentro_de_transacao_aberta_continua_so_leitura(banco):
+    """Conexão sem autocommit, já no meio de uma transação: a checagem vira savepoint e continua somente leitura,
+    e nada dela (nem o READ ONLY, nem o tempo limite) vaza para a transação de quem chamou."""
+    banco.execute(PESSOAS_SQL)
+    banco.execute("CREATE FUNCTION apaga() RETURNS bigint LANGUAGE sql AS 'DELETE FROM public.pedidos RETURNING 1'")
+    con = psycopg.connect(banco.info.dsn)
+    try:
+        con.execute("INSERT INTO public.pedidos (pessoa_id, total) VALUES (2, 1)")
+        c = checagem.Consulta(con)
+        assert c.contar_onde("public", "pessoas", "apaga() > 0") is None
+        assert c.contar_onde("public", "pessoas", "") == 5
+        assert con.execute("SELECT current_setting('transaction_read_only'), current_setting('statement_timeout')"
+                           ).fetchone() == ("off", "0")
+        assert con.execute("SELECT count(*) FROM public.pedidos").fetchone()[0] == 4
+        con.rollback()
+    finally:
+        con.close()
+    assert banco.execute("SELECT count(*) FROM public.pedidos").fetchone()[0] == 3
+
+
+def test_amostra_antes_depois_grupos(banco):
+    banco.execute(PESSOAS_SQL)
+    banco.execute("INSERT INTO public.pessoas (nome, email) VALUES ('Ana', NULL), ('ana ', NULL), ('Bia', NULL)")
+    c = checagem.Consulta(banco)
+    assert c.amostra("public", "pessoas", "nome ILIKE 'g%'", ["nome", "idade"], 1) in ([("Gabriel", 34)], [("Giovana", None)])
+    assert len(c.amostra("public", "pessoas", "", ["id"])) == 5
+    pares = c.antes_depois("public", "pessoas", "id = 4", {"nome": "trim(nome)", "idade": "41"})
+    assert pares == [((" Gustavo", 40), ("Gustavo", 41))]
+    assert c.grupos_repetidos("public", "pessoas", "nome IS NOT NULL", ["lower(trim(nome))"]) == (1, 2)
+    assert c.grupos_repetidos("public", "pessoas", "", ["email"]) == (1, 3)      # GROUP BY junta os NULL
+
+
+def test_espacos_e_vazios_de_fora(banco):
+    banco.execute(PESSOAS_SQL)
+    m = catalogo.modelo(banco, "public")
+    t = m.por_nome("pessoas")
+    c = {col.nome: col.id for col in t.colunas}
+    consulta = checagem.Consulta(banco)
+    g = filtro.Filtro([filtro.Condicao(c["nome"], "comeca", ["G"])])
+    assert [(a.chave, a.valores["n"]) for a in checagem.avisos_do_filtro(g, m, t.id, consulta)] == [("chk.espacos_nas_pontas", 1)]
+    d = filtro.Filtro([filtro.Condicao(c["idade"], "diferente", ["30"])])
+    assert [(a.chave, a.valores["n"], a.valores["coluna"]) for a in checagem.avisos_do_filtro(d, m, t.id, consulta)] == \
+        [("chk.vazios_de_fora", 1, "idade")]
+
+
+def test_contagem_e_o_que_o_comando_pega(banco):
+    """A contagem que a pessoa vê sai do mesmo WHERE que o comando roda: bate com o rowcount de verdade."""
+    r, t, c = preparar(banco)
+    banco.execute("INSERT INTO public.pessoas (nome, email) VALUES ('ANA@x.com', NULL), ('x', ' ana@x.com'), ('y', '')")
+    consulta = checagem.Consulta(banco)
+    f = filtro.Filtro([filtro.Condicao(c["nome"], "comeca", ["G"]), filtro.Condicao(c["idade"], "maior_igual", ["40"])],
+                      conectivo="OU")
+    ops = [rascunho.Alterar(t, f, {c["nome"]: rascunho.Mudanca("trim")}),
+           rascunho.ApagarDuplicatas(t, filtro.Filtro(), (c["email"],), normalizar=True),
+           rascunho.Apagar(t, f)]
+    for op in ops:
+        avisos = checagem.avisos_da_operacao(op, r, consulta)
+        visto = checagem.contagem(avisos)
+        cur = banco.execute(op.comandos(r.base)[0])
+        assert visto == cur.rowcount, (op.tipo, visto, cur.rowcount, avisos)
+    dup = checagem.avisos_da_operacao(rascunho.ApagarDuplicatas(t, filtro.Filtro(), (c["email"],), normalizar=True), r, consulta)
+    assert [a.valores["n"] for a in dup if a.chave == "chk.duplicatas_vazias_fora"] == [2]   # o NULL e o '' ficam fora
+
+
+def test_avisos_reais_de_apagar_e_inserir(banco):
+    r, t, c = preparar(banco)
+    consulta = checagem.Consulta(banco)
+    avisos = checagem.avisos_da_operacao(rascunho.Apagar(t, filtro.Filtro(texto="id = 1")), r, consulta)
+    cascata = [a for a in avisos if a.chave == "chk.cascata_apaga"]
+    assert [(a.valores["n"], a.valores["tabela"]) for a in cascata] == [(2, "public.pedidos")]
+    assert checagem.contagem(avisos) == 1 and ("info", "chk.soft_delete") in _chaves(avisos)
+    avisos = checagem.avisos_da_operacao(rascunho.Inserir(t, {c["nome"]: "Zé", c["email"]: "ana@x.com",
+                                                              c["nascimento"]: "2026-02-30"}), r, consulta)
+    assert ("impede", "chk.ja_existe") in _chaves(avisos) and ("impede", "chk.valor_invalido") in _chaves(avisos)
+    pedidos = r.base.por_nome("pedidos")
+    pid = next(col.id for col in pedidos.colunas if col.nome == "pessoa_id")
+    avisos = checagem.avisos_da_operacao(rascunho.Inserir(pedidos.id, {pid: "99"}), r, consulta)
+    assert ("impede", "chk.fk_inexistente") in _chaves(avisos)
+    avisos = checagem.avisos_da_operacao(rascunho.Apagar(t, filtro.Filtro(texto="xis > 1")), r, consulta)
+    assert ("atencao", "chk.consulta_falhou") in _chaves(avisos) and "xis" in [a for a in avisos if a.chave == "chk.consulta_falhou"][0].texto()
+
+
+def test_renomeada_no_rascunho_conta_com_o_nome_do_banco(banco):
+    r, t, c = preparar(banco)
+    r.acrescentar(rascunho.Renomear(t, c["nome"], "nome_completo"))
+    avisos = checagem.avisos_da_operacao(rascunho.Apagar(t, filtro.Filtro([filtro.Condicao(c["nome"], "comeca", ["G"])])),
+                                         r, checagem.Consulta(banco))
+    assert checagem.contagem(avisos) == 2 and ("info", "chk.aproximada") in _chaves(avisos)
+
+
+def test_tabela_grande_estoura_o_tempo(banco):
+    banco.execute("CREATE TABLE grande AS SELECT g AS x FROM generate_series(1, 3000000) g")
+    r = rascunho.Rascunho(catalogo.modelo(banco, "public"))
+    t = r.base.por_nome("grande")
+    consulta = checagem.Consulta(banco, limite_ms=1)
+    assert consulta.contar_onde("public", "grande", "x % 7 = 3") is None and not consulta.erro()
+    avisos = checagem.avisos_da_operacao(rascunho.Apagar(t.id, filtro.Filtro(texto="x % 7 = 3")), r, consulta)
+    assert ("info", "chk.sem_tempo") in _chaves(avisos) and checagem.contagem(avisos) is None
+    assert checagem.Consulta(banco).contar_onde("public", "grande", "x <= 10") == 10       # a conexão segue de pé
+
+
+def test_pagina_contar_linhas_pai_e_versao(banco):
+    banco.execute(PESSOAS_SQL)
+    banco.execute("INSERT INTO public.pessoas (nome, email) VALUES ('50%_a', 'p@x')")
+    nomes, tipos, linhas = catalogo.pagina(banco, "public", "pessoas", "nome ILIKE 'g%'", ["id"], 0, 10)
+    assert nomes[:2] == ["id", "nome"] and tipos[0] == "int8" and [l[1] for l in linhas] == ["Gabriel", "Giovana"]
+    _, _, linhas = catalogo.pagina(banco, "public", "pessoas", "", ["id"], 1, 2)
+    assert [l[0] for l in linhas] == [2, 3]
+    _, _, linhas = catalogo.pagina(banco, "public", "pessoas", "", [], 0, 100)
+    assert len(linhas) == 6
+    assert catalogo.contar_filtrado(banco, "public", "pessoas", "nome ILIKE '%a%'") == 5
+    assert catalogo.contar_filtrado(banco, "public", "pessoas", "") == 6
+    pais = catalogo.linhas_pai(banco, "public", "pessoas", "id", "")
+    assert pais[0] == (1, "Gabriel · gab@x.com") and pais[2] == (3, "Giovana") and len(pais) == 6
+    assert catalogo.linhas_pai(banco, "public", "pessoas", "id", "o'b") == [(5, "O'Brien · ob@x.com")]
+    assert catalogo.linhas_pai(banco, "public", "pessoas", "id", "%_") == [(6, "50%_a · p@x")]
+    assert catalogo.linhas_pai(banco, "public", "pessoas", "id", "", limite=2) == pais[:2]
+    assert [v for v, _ in catalogo.linhas_pai(banco, "public", "pedidos", "id", "")] == [1, 2, 3]
+    assert catalogo.linhas_pai(banco, "public", "pedidos", "id", "2") == [(2, "2")]
+    assert catalogo.versao(banco) == banco.info.server_version >= 130000

@@ -5,6 +5,7 @@ quem desenha não precisa saber SQL, e quem consulta não precisa saber desenhar
 """
 import shutil
 import subprocess
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from ratt.db import modelo as _modelo
@@ -278,3 +279,90 @@ def _ddl_simples(conexao, objeto):
         partes.append(linha)
     partes += [f"    CONSTRAINT {nome} {definicao}" for nome, _, definicao in restricoes(conexao, objeto.oid)]
     return f"CREATE TABLE {objeto.esquema}.{objeto.nome} (\n" + ",\n".join(partes) + "\n);"
+
+
+# ── a tela Dados: tudo somente leitura ──
+
+class LeituraInsegura(RuntimeError):
+    """A transação não ficou somente leitura: a consulta não roda (nunca cai numa transação que escreve)."""
+
+
+@contextmanager
+def somente_leitura(conexao, limite_ms=None):
+    """Uma transação `READ ONLY` (com `statement_timeout` local, se pedido) que sempre termina em ROLLBACK.
+    Numa conexão já dentro de uma transação vira um savepoint: o READ ONLY vale nele e, desfeito o savepoint,
+    nada (nem o READ ONLY, nem o tempo limite) vaza para a transação de quem chamou."""
+    with conexao.transaction(force_rollback=True):
+        conexao.execute("SET TRANSACTION READ ONLY")
+        if limite_ms is None:
+            estado = conexao.execute("SELECT current_setting('transaction_read_only')").fetchone()[0]
+        else:
+            estado = conexao.execute("SELECT current_setting('transaction_read_only'), "
+                                     "set_config('statement_timeout', %s, true)", (str(int(limite_ms)),)).fetchone()[0]
+        if estado != "on":
+            from ratt.db.idioma import t
+            raise LeituraInsegura(t("chk.leitura_insegura"))
+        yield conexao
+
+
+def onde_sql(onde):
+    """` WHERE <onde>` como SQL cru ("" sem filtro). O texto vem de `filtro.where` (valores já citados) ou é o
+    WHERE que a pessoa escreveu; por isso a consulta roda sem parâmetros (um `%` do LIKE não vira marcador)."""
+    from psycopg import sql
+    return sql.SQL(" WHERE ") + sql.SQL(onde) if onde else sql.SQL("")
+
+
+def pagina(conexao, esquema, tabela, onde, ordem, deslocamento, limite):
+    """(colunas, tipos, linhas) de uma página das linhas filtradas, em transação somente leitura. `ordem` são as
+    colunas da chave primária; vazia, a página sai sem ORDER BY (a ordem não é estável)."""
+    from psycopg import sql
+    por = sql.SQL(" ORDER BY {}").format(sql.SQL(", ").join(map(sql.Identifier, ordem))) if ordem else sql.SQL("")
+    consulta = sql.SQL("SELECT * FROM {}{}{} LIMIT {} OFFSET {}").format(
+        sql.Identifier(esquema, tabela), onde_sql(onde), por, sql.Literal(int(limite)), sql.Literal(int(deslocamento)))
+    with somente_leitura(conexao):
+        with conexao.cursor() as cur:
+            cur.execute(consulta)
+            nomes = [d.name for d in cur.description]
+            tipos = [getattr(conexao.adapters.types.get(d.type_code), "name", str(d.type_code)) for d in cur.description]
+            return nomes, tipos, cur.fetchall()
+
+
+def contar_filtrado(conexao, esquema, tabela, onde):
+    from psycopg import sql
+    consulta = sql.SQL("SELECT count(*) FROM {}{}").format(sql.Identifier(esquema, tabela), onde_sql(onde))
+    with somente_leitura(conexao):
+        return conexao.execute(consulta).fetchone()[0]
+
+
+def linhas_pai(conexao, esquema, tabela, chave, busca, limite=50):
+    """[(valor da chave, rótulo)] das linhas de uma tabela pai, para escolher o valor de uma chave estrangeira.
+    O rótulo são as duas primeiras colunas de texto (fora a chave), ou a própria chave se não houver; `busca`
+    procura (ILIKE, com `%`, `_` e `\\` tomados ao pé da letra) em toda coluna de texto e na chave."""
+    from psycopg import sql
+    from ratt.db import filtro
+    with somente_leitura(conexao):
+        tipos = conexao.execute("""
+            SELECT a.attname, format_type(a.atttypid, a.atttypmod)
+            FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped
+            ORDER BY a.attnum""", (esquema, tabela)).fetchall()
+        textos = [sql.Identifier(nome) for nome, tipo in tipos if nome != chave and filtro.familia(tipo) == "texto"]
+        k = sql.Identifier(chave)
+        como_texto = sql.SQL("{}::text").format(k)
+        rotulo = como_texto
+        if textos:
+            rotulo = sql.SQL("coalesce(nullif(concat_ws(' · ', {}), ''), {})").format(
+                sql.SQL(", ").join(textos[:2]), como_texto)
+        onde = sql.SQL("")
+        if busca.strip():
+            padrao = sql.SQL(filtro.padrao_like(busca, "contem"))
+            onde = sql.SQL(" WHERE ") + sql.SQL(" OR ").join(
+                sql.SQL("{} ILIKE {}").format(campo, padrao) for campo in textos + [como_texto])
+        consulta = sql.SQL("SELECT {} AS _ratt_valor, {} AS _ratt_rotulo FROM {}{} ORDER BY 1 LIMIT {}").format(
+            k, rotulo, sql.Identifier(esquema, tabela), onde, sql.Literal(int(limite)))
+        return [tuple(linha) for linha in conexao.execute(consulta)]
+
+
+def versao(conexao):
+    """O número da versão do servidor (160004 é o 16.4)."""
+    return conexao.info.server_version

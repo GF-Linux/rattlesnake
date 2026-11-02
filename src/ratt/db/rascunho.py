@@ -654,22 +654,24 @@ class Alterar(Operacao):
             return _LIMPEZAS[mud.tipo].format(ident(c.nome))
         raise ValueError(t("op.e.mudanca", mudanca=str(mud.tipo)))
 
-    def comandos(self, m: Modelo) -> List[str]:
+    def sets(self, m: Modelo) -> Dict[str, str]:
+        """Nome da coluna (já por `ident`) → a expressão que ela recebe, na ordem das mudanças."""
         tab = m.tabelas[self.tabela]
         if not self.mudancas:
             raise ValueError(t("op.e.sem_mudancas"))
-        sets, mudam = [], []
-        for i, mud in self.mudancas.items():
-            c = _coluna_de(tab, i)
-            expr = self._expressao(tab, c, mud)
-            sets.append(f"{ident(c.nome)} = {expr}")
-            mudam.append(f"{ident(c.nome)} IS DISTINCT FROM {expr}")   # só entra quem muda de verdade
-        onde = _onde(self.filtro, m, self.tabela)
-        quem = " OR ".join(mudam)
-        onde = _com_filtro(self.filtro, onde, [])
-        onde = f"{onde} AND ({quem})" if onde else quem
-        sql = f"UPDATE {nome_tabela(tab)} SET {', '.join(sets)}"
-        return [sql + (f" WHERE {onde}" if onde else "")]
+        return {ident(c.nome): self._expressao(tab, c, mud)
+                for c, mud in ((_coluna_de(tab, i), mud) for i, mud in self.mudancas.items())}
+
+    def onde(self, m: Modelo) -> str:
+        """O WHERE exato do UPDATE (sem a palavra): o filtro e a condição que pula quem não muda. A contagem que a
+        pessoa vê sai deste mesmo texto."""
+        quem = " OR ".join(f"{c} IS DISTINCT FROM {e}" for c, e in self.sets(m).items())   # só entra quem muda
+        onde = _com_filtro(self.filtro, _onde(self.filtro, m, self.tabela), [])
+        return f"{onde} AND ({quem})" if onde else quem
+
+    def comandos(self, m: Modelo) -> List[str]:
+        sets = ", ".join(f"{c} = {e}" for c, e in self.sets(m).items())
+        return [f"UPDATE {nome_tabela(m.tabelas[self.tabela])} SET {sets} WHERE {self.onde(m)}"]
 
     def descricao(self, m: Modelo) -> str:
         tab = m.tabelas[self.tabela]
@@ -692,8 +694,12 @@ class Apagar(Operacao):
     def aplicar(self, m: Modelo) -> None:
         pass
 
+    def onde(self, m: Modelo) -> str:
+        """O WHERE exato do DELETE (sem a palavra); "" apaga todas."""
+        return _onde(self.filtro, m, self.tabela)
+
     def comandos(self, m: Modelo) -> List[str]:
-        onde = _onde(self.filtro, m, self.tabela)
+        onde = self.onde(m)
         return [f"DELETE FROM {nome_tabela(m.tabelas[self.tabela])}" + (f" WHERE {onde}" if onde else "")]
 
     def descricao(self, m: Modelo) -> str:
@@ -720,7 +726,8 @@ class ApagarDuplicatas(Operacao):
     def aplicar(self, m: Modelo) -> None:
         pass
 
-    def comandos(self, m: Modelo) -> List[str]:
+    def _partes(self, m: Modelo) -> Tuple[Tabela, List[str], List[str], List[str], List[str], str]:
+        """(tabela, expressões do grupo, condições de comparável, chaves, ordem, WHERE do filtro)."""
         from . import filtro
         tab = m.tabelas[self.tabela]
         if not self.por:
@@ -748,11 +755,32 @@ class ApagarDuplicatas(Operacao):
             ordem = [k + " DESC" for k in chaves]
         else:
             ordem = chaves
+        return tab, grupo, vazios, chaves, ordem, _onde(self.filtro, m, self.tabela)
+
+    def por_sql(self, m: Modelo) -> List[str]:
+        """As expressões que definem o grupo (o PARTITION BY)."""
+        return self._partes(m)[1]
+
+    def onde_comparadas(self, m: Modelo) -> str:
+        """As linhas filtradas que entram na comparação (sem vazio nas colunas do grupo)."""
+        _, _, vazios, _, _, filtrado = self._partes(m)
+        return _com_filtro(self.filtro, filtrado, vazios)
+
+    def onde_fora(self, m: Modelo) -> str:
+        """As linhas filtradas que ficam fora da comparação por terem vazio numa coluna do grupo."""
+        _, _, vazios, _, _, filtrado = self._partes(m)
+        return _com_filtro(self.filtro, filtrado, ["NOT (" + " AND ".join(vazios) + ")"])
+
+    def onde(self, m: Modelo) -> str:
+        """O WHERE exato do DELETE (sem a palavra): as linhas que sairiam."""
+        tab, grupo, _, chaves, ordem, _ = self._partes(m)
         lista = ", ".join(chaves)
-        onde = _com_filtro(self.filtro, _onde(self.filtro, m, self.tabela), vazios)
-        return [f"DELETE FROM {nome_tabela(tab)} WHERE ({lista}) IN (SELECT {lista} FROM (SELECT {lista}, "
+        return (f"({lista}) IN (SELECT {lista} FROM (SELECT {lista}, "
                 f"row_number() OVER (PARTITION BY {', '.join(grupo)} ORDER BY {', '.join(ordem)}) AS _ratt_rn "
-                f"FROM {nome_tabela(tab)} WHERE {onde}) AS d WHERE d._ratt_rn > {self.n})"]
+                f"FROM {nome_tabela(tab)} WHERE {self.onde_comparadas(m)}) AS d WHERE d._ratt_rn > {self.n})")
+
+    def comandos(self, m: Modelo) -> List[str]:
+        return [f"DELETE FROM {nome_tabela(m.tabelas[self.tabela])} WHERE {self.onde(m)}"]
 
     def descricao(self, m: Modelo) -> str:
         tab = m.tabelas[self.tabela]
