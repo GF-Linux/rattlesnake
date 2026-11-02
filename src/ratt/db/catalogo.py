@@ -381,6 +381,18 @@ def linhas_pai(conexao, esquema, tabela, chave, busca, limite=50, limite_ms=2000
         return None
 
 
+def escritas_da_tabela(conexao, oid):
+    """Linhas inseridas, alteradas e apagadas que o PostgreSQL contou nesta tabela — nas partições dela, se é
+    particionada; nas tabelas que ela lê, se é uma view. Sobe quando alguém escreve ali (a tela Dados relê)."""
+    return conexao.execute("""
+        SELECT coalesce(sum(s.n_tup_ins + s.n_tup_upd + s.n_tup_del), 0) FROM pg_stat_user_tables s
+        WHERE s.relid = %(o)s
+           OR s.relid IN (SELECT p.relid FROM pg_partition_tree(%(o)s::oid::regclass) p)
+           OR s.relid IN (SELECT d.refobjid FROM pg_rewrite w JOIN pg_depend d ON d.objid = w.oid
+                          WHERE w.ev_class = %(o)s AND d.classid = 'pg_rewrite'::regclass
+                            AND d.refclassid = 'pg_class'::regclass)""", {"o": oid}).fetchone()[0]
+
+
 def versao(conexao):
     """O número da versão do servidor (160004 é o 16.4)."""
     return conexao.info.server_version

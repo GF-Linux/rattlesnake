@@ -835,9 +835,17 @@ class FonteDadosFalsa(FonteFalsa):
         self.chamadas = []
         self.tempo_esgotado = False
         self.sem_contagem = False
+        self.oids = []
 
-    def assinaturas(self):
+    def assinaturas(self, oid=None):
+        """(estrutura, escritas DESTA tabela)."""
+        self.oids.append(oid)
         return self.sig, self.escritas
+
+    def colunas(self, oid):
+        self.chamadas.append(("colunas", oid))
+        return [catalogo.Coluna(1, "nome", "text", False, None, False, None),
+                catalogo.Coluna(2, "idade", "integer", False, None, False, None)]
 
     def _linhas(self, onde):
         indices = self.FILTRADAS.get(onde)
@@ -1079,30 +1087,241 @@ def test_sem_tempo_mantem_as_linhas_e_sem_contagem(monkeypatch, tmp_path):
             assert len(tela.linhas) == 5                          # a página anterior fica
             fonte.tempo_esgotado, fonte.sem_contagem = False, True
             await piloto.press("F")
+            fonte.escritas += 1                                   # alguém escreveu: a contagem guardada não vale mais
+            tela.vigiar()
             await pronto_dados(app)
             assert tela.total is None
             assert t("dados.n_linhas", n=5) in _texto(tela, "#dados_contagem")      # página incompleta: são 5
             monkeypatch.setattr(tela_dados, "POR_PAGINA", 2)
-            await piloto.press("F")
+            fonte.escritas += 1
+            tela.vigiar()
             await pronto_dados(app)
             assert t("dados.n_mais", n=2) in _texto(tela, "#dados_contagem")
             assert t("dados.sem_contagem") in _texto(tela, "#dados_contagem")
             await piloto.press("n")
             await pronto_dados(app)
-            assert tela.pagina == 1 and [l[0] for l in tela.linhas] == [3, 4] and fonte.chamadas[-2][-1] == 2
+            assert tela.pagina == 1 and [l[0] for l in tela.linhas] == [3, 4]
             await piloto.press("N")
             await pronto_dados(app)
             assert tela.pagina == 0
             monkeypatch.setattr(tela_dados, "POR_PAGINA", 200)
             fonte.sem_contagem = False
-            fonte.escritas += 1                                   # alguém escreveu na tabela: a vigia relê
+            fonte.escritas += 1                                   # alguém escreveu NESTA tabela: a vigia relê
             antes = len([c for c in fonte.chamadas if c[0] == "pagina"])
             tela.vigiar()
             await pronto_dados(app)
             assert len([c for c in fonte.chamadas if c[0] == "pagina"]) == antes + 1 and tela.total == 5
+            assert fonte.oids[-1] == 1                            # a vigia pergunta pelas escritas da tabela t1
             tela.vigiar()                                          # nada mudou: não relê
             await pronto_dados(app)
             assert len([c for c in fonte.chamadas if c[0] == "pagina"]) == antes + 1
+    asyncio.run(roteiro())
+
+
+def test_pagina_que_estoura_o_tempo_nao_trava_a_paginacao(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from ratt.db import tela_dados
+    monkeypatch.setattr(tela_dados, "POR_PAGINA", 2)
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 44)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            assert tela.total == 5 and [l[0] for l in tela.linhas] == [1, 2]
+            fonte.tempo_esgotado = True
+            await piloto.press("n")
+            await pronto_dados(app)
+            assert tela._estado == "sem_tempo" and tela.pagina == 0 and [l[0] for l in tela.linhas] == [1, 2]
+            fonte.tempo_esgotado = False
+            await piloto.press("n")                                # tenta de novo a partir da que está à vista
+            await pronto_dados(app)
+            assert tela.pagina == 1 and [l[0] for l in tela.linhas] == [3, 4]
+            await piloto.press("N")
+            await pronto_dados(app)
+            assert tela.pagina == 0 and [l[0] for l in tela.linhas] == [1, 2]
+    asyncio.run(roteiro())
+
+
+def test_paginar_so_le_a_pagina_e_contagem_vem_depois(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from ratt.db import tela_dados
+    monkeypatch.setattr(tela_dados, "POR_PAGINA", 2)
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        consultas = []
+        fonte.consulta = lambda: consultas.append(1) or ConsultaFalsa()
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 44)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            tela.acrescentar_condicao(filtro.Condicao("t1.c3", "maior", ["1"]))
+            await pronto_dados(app)
+            n0, c0 = len(fonte.chamadas), len(consultas)
+            await piloto.press("n")
+            await pronto_dados(app)
+            novas = fonte.chamadas[n0:]
+            assert [c[0] for c in novas] == ["pagina"] and novas[0][-1] == 2 and len(consultas) == c0
+            assert tela.total == 5                                  # a contagem guardada continua valendo
+            await piloto.press("N")
+            await pronto_dados(app)
+            assert [c[0] for c in fonte.chamadas[n0:]] == ["pagina", "pagina"]
+    asyncio.run(roteiro())
+
+
+def test_a_pagina_aparece_antes_das_contagens(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    import threading
+    solta = threading.Event()
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 44)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            contar = fonte.contar
+            fonte.contar = lambda *a: (solta.wait(5), contar(*a))[1]
+            tela.acrescentar_condicao(filtro.Condicao("t1.c2", "comeca", ["G"]))
+            for _ in range(40):
+                await asyncio.sleep(0.05)
+                if [l[1] for l in tela.linhas] == ["Gabriel", "Giovana"]:
+                    break
+            assert [l[1] for l in tela.linhas] == ["Gabriel", "Giovana"] and tela.total is None
+            assert t("canvas.f.contando") in _texto(tela, "#dados_contagem")
+            solta.set()
+            await pronto_dados(app)
+            assert tela.total == 2 and t("dados.n_de_m", n=2, m=5) in _texto(tela, "#dados_contagem")
+    asyncio.run(roteiro())
+
+
+def test_releitura_da_vigia_mantem_cursor_e_rolagem(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.coordinate import Coordinate
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        fonte.LINHAS = [(i, f"p{i}", i, None, None, True) for i in range(1, 61)]
+        app = AppDados(fonte)
+        async with app.run_test(size=(100, 30)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            grade = tela.query_one("#dados_grade")
+            grade.focus()
+            grade.cursor_coordinate = Coordinate(40, 2)
+            await piloto.pause()
+            rolagem = grade.scroll_offset
+            assert rolagem.y > 0
+            fonte.LINHAS = [(i, f"p{i}", i + 100, None, None, True) for i in range(1, 61)]
+            fonte.escritas += 1
+            tela.vigiar()
+            await pronto_dados(app)
+            assert tela.linhas[40][2] == 141
+            assert grade.cursor_coordinate == Coordinate(40, 2) and grade.scroll_offset == rolagem
+            assert "141" in str(grade.get_cell_at(Coordinate(40, 2)))
+    asyncio.run(roteiro())
+
+
+def test_clicar_com_filtro_em_texto_pergunta_antes(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from ratt.db import formularios, formularios_dados
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 44)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            tela.filtro.texto = "idade > 30"
+            tela._filtro_mudou()
+            await pronto_dados(app)
+            _, onde = _clicar_celula(tela, 0, 2)
+            await piloto.click("#dados_grade", offset=onde)
+            await piloto.pause()
+            assert isinstance(app.screen, formularios.Confirmar) and tela.filtro.texto == "idade > 30"
+            await piloto.click("#nao")
+            await pronto_dados(app)
+            assert app.screen is tela and tela.filtro.texto == "idade > 30"
+            await piloto.click("#dados_grade", offset=onde)
+            await piloto.pause()
+            await piloto.click("#sim")
+            await pronto_dados(app)
+            assert isinstance(app.screen, formularios_dados.FormCondicao) and tela.filtro.texto is None
+            await piloto.click("#ok")
+            await pronto_dados(app)
+            assert tela.filtro.condicoes == [filtro.Condicao("t1.c3", "igual", ["34"])]
+    asyncio.run(roteiro())
+
+
+def test_celula_de_json_bytea_ou_lista_e_recusada():
+    from ratt.db import grade_dados
+    for tipo, valor in (("jsonb", {"a": 1}), ("bytea", b"\x00"), ("integer[]", [1, 2]), ("json", "[1]")):
+        with pytest.raises(ValueError) as e:
+            grade_dados.condicao_da_celula(Coluna("t1.c9", "x", tipo), valor)
+        assert tipo in str(e.value)
+    assert grade_dados.condicao_da_celula(Coluna("t1.c3", "idade", "integer"), 34) == filtro.Condicao("t1.c3", "igual", ["34"])
+    assert grade_dados.condicao_da_celula(Coluna("t1.c6", "ativo", "boolean"), False).operador == "falso"
+    assert grade_dados.condicao_da_celula(Coluna("t1.c4", "email", "jsonb"), None).operador == "vazio"
+
+
+def test_outra_coluna_da_mesma_linha_e_existe_preenchido(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Checkbox, Select
+    from ratt.db import formularios_dados
+    m = modelo_pessoas()
+    m.tabelas["t1"].colunas.append(Coluna("t1.c7", "idade_minima", "integer"))
+
+    async def roteiro():
+        fonte = FonteDadosFalsa(m)
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 50)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            await piloto.press("f"); await piloto.pause()
+            form = app.screen
+            form.query_one("#coluna", Select).value = "t1.c3"; await piloto.pause()
+            form.query_one("#operador", Select).value = "maior"; await piloto.pause()
+            form.query_one("#usar_outra", Checkbox).value = True; await piloto.pause()
+            assert form._opcoes["outra_coluna"] == ["t1.c1", "t1.c7"]  # só números, sem ela mesma
+            form.query_one("#outra_coluna", Select).value = "t1.c7"; await piloto.pause()
+            assert "idade > idade_minima" in _texto(form, "#previa")
+            await piloto.click("#ok"); await pronto_dados(app)
+            c = filtro.Condicao("t1.c3", "maior", [], outra_coluna="t1.c7")
+            assert tela.filtro.condicoes == [c]
+            app.push_screen(formularios_dados.FormCondicao(tela._vista(), tela._base(), "t1", c))
+            await piloto.pause(); await piloto.pause()
+            form = app.screen
+            assert form.query_one("#usar_outra", Checkbox).value and form.query_one("#outra_coluna", Select).value == "t1.c7"
+            assert form.condicao() == c
+            await piloto.press("escape"); await piloto.pause()
+            existe = filtro.Condicao("", "existe", existe=filtro.Existe("k1", [filtro.Condicao("t2.c3", "maior", ["15"])]))
+            app.push_screen(formularios_dados.FormCondicao(tela._vista(), tela._base(), "t1", existe))
+            await piloto.pause(); await piloto.pause()
+            form = app.screen
+            assert form.internas == [filtro.Condicao("t2.c3", "maior", ["15"])] and form.condicao() == existe
+            form.query_one("#ligacao", Select).clear(); await piloto.pause()      # trocar a ligação esvazia
+            assert form.internas == []
+    asyncio.run(roteiro())
+
+
+def test_view_le_as_colunas_na_thread_da_tela(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    import threading
+    linhas_de = []
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        colunas = fonte.colunas
+        fonte.colunas = lambda oid: linhas_de.append(threading.current_thread() is threading.main_thread()) or colunas(oid)
+        app = AppDados(fonte, "t99", so_ver=True, view=True, nome="maiores")
+        async with app.run_test(size=(140, 44)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            assert linhas_de == [False]                     # leu uma vez, fora da thread da tela
+            assert ("pagina", "maiores", "", (), 0) in fonte.chamadas and tela.so_ver
+            assert [c.nome for c in tela._tab_base().colunas] == ["nome", "idade"]
     asyncio.run(roteiro())
 
 

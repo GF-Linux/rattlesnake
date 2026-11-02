@@ -432,17 +432,9 @@ class TelaBanco(App):
             return
         from ratt.db import canvas, tela_dados
         fonte = canvas.FonteBanco(None, self.porta, self.usuario, self.banco)
-        if objeto.tipo == "view":
-            try:
-                colunas = catalogo.colunas(self.conexao, objeto.oid)
-            except Exception as erro:
-                self.notify(str(erro).strip().splitlines()[0] if str(erro).strip() else type(erro).__name__,
-                            severity="error")
-                return
-            tela = tela_dados.TelaDados(fonte, objeto.esquema, f"t{objeto.oid}", so_ver=True,
-                                        colunas_view=colunas, nome=objeto.nome)
-        else:
-            tela = tela_dados.TelaDados(fonte, objeto.esquema, f"t{objeto.oid}")
+        # nada de banco aqui (na thread da tela): as colunas da view a tela Dados lê na primeira leitura dela
+        tela = tela_dados.TelaDados(fonte, objeto.esquema, f"t{objeto.oid}", so_ver=objeto.tipo == "view",
+                                    nome=objeto.nome, view=objeto.tipo == "view")
         self.push_screen(tela)
 
     def action_trocar_banco(self):

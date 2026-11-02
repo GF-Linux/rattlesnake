@@ -91,11 +91,15 @@ class FonteBanco:
 
     # ── o que a tela Dados lê ──
 
-    def assinaturas(self) -> Tuple[tuple, object]:
-        """(a parte da estrutura, a das escritas) numa consulta só: a tela Dados relê a grade quando alguém
-        escreve, e o modelo só quando a estrutura muda."""
-        s = tuple(catalogo.assinatura(self._aberta(), escritas=True))
-        return s[:-1], s[-1]
+    def assinaturas(self, oid: Optional[int]) -> Tuple[tuple, object]:
+        """(a estrutura do banco, as escritas na tabela `oid`): a tela Dados relê a grade quando alguém escreve
+        NESTA tabela (não em qualquer uma), e o modelo só quando a estrutura muda."""
+        conexao = self._aberta()
+        estrutura = tuple(catalogo.assinatura(conexao, escritas=False))
+        return estrutura, (catalogo.escritas_da_tabela(conexao, oid) if oid is not None else None)
+
+    def colunas(self, oid: int) -> List[catalogo.Coluna]:
+        return catalogo.colunas(self._aberta(), oid)
 
     def pagina(self, esquema: str, tabela: str, onde: str, ordem: List[str], deslocamento: int, limite: int):
         return catalogo.pagina(self._aberta(), esquema, tabela, onde, ordem, deslocamento, limite)

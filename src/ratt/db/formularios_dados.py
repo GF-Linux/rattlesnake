@@ -7,7 +7,7 @@ Coluna ou ligação que só existe no rascunho é recusada com o motivo: o banco
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -28,6 +28,7 @@ _SEM_VALOR = {"vazio", "preenchido", "verdadeiro", "falso"}
 _LISTA = {"na_lista", "fora_lista"}
 _INTERVALO = {"ha_mais_de", "nos_ultimos"}
 _LIKE = {"contem", "comeca", "termina"}
+_COMPARA = {"igual", "diferente", "menor", "menor_igual", "maior", "maior_igual", "antes", "depois"}  # aceitam outra coluna
 _POR_NOME = {"mes": ("filtro.mes", 12), "dia_semana": ("filtro.dsem", 7)}
 
 
@@ -56,6 +57,7 @@ class CampoValor(Vertical):
         super().__init__(id=f"campo_{nome}")
         self.nome, self._inicial = nome, valor
         self.transformacao = ""
+        self._escolhas: List[str] = []      # os valores do Select (o que se pode pôr nele)
 
     def compose(self) -> ComposeResult:
         yield Input(value=self._inicial, id=self.nome)
@@ -71,6 +73,7 @@ class CampoValor(Vertical):
         por_nome = transformacao in _POR_NOME
         if por_nome:
             prefixo, n = _POR_NOME[transformacao]
+            self._escolhas = [str(i) for i in range(1, n + 1)]
             escolha.set_options([(t(f"{prefixo}.{i}"), str(i)) for i in range(1, n + 1)])
         entrada.display, escolha.display = not por_nome, por_nome
 
@@ -86,7 +89,7 @@ class CampoValor(Vertical):
         if self.transformacao in _POR_NOME:
             escolha = self.query_one(Select)
             numero = nomes_para_numeros(texto, self.transformacao)
-            if any(v == numero for _, v in escolha._options):
+            if numero in self._escolhas:
                 escolha.value = numero
         else:
             self.query_one(Input).value = texto
@@ -120,6 +123,8 @@ class FormCondicao(ModalScreen):
         self.internas: List[filtro.Condicao] = []
         self._coluna: Optional[str] = None      # a coluna para a qual as listas de transformação/operador valem
         self._tr: Optional[str] = None
+        self._ligacao: Optional[str] = None     # trocar a ligação esvazia as condições de dentro (pôr a mesma, não)
+        self._opcoes: Dict[str, List[str]] = {}   # os valores de cada Select, como foram postos
 
     # ── as listas ──
 
@@ -167,13 +172,15 @@ class FormCondicao(ModalScreen):
             yield Static(Text(t("dados.f.condicao", tabela=self.tab.nome)), id="form_titulo")
             with Corpo(id="form_corpo"):
                 yield Static(t("dados.f.coluna"))
-                yield Select(self._opcoes_coluna(), id="coluna", prompt=t("dados.f.coluna"))
+                yield Select(self._lembrar("coluna", self._opcoes_coluna()), id="coluna", prompt=t("dados.f.coluna"))
                 with Vertical(id="grupo_comum"):
                     yield Static(t("dados.f.transformacao"))
                     yield Select([], id="transformacao", prompt=t("dados.f.sem_transformacao"))
                     yield Static(t("dados.f.operador"))
                     yield Select([], id="operador", prompt=t("dados.f.operador"))
                     yield Static(t("dados.f.valor"), id="rotulo_valor")
+                    yield Checkbox(t("dados.f.usar_outra"), id="usar_outra")
+                    yield Select([], id="outra_coluna", prompt=t("dados.f.outra_coluna"))
                     yield CampoValor("valor")
                     yield CampoValor("valor2")
                     yield Select([(t(f"filtro.un.{u}"), u) for u in ("dias", "meses", "anos")], value="dias",
@@ -182,7 +189,7 @@ class FormCondicao(ModalScreen):
                     yield Checkbox(t("dados.f.diferenciar"), id="diferenciar")
                 with Vertical(id="grupo_existe"):
                     yield Static(t("dados.f.ligacao"))
-                    yield Select(self._ligacoes(), id="ligacao", prompt=t("dados.f.ligacao"))
+                    yield Select(self._lembrar("ligacao", self._ligacoes()), id="ligacao", prompt=t("dados.f.ligacao"))
                     yield Static(id="internas")
                     with Horizontal(id="botoes_internas"):
                         yield Button(t("dados.f.mais_interna"), id="mais_interna")
@@ -200,7 +207,8 @@ class FormCondicao(ModalScreen):
         if c is not None:
             if c.existe is not None and self.nivel == 0:
                 self.query_one("#coluna", Select).value = EXISTE
-                if any(v == c.existe.ligacao for _, v in self._ligacoes()):
+                if self._tem("#ligacao", c.existe.ligacao):
+                    self._ligacao = c.existe.ligacao        # a mudança programada não esvazia as de dentro
                     self.query_one("#ligacao", Select).value = c.existe.ligacao
                 self.internas = list(c.existe.condicoes)
                 self.query_one("#negar", Checkbox).value = c.existe.nao
@@ -213,12 +221,22 @@ class FormCondicao(ModalScreen):
                 if self._tem("#operador", c.operador):
                     self.query_one("#operador", Select).value = c.operador
                 self._preencher(c)
+                if c.outra_coluna is not None and self._tem("#outra_coluna", c.outra_coluna):
+                    self.query_one("#usar_outra", Checkbox).value = True
+                    self.query_one("#outra_coluna", Select).value = c.outra_coluna
                 self.query_one("#negar", Checkbox).value = c.negar
                 self.query_one("#diferenciar", Checkbox).value = c.diferenciar
         self._atualizar()
 
+    def _lembrar(self, nome: str, opcoes):
+        self._opcoes[nome] = [v for _, v in opcoes]
+        return opcoes
+
+    def _por_opcoes(self, nome: str, opcoes) -> None:
+        self.query_one("#" + nome, Select).set_options(self._lembrar(nome, opcoes))
+
     def _tem(self, seletor: str, valor: str) -> bool:
-        return any(v == valor for _, v in self.query_one(seletor, Select)._options)
+        return valor in self._opcoes.get(seletor.lstrip("#"), [])
 
     def _preencher(self, c: filtro.Condicao) -> None:
         tr = c.transformacao
@@ -243,7 +261,7 @@ class FormCondicao(ModalScreen):
         self._coluna, self._tr = coluna_id, None
         col = self.tab.coluna(coluna_id) if isinstance(coluna_id, str) else None
         trs = filtro.transformacoes(col.tipo) if col is not None else []
-        self.query_one("#transformacao", Select).set_options([(t(f"filtro.tr.{x}"), x) for x in trs])
+        self._por_opcoes("transformacao", [(t(f"filtro.tr.{x}"), x) for x in trs])
         self._trocar_tr("")
 
     def _trocar_tr(self, transformacao: str) -> None:
@@ -254,9 +272,25 @@ class FormCondicao(ModalScreen):
         ops = filtro.operadores(col.tipo, transformacao) if col is not None else []
         seletor = self.query_one("#operador", Select)
         antes = None if seletor.is_blank() else seletor.value
-        seletor.set_options([(t(f"filtro.op.{o}"), o) for o in ops])
+        self._por_opcoes("operador", [(t(f"filtro.op.{o}"), o) for o in ops])
         if antes in ops:
             seletor.value = antes
+        self._por_opcoes("outra_coluna", self._opcoes_outra(col, transformacao))
+
+    def _opcoes_outra(self, col, transformacao: str):
+        """As outras colunas da mesma família (depois da transformação) — "valor: outra coluna da mesma linha"."""
+        if col is None:
+            return []
+        familia = filtro._familia_depois(col.tipo, transformacao)
+        saida = []
+        for c in self.tab.colunas:
+            if c.estado == "apagado" or (c.id == col.id and not transformacao) or filtro.familia(c.tipo) != familia:
+                continue
+            rotulo = Text.assemble((c.nome, "bold"), (f"  {c.tipo}", COR["cinza"]))
+            if not self._na_base(c.id):
+                rotulo.append(t("dados.f.so_depois"), style=COR["amarelo"])
+            saida.append((rotulo, c.id))
+        return saida
 
     # ── ler os campos ──
 
@@ -281,6 +315,11 @@ class FormCondicao(ModalScreen):
         if op is None:
             raise ValueError(t("dados.e.operador"))
         tr = self._escolha("#transformacao") or ""
+        if op in _COMPARA and self.query_one("#usar_outra", Checkbox).value:
+            outra = self._escolha("#outra_coluna")
+            if outra is None:
+                raise ValueError(t("dados.e.outra_coluna"))
+            return filtro.Condicao(coluna, op, [], tr, negar, outra_coluna=outra)
         primeiro = self.query_one("#campo_valor", CampoValor).valor
         if op in _SEM_VALOR:
             valores: List[str] = []
@@ -339,7 +378,10 @@ class FormCondicao(ModalScreen):
         um.configurar("" if (lista or intervalo) else tr,
                       t("dados.f.lista") if lista else t("dados.f.quantos") if intervalo else "")
         dois.configurar(tr)
-        um.display = bool(op) and op not in _SEM_VALOR
+        outra = op in _COMPARA and self.query_one("#usar_outra", Checkbox).value
+        self.query_one("#usar_outra").display = op in _COMPARA
+        self.query_one("#outra_coluna").display = outra
+        um.display = bool(op) and op not in _SEM_VALOR and not outra
         dois.display = op == "entre"
         self.query_one("#rotulo_valor").display = um.display
         self.query_one("#unidade").display = intervalo
@@ -366,7 +408,9 @@ class FormCondicao(ModalScreen):
 
     def on_select_changed(self, evento: Select.Changed) -> None:
         if evento.select.id == "ligacao":
-            self.internas = []
+            nova = None if evento.select.is_blank() else str(evento.value)
+            if nova != self._ligacao:
+                self._ligacao, self.internas = nova, []
         self._atualizar()
 
     def on_input_changed(self, evento) -> None:

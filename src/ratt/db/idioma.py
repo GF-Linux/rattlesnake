@@ -885,6 +885,11 @@ ratt db user passwd [name]            changes a password (no name: yours)
                          "en": "the filter is text: t to edit, F to clear"},
     "dados.e.so_tabela": {"pt": "escolha uma tabela ou view na árvore", "en": "choose a table or view in the tree"},
     "dados.e.coluna_grade": {"pt": "essa coluna não é do banco", "en": "that column is not from the database"},
+    "dados.f.usar_outra": {"pt": "comparar com outra coluna da mesma linha", "en": "compare with another column of the same row"},
+    "dados.f.outra_coluna": {"pt": "qual coluna?", "en": "which column?"},
+    "dados.e.outra_coluna": {"pt": "escolha a outra coluna", "en": "choose the other column"},
+    "dados.e.celula": {"pt": "{coluna} é {tipo}: o valor mostrado não volta como filtro; use t (WHERE em texto)",
+                       "en": "{coluna} is {tipo}: the shown value does not round-trip as a filter; use t (WHERE as text)"},
     "dados.e.valor": {"pt": "«{valor}» não serve aqui", "en": "«{valor}» does not fit here"},
     # ── o filtro ──
     "filtro.op.igual": {"pt": "é igual a", "en": "equals"},

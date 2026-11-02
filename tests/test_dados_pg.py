@@ -834,3 +834,117 @@ def test_v_no_canvas_abre_a_tela_dados(banco, tmp_path, monkeypatch):
             await _pronto(app)
             assert app.screen is cv
     asyncio.run(roteiro())
+
+
+# ── revisão da Task 7 ──
+
+def _espera_escrita(banco, tabela, antes, limite=10.0):
+    """As estatísticas do PostgreSQL chegam um pouco depois do commit: espera a contagem da tabela mudar."""
+    import time
+    fim = time.monotonic() + limite
+    while time.monotonic() < fim:
+        agora = catalogo.escritas_da_tabela(banco, banco.execute("SELECT %s::regclass::oid", (tabela,)).fetchone()[0])
+        if agora != antes:
+            return agora
+        time.sleep(0.2)
+    raise AssertionError(f"as estatísticas de {tabela} não mudaram")
+
+
+def test_vigia_so_rele_com_escrita_nesta_tabela(banco, tmp_path, monkeypatch):
+    import asyncio
+    import getpass
+    from ratt.db import canvas, tela_dados
+    from test_dados import AppDados  # noqa: F401  (o mesmo App dos testes sem banco)
+    _apps_isolados(monkeypatch, tmp_path)
+    banco.execute(PESSOAS_SQL)
+    oid = lambda nome: banco.execute("SELECT %s::regclass::oid", (nome,)).fetchone()[0]
+
+    async def roteiro():
+        fonte = canvas.FonteBanco(None, banco.info.port, getpass.getuser(), banco.info.dbname)
+        app = AppDados(fonte, "t%d" % oid("public.pessoas"))
+        async with app.run_test(size=(140, 44)):
+            await _pronto(app)
+            tela = app.screen
+            assert len(tela.linhas) == 5
+            paginas = []
+            ler = fonte.pagina
+            fonte.pagina = lambda *a: paginas.append(a) or ler(*a)
+            antes = catalogo.escritas_da_tabela(banco, oid("public.pedidos"))
+            outra = psycopg.connect(banco.info.dsn, autocommit=True)
+            outra.execute("INSERT INTO public.pedidos (pessoa_id, total) VALUES (2, 99)")
+            outra.close()
+            _espera_escrita(banco, "public.pedidos", antes)
+            tela.vigiar()
+            await _pronto(app)
+            assert paginas == []                                   # escreveram em outra tabela: nada a reler
+            antes = catalogo.escritas_da_tabela(banco, oid("public.pessoas"))
+            outra = psycopg.connect(banco.info.dsn, autocommit=True)
+            outra.execute("INSERT INTO public.pessoas (nome) VALUES ('Gil')")
+            outra.close()
+            _espera_escrita(banco, "public.pessoas", antes)
+            tela.vigiar()
+            await _pronto(app)
+            assert len(paginas) == 1 and len(tela.linhas) == 6 and tela.total == 6
+    asyncio.run(roteiro())
+
+
+def test_escritas_de_particionada_e_de_view(banco):
+    banco.execute("""
+        CREATE TABLE public.medida (dia date, v int) PARTITION BY RANGE (dia);
+        CREATE TABLE public.medida_1 PARTITION OF public.medida FOR VALUES FROM ('2020-01-01') TO ('2021-01-01');
+        CREATE VIEW public.vm AS SELECT * FROM public.medida_1;""")
+    oid = lambda nome: banco.execute("SELECT %s::regclass::oid", (nome,)).fetchone()[0]
+    antes = (catalogo.escritas_da_tabela(banco, oid("public.medida")), catalogo.escritas_da_tabela(banco, oid("public.vm")))
+    outra = psycopg.connect(banco.info.dsn, autocommit=True)
+    outra.execute("INSERT INTO public.medida VALUES ('2020-05-01', 1)")
+    outra.close()
+    _espera_escrita(banco, "public.medida", antes[0])
+    _espera_escrita(banco, "public.vm", antes[1])
+
+
+def test_e_numa_view_nao_le_o_banco_na_thread_da_tela(banco, tmp_path, monkeypatch):
+    import asyncio
+    import getpass
+    import threading
+    from textual.widgets import Tree
+    from ratt.db import tela_dados
+    from ratt.db.tela import TelaBanco
+    _apps_isolados(monkeypatch, tmp_path)
+    banco.execute(PESSOAS_SQL + "CREATE VIEW public.maiores AS SELECT nome, idade FROM public.pessoas WHERE idade > 30;")
+    leituras = []
+    original = catalogo.colunas
+    monkeypatch.setattr(catalogo, "colunas", lambda *a: leituras.append(threading.current_thread() is threading.main_thread())
+                        or original(*a))
+
+    class Espiao:
+        def __init__(self):
+            self.usos = []
+
+        def __getattr__(self, nome):
+            self.usos.append(nome)
+            raise AssertionError(f"conexao.{nome} na thread da tela")
+
+    async def roteiro():
+        app = TelaBanco(banco.info.port, getpass.getuser(), banco.info.dbname)
+        async with app.run_test(size=(140, 44)):
+            await _pronto(app)
+            arvore = app.query_one("#arvore", Tree)
+            for n in app._nos(arvore.root):
+                n.expand()
+            await _pronto(app)
+            no = next(n for n in app._nos(arvore.root) if isinstance(n.data, catalogo.Objeto) and n.data.nome == "maiores")
+            arvore.move_cursor(no)
+            await _pronto(app)
+            del leituras[:]
+            espiao, real = Espiao(), app.conexao
+            app.conexao = espiao
+            try:
+                app.action_dados()                 # síncrono, na thread da tela: não pode tocar no banco
+            finally:
+                app.conexao = real
+            assert espiao.usos == [] and leituras == []
+            await _pronto(app)
+            tela = app.screen
+            assert isinstance(tela, tela_dados.TelaDados) and tela.so_ver and len(tela.linhas) == 3
+            assert leituras == [False]             # as colunas vieram na thread da tela Dados
+    asyncio.run(roteiro())

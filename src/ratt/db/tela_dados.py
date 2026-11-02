@@ -23,15 +23,15 @@ from typing import Dict, List, Optional
 
 import psycopg
 from rich.text import Text
-from textual import events, work
+from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.coordinate import Coordinate
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Static
 
 from ratt.db import catalogo, checagem, filtro, formularios, modelo as _modelo, rascunho as _rascunho, sessao
 from ratt.db.formularios_dados import FormCondicao
+from ratt.db.grade_dados import Grade, condicao_da_celula, modelo_da_view, select_texto, texto_contagem
 from ratt.db.idioma import t
 from ratt.db.painel import AcoesRascunho, PainelSQL, PerguntarNome
 from ratt.db.tela import COR, POR_PAGINA, _celula
@@ -44,30 +44,6 @@ _ACOES_DO_RASCUNHO = ("aplicar", "ensaio", "exportar", "desfazer")
 def _primeira_linha(erro: Exception) -> str:
     linhas = str(erro).strip().splitlines()
     return linhas[0] if linhas else type(erro).__name__
-
-
-def _como_texto(valor) -> str:
-    """O valor de uma célula como a pessoa o digitaria no filtro."""
-    if isinstance(valor, (bytes, memoryview)):
-        return ""
-    return str(valor)               # data e hora saem em ISO, que o PostgreSQL lê de volta
-
-
-class Grade(DataTable, inherit_bindings=False):
-    """A grade: as setas andam pelas células; um clique numa célula já a escolhe ("igual a este valor"). O Enter
-    fica com a tela (é o aplicar)."""
-
-    BINDINGS = [b for b in DataTable.BINDINGS if getattr(b, "key", "") != "enter"]
-
-    def _on_click(self, evento: events.Click) -> None:
-        meta = evento.style.meta
-        linha, coluna = meta.get("row"), meta.get("column")
-        if linha is None or coluna is None or linha < 0 or coluna < 0 or meta.get("out_of_bounds", False):
-            return                      # cabeçalho e o resto: o DataTable cuida
-        evento.prevent_default()        # o DataTable só escolheria no segundo clique
-        evento.stop()
-        self.cursor_coordinate = Coordinate(linha, coluna)
-        self.action_select_cursor()
 
 
 class TelaDados(AcoesRascunho, Screen):
@@ -95,7 +71,10 @@ class TelaDados(AcoesRascunho, Screen):
     """
 
     def __init__(self, fonte, esquema: str, tabela_id: str, so_ver: bool = False,
-                 colunas_view: Optional[List[catalogo.Coluna]] = None, nome: Optional[str] = None):
+                 colunas_view: Optional[List[catalogo.Coluna]] = None, nome: Optional[str] = None,
+                 view: bool = False):
+        """`view=True`: as colunas vêm do catálogo na primeira leitura (na thread, pela conexão desta tela);
+        `colunas_view` as dá prontas."""
         super().__init__()
         self.fonte, self.esquema, self.tabela_id, self.so_ver = fonte, esquema, tabela_id, so_ver
         self.nome = nome
@@ -110,15 +89,19 @@ class TelaDados(AcoesRascunho, Screen):
         self.sessao: Optional[sessao.SessaoRascunho] = None
         self.vista: _modelo.Modelo = _modelo.Modelo(esquema)     # o schema com o rascunho (os nomes que se veem)
         self.carregado = False
-        self._modelo_view: Optional[_modelo.Modelo] = None
-        if colunas_view is not None:                # view: uma tabela só, montada das colunas do catálogo
-            tab = _modelo.Tabela(tabela_id, esquema, nome or tabela_id, [
-                _modelo.Coluna(f"{tabela_id}.c{c.numero}", c.nome, c.tipo, obrigatoria=bool(c.obrigatoria),
-                               padrao=c.padrao, pk=bool(c.chave)) for c in colunas_view])
-            self._modelo_view = _modelo.Modelo(esquema, {tabela_id: tab})
+        self._view = view or colunas_view is not None
+        self._modelo_view: Optional[_modelo.Modelo] = None      # a view como um modelo de uma tabela só
+        if colunas_view is not None:
+            self._modelo_view = modelo_da_view(esquema, tabela_id, nome or tabela_id, colunas_view)
         self._estado = "lendo"              # lendo, ok, sem_tempo, erro, so_depois, sumiu, sem_leitura
         self._erro = ""
         self._token = 0                     # sobe a cada pedido de página: a resposta de outro é descartada
+        self._pagina_mostrada = 0           # a página que está na grade (volta a ela se a próxima estourar o tempo)
+        self._forma = None                  # as colunas desenhadas: iguais, a releitura só troca as linhas
+        self._contando = False              # contagens e avisos a caminho (pedido separado da página)
+        self._chave_pedida = None           # (tabela, WHERE, estrutura, escritas) das contagens pedidas
+        self._chave_contada = None          # e das que estão guardadas: paginar não conta de novo
+        self._contadas = (None, None, [])   # (total, total da tabela, avisos) da chave contada
         self._marca = None                  # a assinatura da estrutura na última leitura do modelo
         self._marca_escritas = None         # e a das escritas: mudou, a grade relê
         self._trava = threading.Lock()      # uma conversa com o banco por vez nesta tela
@@ -238,20 +221,15 @@ class TelaDados(AcoesRascunho, Screen):
 
     def _select_texto(self) -> Optional[str]:
         tab = self._tab_base()
-        if tab is None:
-            return None
         try:
-            onde = self._onde()
+            return select_texto(tab, self._onde()) if tab is not None else None
         except ValueError:
             return None
-        texto = f"SELECT * FROM {_rascunho.nome_tabela(tab)}" + (f" WHERE {onde}" if onde else "")
-        if tab.pk():
-            texto += " ORDER BY " + ", ".join(_rascunho.ident(c.nome) for c in tab.pk())
-        return texto + ";"
 
     # ── a grade ─────────────────────────────────────────────────────────────
 
-    def _pedir_grade(self) -> None:
+    def _pedir_grade(self, manter: bool = False) -> None:
+        """Pede a página. `manter`: releitura da vigia — com as mesmas colunas, o cursor e a rolagem ficam."""
         if not self.carregado:
             return
         self._token += 1
@@ -272,12 +250,12 @@ class TelaDados(AcoesRascunho, Screen):
         if self._estado not in ("ok", "sem_tempo"):
             self._estado = "lendo"
             self._linha_contagem()
-        self._ler_grade(self._token, tab.esquema, tab.nome, onde, [c.nome for c in tab.pk()], self.pagina,
-                        copy.deepcopy(self.filtro), _rascunho.Rascunho(self._base()))
+        self._ler_pagina(self._token, tab.esquema, tab.nome, onde, [c.nome for c in tab.pk()], self.pagina, manter)
 
     @work(thread=True, exclusive=True, group="grade_dados")
-    def _ler_grade(self, token, esquema, nome, onde, ordem, pagina, f, r) -> None:
-        pacote: Dict[str, object] = {}
+    def _ler_pagina(self, token, esquema, nome, onde, ordem, pagina, manter) -> None:
+        """Só a página: ela aparece logo; contagens e avisos vêm num segundo pedido (`_contar`)."""
+        pacote: Dict[str, object] = {"pagina_pedida": pagina, "onde": onde, "manter": manter}
         with self._trava:
             try:
                 pacote["pagina"] = self.fonte.pagina(esquema, nome, onde, ordem, pagina * POR_PAGINA, POR_PAGINA)
@@ -285,18 +263,7 @@ class TelaDados(AcoesRascunho, Screen):
                 pacote["sem_tempo"] = True
             except Exception as erro:
                 pacote["erro"] = _primeira_linha(erro)
-            if "pagina" in pacote:
-                try:
-                    total = self.fonte.contar(esquema, nome, onde)
-                    pacote["total"] = total
-                    pacote["total_tabela"] = total if not onde else self.fonte.contar(esquema, nome, "")
-                except Exception:
-                    pacote["total"] = pacote["total_tabela"] = None
-                try:
-                    pacote["avisos"] = checagem.avisos_do_filtro(f, r, self.tabela_id, self.fonte.consulta())
-                except Exception:
-                    pacote["avisos"] = []
-        self._de_volta(self._grade_chegou, token, pacote)
+        self._de_volta(self._pagina_chegou, token, pacote)
 
     def _de_volta(self, fn, *args) -> None:
         try:
@@ -304,10 +271,11 @@ class TelaDados(AcoesRascunho, Screen):
         except RuntimeError:                # a app já fechou
             pass
 
-    def _grade_chegou(self, token: int, pacote: dict) -> None:
+    def _pagina_chegou(self, token: int, pacote: dict) -> None:
         if not self.is_attached or token != self._token:
             return
-        if pacote.get("sem_tempo"):         # a página anterior fica à vista
+        if pacote.get("sem_tempo"):         # a página anterior fica à vista, e o número dela também
+            self.pagina = self._pagina_mostrada
             self._estado = "sem_tempo"
             self._linha_contagem()
             return
@@ -316,15 +284,56 @@ class TelaDados(AcoesRascunho, Screen):
             self._estado, self._erro = "erro", str(pacote["erro"])
             self._mostrar()
             return
-        self.nomes, self.tipos, self.linhas = pacote["pagina"]
-        self.nomes, self.tipos, self.linhas = list(self.nomes), list(self.tipos), list(self.linhas)
-        self.total, self.total_tabela = pacote.get("total"), pacote.get("total_tabela")
-        self.avisos = list(pacote.get("avisos") or [])
+        nomes, tipos, linhas = pacote["pagina"]
+        self.nomes, self.tipos, self.linhas = list(nomes), list(tipos), list(linhas)
+        self._pagina_mostrada = pacote["pagina_pedida"]
         self._estado = "ok"
-        self._mostrar()
+        self._contagens(str(pacote["onde"]))
+        self._mostrar(bool(pacote["manter"]))
 
-    def _mostrar(self) -> None:
-        self._desenhar_grade()
+    def _contagens(self, onde: str) -> None:
+        """Contagens e avisos do filtro: guardados por (tabela, WHERE, estrutura, escritas desta tabela) —
+        paginar não conta de novo; mudar o filtro, ou alguém escrever na tabela, sim."""
+        chave = (self.tabela_id, onde, self._marca, self._marca_escritas)
+        if chave == self._chave_contada:
+            self.total, self.total_tabela, self.avisos = self._contadas[0], self._contadas[1], list(self._contadas[2])
+            self._contando = False
+            return
+        self.total = self.total_tabela = None
+        if chave == self._chave_pedida and self._contando:
+            return                          # já está a caminho
+        tab = self._tab_base()
+        self._chave_pedida, self._contando, self.avisos = chave, True, []
+        self._contar(chave, tab.esquema, tab.nome, onde, copy.deepcopy(self.filtro),
+                     _rascunho.Rascunho(self._base()), self.tabela_id)
+
+    @work(thread=True, exclusive=True, group="contagem_dados")
+    def _contar(self, chave, esquema, nome, onde, f, r, tabela_id) -> None:
+        total = total_tabela = None
+        avisos: list = []
+        with self._trava:
+            try:
+                total = self.fonte.contar(esquema, nome, onde)
+                total_tabela = total if not onde else self.fonte.contar(esquema, nome, "")
+            except Exception:
+                pass
+            try:
+                avisos = checagem.avisos_do_filtro(f, r, tabela_id, self.fonte.consulta())
+            except Exception:
+                avisos = []
+        self._de_volta(self._contagens_chegaram, chave, total, total_tabela, avisos)
+
+    def _contagens_chegaram(self, chave, total, total_tabela, avisos) -> None:
+        if not self.is_attached or chave != self._chave_pedida:
+            return
+        self._chave_contada, self._contadas, self._contando = chave, (total, total_tabela, list(avisos)), False
+        if self._estado == "ok":
+            self.total, self.total_tabela, self.avisos = total, total_tabela, list(avisos)
+            self._linha_contagem()
+            self._linha_avisos()
+
+    def _mostrar(self, manter: bool = False) -> None:
+        self._desenhar_grade(manter)
         self._linha_contagem()
         self._linha_avisos()
 
@@ -334,9 +343,8 @@ class TelaDados(AcoesRascunho, Screen):
             return []
         return [c for c in tab.colunas if c.estado != "apagado" and _rascunho._nome_na_base(self._base(), c.id) is None]
 
-    def _desenhar_grade(self) -> None:
+    def _desenhar_grade(self, manter: bool = False) -> None:
         grade = self.query_one(Grade)
-        grade.clear(columns=True)
         renomeadas: Dict[str, str] = {}
         tab_b, tab_v = self._tab_base(), self._tab_vista()
         if tab_b is not None and tab_v is not None and self._modelo_view is None:
@@ -344,6 +352,15 @@ class TelaDados(AcoesRascunho, Screen):
                 cv = tab_v.coluna(c.id)
                 if cv is not None and cv.nome != c.nome:
                     renomeadas[c.nome] = cv.nome
+        extras = self._colunas_so_depois()
+        vazias = [Text("·", style=COR["cinza"])] * len(extras)
+        linhas = [[_celula(v, tipo) for v, tipo in zip(linha, self.tipos)] + vazias for linha in self.linhas]
+        forma = (tuple(self.nomes), tuple(self.tipos), tuple(sorted(renomeadas.items())), tuple(c.id for c in extras))
+        if manter and forma == self._forma:
+            grade.trocar_linhas(linhas)
+            return
+        self._forma = forma
+        grade.clear(columns=True)
         for nome, tipo in zip(self.nomes, self.tipos):
             rotulo = Text(nome, style="bold")
             if nome in renomeadas:
@@ -351,42 +368,16 @@ class TelaDados(AcoesRascunho, Screen):
             rotulo.append("\n")
             rotulo.append(tipo, style=COR["cinza"])
             grade.add_column(rotulo)
-        extras = self._colunas_so_depois()
         for c in extras:
             grade.add_column(Text.assemble((c.nome, f"bold {COR['amarelo']}"), "\n", (t("dados.so_depois"), COR["amarelo"])))
-        vazias = [Text("·", style=COR["cinza"])] * len(extras)
-        for linha in self.linhas:
-            grade.add_row(*([_celula(v, tipo) for v, tipo in zip(linha, self.tipos)] + vazias))
+        for celulas in linhas:
+            grade.add_row(*celulas)
 
     def _linha_contagem(self) -> None:
-        estado, cor = self._estado, COR["cinza"]
-        if estado == "lendo":
-            texto = t("dados.lendo")
-        elif estado == "sem_leitura":
-            texto, cor = t("canvas.sem_leitura"), COR["laranja"]
-        elif estado == "so_depois":
-            texto, cor = t("dados.so_depois_tabela", tabela=self._nome_tabela()), COR["amarelo"]
-        elif estado == "sumiu":
-            texto, cor = t("canvas.e.sumiu"), COR["laranja"]
-        elif estado == "erro":
-            texto, cor = t("dados.erro", erro=self._erro), COR["laranja"]
-        elif estado == "sem_tempo":
-            texto, cor = t("dados.sem_tempo"), COR["amarelo"]
-        else:
-            inicio = self.pagina * POR_PAGINA
-            if self.total is not None:
-                texto = (t("dados.n_de_m", n=f"{self.total:n}", m=f"{self.total_tabela:n}")
-                         if self.total_tabela is not None else t("dados.n_linhas", n=f"{self.total:n}"))
-            elif len(self.linhas) < POR_PAGINA:     # a última página: dá para saber quantas são sem contar
-                texto = t("dados.n_linhas", n=f"{inicio + len(self.linhas):n}")
-            else:
-                texto = t("dados.n_mais", n=f"{inicio + len(self.linhas):n}") + " · " + t("dados.sem_contagem")
-            if self.pagina or len(self.linhas) >= POR_PAGINA:
-                fim = inicio + len(self.linhas)
-                texto += f"  ({t('tui.mostrando', inicio=inicio + 1 if self.linhas else inicio, fim=fim)} · n/N)"
-            tab = self._tab_base()
-            if tab is not None and not tab.pk():
-                texto += " · " + t("dados.sem_ordem")
+        tab = self._tab_base()
+        texto, cor = texto_contagem(self._estado, por_pagina=POR_PAGINA, pagina=self.pagina, n_linhas=len(self.linhas),
+                                    total=self.total, total_tabela=self.total_tabela, contando=self._contando,
+                                    sem_pk=tab is not None and not tab.pk(), tabela=self._nome_tabela(), erro=self._erro)
         self.query_one("#dados_contagem", Static).update(Text(f"── {texto} ──", style=cor))
 
     def _linha_avisos(self) -> None:
@@ -404,13 +395,18 @@ class TelaDados(AcoesRascunho, Screen):
 
     @work(thread=True, exclusive=True, group="vigia_dados")
     def _olhar(self, primeira: bool) -> None:
-        """A assinatura do banco: a estrutura mudou, relê o modelo (e a grade); só as escritas, relê a grade."""
+        """A estrutura do banco mudou: relê o modelo (e a grade). Só as escritas DESTA tabela (ou das que a view
+        lê) mudaram: relê a grade. Na primeira vez, as colunas da view e o relkind vêm junto."""
         self._olhando = True
+        oid = self._oid()
         try:
             with self._trava:
-                estrutura, escritas = self.fonte.assinaturas()
+                estrutura, escritas = self.fonte.assinaturas(oid)
                 m = self.fonte.modelo(self.esquema) if primeira or estrutura != self._marca else None
-                classe = self._classe() if primeira and not self.so_ver else None
+                classe = self.fonte.classe(oid) if primeira and not self.so_ver and oid is not None \
+                    and hasattr(self.fonte, "classe") else None
+                colunas = self.fonte.colunas(oid) if primeira and self._view and self._modelo_view is None \
+                    and oid is not None else None
         except Exception as erro:
             if primeira:
                 self._de_volta(self._nao_leu, erro)
@@ -418,15 +414,13 @@ class TelaDados(AcoesRascunho, Screen):
         finally:
             self._olhando = False
         if m is not None:
-            self._de_volta(self._modelo_chegou, estrutura, escritas, m, classe)
+            self._de_volta(self._modelo_chegou, estrutura, escritas, m, classe, colunas)
         elif escritas != self._marca_escritas:
             self._de_volta(self._escritas_mudaram, escritas)
 
-    def _classe(self) -> Optional[str]:
-        """O relkind da tabela no catálogo (uma estrangeira abre só para ver); None se não der para saber."""
-        perguntar = getattr(self.fonte, "classe", None)
+    def _oid(self) -> Optional[int]:
         achado = re.fullmatch(r"t(\d+)", self.tabela_id)
-        return perguntar(int(achado.group(1))) if perguntar is not None and achado else None
+        return int(achado.group(1)) if achado else None
 
     def _nao_leu(self, erro) -> None:
         if not self.is_attached or self.carregado:
@@ -436,10 +430,13 @@ class TelaDados(AcoesRascunho, Screen):
         self._estado = "sem_leitura"
         self._linha_contagem()
 
-    def _modelo_chegou(self, estrutura, escritas, m: _modelo.Modelo, classe: Optional[str]) -> None:
+    def _modelo_chegou(self, estrutura, escritas, m: _modelo.Modelo, classe: Optional[str], colunas=None) -> None:
         if not self.is_attached or self.sessao.aplicando:
             return
+        manter = self.carregado
         self._marca, self._marca_escritas = estrutura, escritas
+        if colunas is not None:
+            self._modelo_view = modelo_da_view(self.esquema, self.tabela_id, self.nome or self.tabela_id, colunas)
         if classe in _SO_VER and not self.so_ver:
             self.so_ver = True
             self.refresh_bindings()
@@ -452,12 +449,12 @@ class TelaDados(AcoesRascunho, Screen):
             if novas:
                 self.notify(t("canvas.invalidas", n=len(novas)), severity="warning")
         self._montar()
-        self._pedir_grade()
+        self._pedir_grade(manter)
 
     def _escritas_mudaram(self, escritas) -> None:
         if self.is_attached:
             self._marca_escritas = escritas
-            self._pedir_grade()
+            self._pedir_grade(manter=True)
 
     # ── o filtro ────────────────────────────────────────────────────────────
 
@@ -568,7 +565,8 @@ class TelaDados(AcoesRascunho, Screen):
         self._filtro_mudou()
 
     def on_data_table_cell_selected(self, evento: DataTable.CellSelected) -> None:
-        """Clicou numa célula: "igual a este valor" (o formulário já preenchido, para conferir ou mudar)."""
+        """Clicou numa célula: "igual a este valor" (o formulário já preenchido, para conferir ou mudar). Com o
+        filtro em texto, pergunta antes de descartar o texto."""
         evento.stop()
         if not self._pode_filtrar():
             return
@@ -581,22 +579,23 @@ class TelaDados(AcoesRascunho, Screen):
             return
         if linha >= len(self.linhas):
             return
-        por_nome = {c.nome: c for c in self._tab_base().colunas}
-        col = por_nome.get(self.nomes[coluna])
+        col = next((c for c in self._tab_base().colunas if c.nome == self.nomes[coluna]), None)
         if col is None:
             self.notify(t("dados.e.coluna_grade"), severity="warning")
             return
-        valor = self.linhas[linha][coluna]
-        if valor is None:
-            c = filtro.Condicao(col.id, "vazio")
-        elif filtro.familia(col.tipo) == "booleano":
-            c = filtro.Condicao(col.id, "verdadeiro" if valor else "falso")
+        try:
+            c = condicao_da_celula(col, self.linhas[linha][coluna])
+        except ValueError as e:
+            self.notify(str(e), severity="warning")
+            return
+        if self._em_texto():
+            self._voltar_ao_montado(lambda: self._abrir_form(c))
         else:
-            c = filtro.Condicao(col.id, "igual", [_como_texto(valor)])
-        self._abrir_form(c)
+            self._abrir_form(c)
 
     def action_pagina(self, direcao: int) -> None:
-        if self._estado != "ok":
+        """n/N. Depois de uma página que estourou o tempo, tenta de novo a partir da que está à vista."""
+        if self._estado not in ("ok", "sem_tempo"):
             return
         nova = self.pagina + direcao
         if nova < 0:
