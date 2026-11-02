@@ -648,7 +648,9 @@ def test_pe_de_galinha_users_para_users_roles():
 
 
 def test_ligacao_opcional_tem_o():
-    texto = desenho.desenhar(modelo_png(), _posicoes_png()).texto()
+    m = modelo_png()
+    del m.ligacoes["k1"], m.ligacoes["k2"]                  # sem outra seta na mesma célula da borda
+    texto = desenho.desenhar(m, _posicoes_png()).texto()
     assert "├┼o" in texto or "o┼┤" in texto                 # profiles.user_id aceita NULL
 
 
@@ -656,7 +658,10 @@ def test_um_para_um():
     m = modelo_png(); m.tabelas["t4"].coluna("t4.c4").unica = True
     texto = desenho.desenhar(m, _posicoes_png()).texto()
     assert "<┤" in texto.splitlines()[1]                    # a ligação 1:N continua
-    assert texto.count("┼") >= 4                            # as duas pontas da 1:1 são "um"
+    d = desenho.desenhar(m, _posicoes_png())
+    xp, yp, _, _ = d.caixas["t4"]
+    assert d.texto().splitlines()[yp + 4][xp - 1] == "┼"    # origem 1:1 (profiles.user_id) é "um"
+    assert d.texto().splitlines()[1][d.caixas["t1"][2]] == "┼"  # e users.id continua "um"
 
 
 def test_seta_nao_atravessa_caixa():
@@ -721,3 +726,54 @@ def test_largura_e_altura_incluem_setas():
     d = desenho.desenhar(modelo_png(), _posicoes_png())
     for (x, y) in d._celulas:
         assert x < d.largura and y < d.altura
+
+
+PNG_DESENHADO = """\
+┌─ users ───────────────┐         ┌─ users_roles ─────┐             ┌─ roles ──────┐
+│ PK id          bigint ├┼┬──────<┤ PK user_id bigint │           ┌┼┤ PK id bigint │
+│    first_name    text │ o       │ PK role_id bigint ├>──────────┘ │    name text │
+│    last_name     text │ │       └───────────────────┘             └──────────────┘
+│    email         text │ │
+│    password_hash text │ │
+└───────────────────────┘ │
+                          │
+                          │       ┌─ profiles ──────────┐
+                          │       │ PK id        bigint │
+                          │       │    bio         text │
+                          │       │    description text │
+                          └──────<┤    user_id   bigint │
+                                  └─────────────────────┘
+"""
+
+
+def test_pontas_na_mesma_borda_tem_juncao_e_o_proprio():
+    d = desenho.desenhar(modelo_png(), _posicoes_png())
+    linhas = d.texto().splitlines()
+    x = d.caixas["t1"][2]                                   # a célula da borda direita de users é x - 1
+    assert linhas[1][x - 1:x + 2] == "├┼┬"                  # borda, "um" dividido, junção (nunca ┼)
+    # (a) a seta que continua depois da junção é a certa: k1 para a direita, k3 para baixo
+    assert d.onde(x + 2, 1) == ("ligacao", "k1")
+    assert d.onde(x + 1, 2) == ("ligacao", "k3")
+    # (b) o `o` do k3 é do k3, na primeira célula do ramo dele, ao lado de uma célula de linha do k3
+    assert linhas[2][x + 1] == "o"
+    assert d.onde(x + 1, 2) == ("ligacao", "k3")
+    assert d.onde(x + 1, 3) == ("ligacao", "k3") and linhas[3][x + 1] == "│"
+
+
+def test_nenhuma_marca_seguida_de_linha_de_outra_seta():
+    d = desenho.desenhar(modelo_png(), _posicoes_png())
+    linhas = d.texto().splitlines()
+    for tid, (x, y, w, h) in d.caixas.items():
+        for yy in range(y + 1, y + h - 1):
+            for bx, s in ((x + w - 1, 1), (x, -1)):
+                if linhas[yy][bx] not in "├┤":
+                    continue
+                dono = d.onde(bx + s, yy)
+                assert dono is not None and dono[0] == "ligacao"
+                seguinte = linhas[yy][bx + 2 * s]
+                if seguinte not in "┬┴├┤":                   # sem junção, a seta segue sozinha
+                    assert d.onde(bx + 2 * s, yy) == dono
+
+
+def test_png_desenhado_golden():
+    assert desenho.desenhar(modelo_png(), _posicoes_png()).texto() == PNG_DESENHADO.rstrip("\n")

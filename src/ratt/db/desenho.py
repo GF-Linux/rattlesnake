@@ -242,57 +242,99 @@ class Desenho:
         return self._alvos.get((x, y))
 
 
+_TEES = {
+    frozenset([(-1, 0), (1, 0), (0, 1)]): "┬", frozenset([(-1, 0), (1, 0), (0, -1)]): "┴",
+    frozenset([(-1, 0), (0, 1), (0, -1)]): "┤", frozenset([(1, 0), (0, 1), (0, -1)]): "├",
+}
+
+
 def _ligacoes(vista: Modelo, caixas: Dict[str, Tuple[int, int, int, int]], recolhidas: AbstractSet[str],
               cel: Dict[Tuple[int, int], Celula], alvos: Dict[Tuple[int, int], tuple]) -> None:
     """Roteia e pinta as setas em `cel`/`alvos`. Primeiro todas as linhas (quem vem depois vence num
-    cruzamento), depois bordas e marcas por cima, para uma linha nunca apagar um `o` ou um `<`."""
-    proprias = []  # (ligação, lado_o, lado_d, y_o, y_d, opcional, 1:1, extras)
-    reservadas: Set[Tuple[int, int]] = set()
-    # pontas que dividem a mesma célula da borda: as marcas se empilham para fora, e as opcionais (com `o`)
-    # ficam por dentro, para o `├┼o` continuar legível
-    usos: Dict[Tuple[int, int], list] = {}
+    cruzamento), depois bordas e marcas por cima, para uma linha nunca apagar um `o` ou um `<`.
 
+    Pontas que caem na mesma célula da borda (várias setas chegando na mesma coluna) dividem a borda e a
+    marca; logo depois há uma junção (`┬ ┴ ┤ ├`, nunca `┼`) da qual cada seta segue por um ramo seu, e o `o`
+    de uma seta opcional fica na primeira célula do ramo dela, onde só ela pode estar."""
+    proprias = []
     for lid in sorted(vista.ligacoes):
         lig = vista.ligacoes[lid]
         if lig.origem not in caixas or lig.destino not in caixas or lig.destino in recolhidas:
             continue
         to, td = vista.tabelas[lig.origem], vista.tabelas[lig.destino]
-        linhas_o = [i for i, c in enumerate(to.colunas) if c.id in lig.colunas]
         ordem_o = [next((i for i, c in enumerate(to.colunas) if c.id == cid), None) for cid in lig.colunas]
         ordem_d = [next((i for i, c in enumerate(td.colunas) if c.id == cid), None) for cid in lig.colunas_destino]
-        if not lig.colunas or not lig.colunas_destino or None in ordem_o or None in ordem_d or not linhas_o:
+        if not lig.colunas or not lig.colunas_destino or None in ordem_o or None in ordem_d:
             continue
         xo, yo, wo, _ = caixas[lig.origem]
         xd, yd, wd, _ = caixas[lig.destino]
         dif = (2 * xd + wd) - (2 * xo + wo)
-        lado_o = 1 if dif > 0 else -1 if dif < 0 else 1
+        lado_o = -1 if dif < 0 else 1
         lado_d = -lado_o if dif != 0 else 1
         if lig.origem == lig.destino:
             lado_o = lado_d = 1
         bo = xo + wo - 1 if lado_o > 0 else xo
         bd = xd + wd - 1 if lado_d > 0 else xd
-        opc = opcional(vista, lig)
-        um = cardinalidade(vista, lig) == "1:1"
-        extras = [(bo, yo + 1 + i) for i in ordem_o[1:]]
-        info = dict(lig=lig, so=lado_o, sd=lado_d, bo=bo, bd=bd, yo=yo + 1 + ordem_o[0], yd=yd + 1 + ordem_d[0],
-                    opc=opc, um=um, extras=extras)
-        proprias.append(info)
-        usos.setdefault((bo, info["yo"]), []).append(((1, lid), info, "ko"))
-        usos.setdefault((bd, info["yd"]), []).append(((0 if opc else 1, lid), info, "kd"))
-        for bx, y in extras:
-            reservadas.add((bx + lado_o, y))
+        proprias.append(dict(lig=lig, so=lado_o, sd=lado_d, bo=bo, bd=bd, yo=yo + 1 + ordem_o[0],
+                             yd=yd + 1 + ordem_d[0], opc=opcional(vista, lig),
+                             um=cardinalidade(vista, lig) == "1:1",
+                             extras=[(bo, yo + 1 + i) for i in ordem_o[1:]]))
     if not proprias:
         return
-    for fila in usos.values():
-        gasto = 0  # células já gastas por quem está mais por dentro
-        for _, info, campo in sorted(fila, key=lambda u: u[0]):
-            info[campo] = gasto
-            gasto += 2 if campo == "kd" and info["opc"] else 1
-    for info in proprias:
-        reservadas.add((info["bo"] + info["so"] * (1 + info["ko"]), info["yo"]))
-        reservadas.add((info["bd"] + info["sd"] * (1 + info["kd"]), info["yd"]))
-        if info["opc"]:
-            reservadas.add((info["bd"] + info["sd"] * (2 + info["kd"]), info["yd"]))
+
+    # ---- as pontas, agrupadas por célula da borda
+    grupos: Dict[Tuple[int, int], list] = {}
+    for i in proprias:
+        for tipo, bx, y, s, outro in (("o", i["bo"], i["yo"], i["so"], i["yd"]),
+                                      ("d", i["bd"], i["yd"], i["sd"], i["yo"])):
+            p = dict(info=i, tipo=tipo, bx=bx, y=y, s=s, outro=outro)
+            i[tipo] = p
+            grupos.setdefault((bx, y), []).append(p)
+    reservadas: Set[Tuple[int, int]] = set()
+    junções: List[Tuple[Tuple[int, int], str, tuple]] = []
+    for (bx, y), g in grupos.items():
+        s = g[0]["s"]
+        marca_x = bx + s
+        reservadas.add((marca_x, y))
+        if len(g) == 1:
+            p = g[0]
+            p["dir"] = (s, 0)
+            if p["tipo"] == "d" and p["info"]["opc"]:
+                p["ocel"], p["cel"] = (bx + 2 * s, y), (bx + 3 * s, y)
+                reservadas.add(p["ocel"])
+            else:
+                p["ocel"], p["cel"] = None, (bx + 2 * s, y)
+            p["marca"] = None
+            continue
+        # várias pontas: uma junção em bx+2s e um ramo por ponta (no máximo dois sentidos distintos)
+        junção = (bx + 2 * s, y)
+        reservadas.add(junção)
+        permitidos: List[tuple] = []
+        for p in sorted(g, key=lambda p: (p["info"]["lig"].id, p["tipo"])):
+            quer = (0, -1) if p["outro"] < y else (0, 1) if p["outro"] > y else (s, 0)
+            if quer not in permitidos and len(permitidos) < 2:
+                permitidos.append(quer)
+            p["dir"] = quer if quer in permitidos else permitidos[0]
+        dirs = frozenset([(-s, 0)] + permitidos)
+        char = _CANTOS.get(dirs) or _TEES[dirs]
+        for p in g:
+            p["cel"] = (junção[0] + p["dir"][0], junção[1] + p["dir"][1])
+            reservadas.add(p["cel"])
+        dono = sorted(g, key=lambda p: (p["info"]["lig"].id, p["tipo"]))[0]
+        for p in g:
+            usada = sum(1 for q in g if q["cel"] == p["cel"]) > 1
+            p["ocel"] = p["cel"] if p["tipo"] == "d" and p["info"]["opc"] and not usada else None
+        if any(p["tipo"] == "d" for p in g):
+            marca = "┼"
+        else:
+            marca = "┼" if all(p["info"]["um"] for p in g) else (">" if s > 0 else "<")
+        for p in g:
+            p["marca"] = None
+        dono["marca"] = marca
+        dono["junção"] = (junção, char)
+    for i in proprias:
+        for bx, y in i["extras"]:
+            reservadas.add((bx + i["so"], y))
 
     interditas: Set[Tuple[int, int]] = set(reservadas)
     dentro: Set[Tuple[int, int]] = set()
@@ -310,48 +352,49 @@ def _ligacoes(vista: Modelo, caixas: Dict[str, Tuple[int, int, int, int]], recol
     ocupadas: Set[Tuple[int, int]] = set()
     for i in proprias:
         lig = i["lig"]
-        so, sd = i["so"], i["sd"]
-        inicio = (i["bo"] + (2 + i["ko"]) * so, i["yo"])
-        fim = (i["bd"] + (3 + i["kd"] if i["opc"] else 2 + i["kd"]) * sd, i["yd"])
+        do, dd = i["o"]["dir"], i["d"]["dir"]
+        inicio, fim = i["o"]["cel"], i["d"]["cel"]
         limites = (min(lx0, inicio[0], fim[0]), min(ly0, inicio[1], fim[1]),
                    max(lx1, inicio[0], fim[0]), max(ly1, inicio[1], fim[1]))
-        caminho = rotear(inicio, fim, interditas, limites, ocupadas, (so, 0), (-sd, 0))
-        i["inicio"], i["fim"] = inicio, fim
+        caminho = rotear(inicio, fim, interditas, limites, ocupadas, do, (-dd[0], -dd[1]))
         papel = lig.estado if lig.estado in _ESTADOS else "seta"
         alvo = ("ligacao", lig.id)
         for n, c in enumerate(caminho):
-            antes = caminho[n - 1] if n > 0 else (c[0] - so, c[1])
-            depois = caminho[n + 1] if n + 1 < len(caminho) else (c[0] - sd, c[1])
+            antes = caminho[n - 1] if n > 0 else (c[0] - do[0], c[1] - do[1])
+            depois = caminho[n + 1] if n + 1 < len(caminho) else (c[0] - dd[0], c[1] - dd[1])
             ocupadas.add(c)
             if c in dentro or c[0] < 0 or c[1] < 0:
                 continue
             cel[c] = (_caracter(antes, c, depois), papel)
             alvos[c] = alvo
 
+    def pôr_marca(x: int, y: int, ch: str, lig) -> None:
+        if x >= 0:
+            cel[(x, y)] = (ch, lig.estado if lig.estado in _ESTADOS else "marca")
+            alvos[(x, y)] = ("ligacao", lig.id)
+
+    def borda(x: int, y: int, lado: int) -> None:
+        if (x, y) in cel:  # a borda da coluna: só o caractere muda, o papel e o alvo (a coluna) ficam
+            cel[(x, y)] = ("├" if lado > 0 else "┤", cel[(x, y)][1])
+
     for i in proprias:
         lig = i["lig"]
-        papel = lig.estado if lig.estado in _ESTADOS else "marca"
-        alvo = ("ligacao", lig.id)
-        so, sd = i["so"], i["sd"]
-
-        def marca(x: int, y: int, ch: str) -> None:
-            if x >= 0:
-                cel[(x, y)] = (ch, papel)
-                alvos[(x, y)] = alvo
-
-        def borda(x: int, y: int, lado: int) -> None:
-            if (x, y) in cel:  # a borda da coluna: só o caractere muda, o papel e o alvo (a coluna) ficam
-                cel[(x, y)] = ("├" if lado > 0 else "┤", cel[(x, y)][1])
-
-        borda(i["bo"], i["yo"], so)
-        marca(i["bo"] + so * (1 + i["ko"]), i["yo"], "┼" if i["um"] else (">" if so > 0 else "<"))
+        for p in (i["o"], i["d"]):
+            borda(p["bx"], p["y"], p["s"])
+            if p["marca"] is not None:
+                pôr_marca(p["bx"] + p["s"], p["y"], p["marca"], lig)
+                (jx, jy), ch = p["junção"]
+                pôr_marca(jx, jy, ch, lig)
+            elif len(grupos[(p["bx"], p["y"])]) == 1:
+                if p["tipo"] == "d":
+                    pôr_marca(p["bx"] + p["s"], p["y"], "┼", lig)
+                else:
+                    pôr_marca(p["bx"] + p["s"], p["y"], "┼" if i["um"] else (">" if p["s"] > 0 else "<"), lig)
+            if p["ocel"] is not None:
+                pôr_marca(p["ocel"][0], p["ocel"][1], "o", lig)
         for bx, y in i["extras"]:
-            borda(bx, y, so)
-            marca(bx + so, y, "⋯")
-        borda(i["bd"], i["yd"], sd)
-        marca(i["bd"] + sd * (1 + i["kd"]), i["yd"], "┼")
-        if i["opc"]:
-            marca(i["bd"] + sd * (2 + i["kd"]), i["yd"], "o")
+            borda(bx, y, i["so"])
+            pôr_marca(bx + i["so"], y, "⋯", lig)
 
 
 def desenhar(vista: Modelo, posicoes: Dict[str, Tuple[int, int]], avisos: Optional[Dict[str, str]] = None,
