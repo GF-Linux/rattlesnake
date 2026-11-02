@@ -576,3 +576,60 @@ def test_aviso_particoes_selecao_e_fora_da_grade():
     x, y, w, h = d.caixas["t1"]
     assert d.papel_em(x + w, 1) == "aviso" and d.largura == x + w + 1
     assert d.trechos(-1) == [] and d.trechos(99) == [] and d.papel_em(-1, 0) == "" and d.onde(-1, -1) is None
+
+
+def _sem_sobreposicao(m, pos):
+    caixas = [(x, y, *desenho.tamanho_caixa(m.tabelas[i])) for i, (x, y) in pos.items()]
+    for i, a in enumerate(caixas):
+        for b in caixas[i + 1:]:
+            assert not desenho._colide(a, b)
+
+
+def test_posicionar_ciclo_e_auto_referencia():
+    def tab(i, nome):
+        return modelo.Tabela(i, "public", nome, [modelo.Coluna(i + ".c1", "id", "bigint", pk=True),
+                                                  modelo.Coluna(i + ".c2", "outra", "bigint")])
+    m = modelo.Modelo("public", {"a": tab("a", "a"), "b": tab("b", "b"), "c": tab("c", "c")}, {
+        "k1": Ligacao("k1", "a", ("a.c2",), "b", ("b.c1",), "a_b"),
+        "k2": Ligacao("k2", "b", ("b.c2",), "a", ("a.c1",), "b_a"),
+        "k3": Ligacao("k3", "c", ("c.c2",), "c", ("c.c1",), "c_c"),
+    })
+    pos = desenho.posicionar(m, {})
+    assert set(pos) == {"a", "b", "c"}
+    _sem_sobreposicao(m, pos)
+
+
+def test_guardada_empurra_automatica_para_baixo():
+    m = modelo_png()
+    livre = desenho.posicionar(m, {})
+    pos = desenho.posicionar(m, {"t3": livre["t2"]})   # t3 guardada em cima de onde t2 cairia
+    assert pos["t3"] == livre["t2"]
+    assert pos["t2"][1] > livre["t2"][1] or pos["t2"][0] != livre["t2"][0]
+    caixas = {i: (x, y, *desenho.tamanho_caixa(m.tabelas[i])) for i, (x, y) in pos.items()}
+    assert not desenho._colide(caixas["t2"], caixas["t3"])
+
+
+def test_estado_apagado_no_desenho():
+    m = modelo_png()
+    m.tabelas["t1"].colunas[1].estado = "apagado"
+    d = desenho.desenhar(m, {"t1": (0, 0)})
+    assert d.texto().splitlines()[2].startswith("│−") and d.papel_em(1, 2) == "apagado"
+    assert d.papel_em(5, 2) == "apagado" and d.papel_em(0, 2) == "borda"
+
+
+def test_corte_no_nome_e_tipo_inteiro_e_cliques_na_tabela_larga():
+    t = modelo.Tabela("t9", "public", "x" * 60, [modelo.Coluna("t9.c1", "n" * 60, "character varying(255)")])
+    m = modelo.Modelo("public", {"t9": t}, {})
+    d = desenho.desenhar(m, {"t9": (0, 0)})
+    linhas = d.texto().splitlines()
+    assert linhas[1].endswith("varchar(255) │") and "…" in linhas[1] and "n" * 30 not in linhas[1]
+    assert linhas[1].index("…") < linhas[1].index("varchar")
+    assert "…" in linhas[0] and linhas[0].endswith("┐")
+    assert d.onde(10, 0) == ("tabela", "t9")
+    assert d.onde(desenho.LARGURA_MAX - 1, 1) == ("coluna", "t9", "t9.c1")
+    assert d.onde(desenho.LARGURA_MAX, 1) is None
+
+
+def test_vazio_tem_tamanho_zero():
+    d = desenho.desenhar(modelo.Modelo("public", {}, {}), {})
+    assert d.largura == 0 and d.altura == 0 and d.trechos(0) == []
