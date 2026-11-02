@@ -314,3 +314,20 @@ def test_guardar(monkeypatch, tmp_path):
     assert guardar.ler_rascunho(5432, "estudos", "public") is None
     assert guardar.guardar_aplicado(5432, "estudos", "SELECT 1;").read_text() == "SELECT 1;"
     assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_rascunho_corrompido_levanta_so_rascunhocorrompido():
+    base = modelo_png()
+    ruins = [
+        {"operacoes": [{"tipo": "inexistente"}]},
+        {"operacoes": [{"tipo": "renomear", "tabela": "t1"}]},
+        {"operacoes": [{"tipo": "renomear", "tabela": "t1", "coluna": None, "novo": "x", "extra": 1}]},
+        {"operacoes": "x"},
+        {"operacoes": ["x"]},
+        {"operacoes": [{"tipo": "adicionar_coluna", "tabela": "t1", "coluna": "x"}]},
+        {"operacoes": [], "proximo": "abc"},
+        [],
+    ]
+    for d in ruins:
+        with pytest.raises(rascunho.RascunhoCorrompido):
+            rascunho.Rascunho.de_dict(d, base)

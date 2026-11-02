@@ -562,6 +562,10 @@ def _op_de_dict(d: dict) -> Operacao:
     return cls(**campos)
 
 
+class RascunhoCorrompido(ValueError):
+    """O rascunho lido do disco não tem a forma esperada (editado à mão ou estragado)."""
+
+
 class Rascunho:
     """A base (o que está no banco) mais a lista de operações que a pessoa fez em cima dela."""
 
@@ -602,7 +606,7 @@ class Rascunho:
                     cmds = op.comandos(m)
                     desc = " ".join(op.descricao(m).splitlines())   # uma linha só: vai para um comentário SQL
                     op.aplicar(m)
-                except (KeyError, ValueError):
+                except (KeyError, ValueError, TypeError, AttributeError):
                     valida, cmds = False, []
             passos.append((op, valida, desc, cmds))
         return m, passos
@@ -641,7 +645,20 @@ class Rascunho:
 
     @classmethod
     def de_dict(cls, d: dict, base: Modelo) -> "Rascunho":
-        r = cls(base, [_op_de_dict(o) for o in d.get("operacoes", [])], int(d.get("proximo", 1)))
+        try:
+            if not isinstance(d, dict) or not isinstance(d.get("operacoes", []), list):
+                raise TypeError("esperava um objeto com a lista \"operacoes\"")
+            ops = []
+            for n, o in enumerate(d.get("operacoes", []), 1):
+                try:
+                    ops.append(_op_de_dict(o))
+                except (KeyError, TypeError, AttributeError, ValueError) as e:
+                    raise RascunhoCorrompido(f"operação {n} ilegível: {type(e).__name__}: {e}") from e
+            r = cls(base, ops, int(d.get("proximo", 1)))
+        except RascunhoCorrompido:
+            raise
+        except (KeyError, TypeError, AttributeError, ValueError) as e:
+            raise RascunhoCorrompido(f"rascunho ilegível: {type(e).__name__}: {e}") from e
         r.rebase(base)
         return r
 
