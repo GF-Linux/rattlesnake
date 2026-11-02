@@ -229,11 +229,10 @@ def _chaves(avisos):
 def test_contagens_reais(banco):
     banco.execute(PESSOAS_SQL); c = checagem.Consulta(banco)
     m = catalogo.modelo(banco, "public")
-    lig_pedidos = next(l for l in m.ligacoes.values() if m.tabelas[l.origem].nome == "pedidos")
     onde = filtro.where(filtro.Filtro([filtro.Condicao("t1.c2", "comeca", ["G"])]), modelo_pessoas(), "t1")
     assert c.contar_onde("public", "pessoas", onde) == 2              # ' Gustavo' não começa com G
     assert c.contar_onde("public", "pessoas", "") == 5
-    assert c.cascata("public", "pessoas", "id = 1", [lig_pedidos], m) == [("public.pedidos", "CASCADE", 2)]
+    assert c.cascata("public", "pessoas", "id = 1") == [("public.pedidos", "CASCADE", 2)]
     assert c.valor_valido("date", "2026-02-30") is False and c.valor_valido("date", "2026-02-28") is True
     c.forcar_cast = True; assert c.valor_valido("integer", "x") is False
     assert c.valor_valido("date", "2026-02-30") is False and c.valor_valido("integer", "12") is True
@@ -526,3 +525,138 @@ def test_grade_com_tempo_limite(banco):
     assert catalogo.contar_filtrado(banco, "public", "grande", "x <= 10") == 10        # a conexão segue de pé
     assert catalogo.linhas_pai(banco, "public", "grande", "x", "", limite=2) == [(1, "1"), (2, "2")]
     assert banco.execute("SELECT current_setting('statement_timeout')").fetchone()[0] == "0"
+
+
+# ── revisão 2: a cascata conta linhas distintas que saem de verdade ──
+
+def _real(banco, tabela, onde, tabelas):
+    """O DELETE de verdade numa transação desfeita: {tabela: linhas que saem além das do WHERE} ou o erro."""
+    antes = {t: banco.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in tabelas}
+    try:
+        with banco.transaction(force_rollback=True):
+            n = banco.execute(f"DELETE FROM {tabela} WHERE {onde or 'true'}").rowcount
+            depois = {t: banco.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in tabelas}
+    except psycopg.Error:
+        return "falha"
+    sairam = {t: antes[t] - depois[t] - (n if t == tabela else 0) for t in tabelas}
+    return {t: k for t, k in sairam.items() if k}
+
+
+def _cascatas(res):
+    return {t: n for t, a, n in res if a == "CASCADE"}
+
+
+def _impede(res):
+    return any(a not in ("CASCADE", "SET NULL", "SET DEFAULT") for _, a, _ in res)
+
+
+def test_cascata_autorreferente_bate_com_o_delete_real(banco):
+    banco.execute("""
+      CREATE TABLE public.arv (id int PRIMARY KEY, pai int REFERENCES public.arv (id) ON DELETE CASCADE);
+      INSERT INTO public.arv SELECT g, NULLIF(g - 1, 0) FROM generate_series(1, 12) g;
+      CREATE TABLE public.nota (id int, arv_id int REFERENCES public.arv (id) ON DELETE RESTRICT);
+      INSERT INTO public.nota VALUES (1, 11);
+      CREATE TABLE public.dois (id int PRIMARY KEY, pai int REFERENCES public.dois (id) ON DELETE CASCADE,
+                                raiz int REFERENCES public.dois (id) ON DELETE CASCADE);
+      INSERT INTO public.dois SELECT g, NULLIF(g - 1, 0), CASE WHEN g = 1 THEN NULL ELSE 1 END FROM generate_series(1, 10) g;
+      CREATE TABLE public.ciclo (id int PRIMARY KEY, outro int);
+      INSERT INTO public.ciclo VALUES (1, 2), (2, 1), (3, NULL);
+      ALTER TABLE public.ciclo ADD FOREIGN KEY (outro) REFERENCES public.ciclo (id) ON DELETE CASCADE;
+    """)
+    c = checagem.Consulta(banco)
+    res = c.cascata("public", "arv", "id = 1")                   # a nota presa no nível 10 impede
+    assert ("public.nota", "RESTRICT", 1) in res and not res.incompleta
+    assert _real(banco, "public.arv", "id = 1", ["public.arv"]) == "falha"
+    banco.execute("DELETE FROM public.nota")
+    casos = [("arv", "id = 1"), ("arv", "id IN (1, 2, 3)"), ("arv", ""), ("arv", "id = 12"), ("ciclo", "id = 1"),
+             ("ciclo", "id = 3"), ("dois", "id = 1"), ("dois", "id = 5")]
+    for tabela, onde in casos:
+        res = c.cascata("public", tabela, onde)
+        assert not _impede(res) and not res.incompleta, (tabela, onde, res)
+        assert _cascatas(res) == _real(banco, f"public.{tabela}", onde, [f"public.{tabela}"]), (tabela, onde, res)
+    assert _cascatas(c.cascata("public", "arv", "id = 1")) == {"public.arv": 11}
+    assert _cascatas(c.cascata("public", "arv", "id IN (1, 2, 3)")) == {"public.arv": 9}
+    assert c.cascata("public", "arv", "") == [] and c.cascata("public", "ciclo", "id = 1") == [("public.ciclo", "CASCADE", 1)]
+
+
+def test_cascata_entre_tabelas_bate_com_o_delete_real(banco):
+    _cascata_sql(banco)
+    c = checagem.Consulta(banco)
+    tabelas = ["public.pedidos", "public.itens", "public.chefes", "public.pessoas"]
+    for onde in ("id = 1", "id = 5", "id IN (1, 5)", "nome ILIKE 'g%'"):
+        res = c.cascata("public", "pessoas", onde)
+        real = _real(banco, "public.pessoas", onde, tabelas)
+        if _impede(res):
+            assert real == "falha", (onde, res)
+        else:
+            assert _cascatas(res) == real, (onde, res, real)
+
+
+def test_cascata_alem_do_teto_avisa_que_ficou_incompleta(banco, monkeypatch):
+    banco.execute("CREATE TABLE public.t0 (id int PRIMARY KEY); INSERT INTO public.t0 VALUES (1)")
+    for i in range(1, 6):
+        banco.execute(f"CREATE TABLE public.t{i} (id int PRIMARY KEY, p int REFERENCES public.t{i - 1} (id) ON DELETE CASCADE);"
+                      f"INSERT INTO public.t{i} VALUES (1, 1)")
+    banco.execute("CREATE TABLE public.trava (id int, p int REFERENCES public.t5 (id) ON DELETE RESTRICT);"
+                  "INSERT INTO public.trava VALUES (1, 1)")
+    c = checagem.Consulta(banco)
+    res = c.cascata("public", "t0", "id = 1")
+    assert not res.incompleta and ("public.trava", "RESTRICT", 1) in res and _cascatas(res) == {f"public.t{i}": 1 for i in range(1, 6)}
+    monkeypatch.setattr(checagem, "_PROFUNDIDADE", 3)
+    res = c.cascata("public", "t0", "id = 1")
+    assert res.incompleta and ("public.trava", "RESTRICT", 1) not in res     # não dá para ver: diz que ficou incompleta
+    r = rascunho.Rascunho(catalogo.modelo(banco, "public"))
+    avisos = checagem.avisos_da_operacao(rascunho.Apagar(r.base.por_nome("t0").id, filtro.Filtro(texto="id = 1")), r, c)
+    assert ("atencao", "chk.cascata_incompleta") in _chaves(avisos)
+    assert ("atencao", "chk.cascata_apaga_pelo_menos") in _chaves(avisos) and "chk.cascata_apaga" not in [a.chave for a in avisos]
+    assert all(a.texto() for a in avisos)
+    monkeypatch.setattr(checagem, "_PROFUNDIDADE", 16)
+    monkeypatch.setattr(checagem, "_ORCAMENTO_S", 0.0)               # o tempo total da cascata acabou
+    res = c.cascata("public", "t0", "id = 1")
+    assert res.incompleta and res == []
+
+
+def test_cascata_ciclo_entre_tabelas_diferentes_fica_incompleta(banco):
+    banco.execute("""
+      CREATE TABLE public.a (id int PRIMARY KEY, b_id int);
+      CREATE TABLE public.b (id int PRIMARY KEY, a_id int REFERENCES public.a (id) ON DELETE CASCADE);
+      ALTER TABLE public.a ADD FOREIGN KEY (b_id) REFERENCES public.b (id) ON DELETE CASCADE;
+      INSERT INTO public.a VALUES (1, NULL), (2, NULL); INSERT INTO public.b VALUES (1, 1);
+      UPDATE public.a SET b_id = 1 WHERE id = 2;
+    """)
+    res = checagem.Consulta(banco).cascata("public", "a", "id = 1")
+    assert res.incompleta and ("public.b", "CASCADE", 1) in res          # o mínimo: b(1); a(2) viria depois
+
+
+def test_cascata_sem_permissao_de_ler_uma_filha(banco):
+    banco.execute(PESSOAS_SQL)
+    banco.execute("CREATE TABLE public.segredo (id int, pessoa_id bigint REFERENCES public.pessoas (id) ON DELETE CASCADE);"
+                  "INSERT INTO public.segredo VALUES (1, 1)")
+    if banco.execute("SELECT rolsuper FROM pg_roles WHERE rolname = current_user").fetchone()[0]:
+        pytest.skip("superusuário lê tudo")
+    banco.execute("REVOKE SELECT ON public.segredo FROM CURRENT_USER")      # o dono tira de si mesmo
+    r = rascunho.Rascunho(catalogo.modelo(banco, "public"))
+    c = checagem.Consulta(banco)
+    res = c.cascata("public", "pessoas", "id = 1")
+    assert res.sem_permissao == ["public.segredo"] and res.incompleta and ("public.pedidos", "CASCADE", 2) in res
+    avisos = checagem.avisos_da_operacao(rascunho.Apagar(r.base.por_nome("pessoas").id, filtro.Filtro(texto="id = 1")), r, c)
+    aviso = [a for a in avisos if a.chave == "chk.sem_permissao_ver"]
+    assert [(a.nivel, a.valores["tabela"]) for a in aviso] == [("atencao", "public.segredo")]
+    assert not any(a.chave == "chk.consulta_falhou" for a in avisos) and ("atencao", "chk.cascata_incompleta") in _chaves(avisos)
+
+
+def test_cascata_apagando_direto_numa_particao(banco):
+    banco.execute("""
+      CREATE TABLE public.ev (id int, ano int, PRIMARY KEY (id, ano)) PARTITION BY LIST (ano);
+      CREATE TABLE public.ev_2025 PARTITION OF public.ev FOR VALUES IN (2025);
+      CREATE TABLE public.ev_2026 PARTITION OF public.ev FOR VALUES IN (2026);
+      CREATE TABLE public.anexo (id int, ev_id int, ev_ano int,
+                                 FOREIGN KEY (ev_id, ev_ano) REFERENCES public.ev (id, ano) ON DELETE CASCADE);
+      INSERT INTO public.ev VALUES (1, 2025), (2, 2025), (1, 2026);
+      INSERT INTO public.anexo VALUES (1, 1, 2025), (2, 1, 2025), (3, 1, 2026), (4, 2, 2025);
+    """)
+    c = checagem.Consulta(banco)
+    for tabela, onde in (("ev_2025", "id = 1"), ("ev", "id = 1"), ("ev_2026", ""), ("ev", "")):
+        res = c.cascata("public", tabela, onde)
+        assert _cascatas(res) == _real(banco, f"public.{tabela}", onde, ["public.anexo"]), (tabela, onde, res)
+    assert c.cascata("public", "ev_2025", "id = 1") == [("public.anexo", "CASCADE", 2)]

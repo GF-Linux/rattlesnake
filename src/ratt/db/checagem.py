@@ -11,6 +11,7 @@ tabelas e sequências; não barra todo efeito colateral que uma função chamada
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
@@ -75,7 +76,60 @@ class Dependente:
 
 NULO_EM_OBRIGATORIA = "SET NULL → NOT NULL"
 _ACOES = {"a": "NO ACTION", "r": "RESTRICT", "c": "CASCADE", "n": "SET NULL", "d": "SET DEFAULT"}
-_PROFUNDIDADE = 8           # níveis de CASCADE seguidos (um ciclo nos dados para aqui)
+_PROFUNDIDADE = 16          # tabelas seguidas por CASCADE (só uma rede de segurança: o normal é acabar antes)
+_ORCAMENTO_S = 4.0          # tempo total de uma cascata; passou, ela fica incompleta
+_TAMANHO_MAX = 200_000      # caracteres do predicado de uma tabela
+
+
+class Cascata(list):
+    """[(tabela, ação, linhas)]. `incompleta`: algo ficou sem olhar (teto, tempo, ciclo entre tabelas, permissão)
+    e os números são o mínimo. `sem_permissao`: as tabelas que não deu para ler."""
+
+    def __init__(self, itens=(), incompleta: bool = False, sem_permissao=()):
+        super().__init__(itens)
+        self.incompleta = incompleta
+        self.sem_permissao: List[str] = list(sem_permissao)
+
+
+@dataclass(frozen=True)
+class _Aresta:
+    filha: int                  # oid da tabela que tem a chave estrangeira
+    esquema: str
+    nome: str
+    minhas: Tuple[str, ...]     # colunas da filha
+    delas: Tuple[str, ...]      # colunas do pai
+    acao: str
+    nulo_em_obrigatoria: bool   # o SET NULL cairia numa coluna NOT NULL
+
+
+def _qualificado(esquema: str, nome: str) -> str:
+    return f"{rs.ident(esquema)}.{rs.ident(nome)}"
+
+
+def _pega(filha: str, minhas, pai: str, delas, sai_do_pai: str) -> str:
+    """Linhas da filha que apontam para as linhas do pai que saem. Pai e filha vão pelo nome completo, sem apelido:
+    numa subconsulta o nome mais de dentro vale, então a mesma tabela dos dois lados também funciona."""
+    return (f"({', '.join(f'{filha}.{rs.ident(c)}' for c in minhas)}) IN "
+            f"(SELECT {', '.join(f'{pai}.{rs.ident(c)}' for c in delas)} FROM {pai} WHERE {sai_do_pai})")
+
+
+def _recursivo(tab: str, base: str, proprias: List[_Aresta], n: int) -> str:
+    """As linhas que saem de uma tabela com chave estrangeira para ela mesma: as da `base` e, de novo e de novo,
+    as que apontam para elas. UNION (não UNION ALL) sobre (tableoid, ctid, chaves) faz um ciclo nos dados terminar."""
+    chaves: List[str] = []
+    for a in proprias:
+        for c in a.delas:
+            if c not in chaves:
+                chaves.append(c)
+    r = f"_ratt_r{n}"
+    k = {c: f"_k{i}" for i, c in enumerate(chaves)}
+    junta = " OR ".join("(" + ", ".join(f"_x.{rs.ident(m)}" for m in a.minhas) + ") = ("
+                        + ", ".join(f"{r}.{k[d]}" for d in a.delas) + ")" for a in proprias)
+    lista = ", ".join(rs.ident(c) for c in chaves)
+    return (f"({tab}.tableoid, {tab}.ctid) IN (WITH RECURSIVE {r}(_t, _c, {', '.join(k[c] for c in chaves)}) AS ("
+            f"SELECT tableoid, ctid, {lista} FROM {tab} WHERE {base} "
+            f"UNION SELECT _x.tableoid, _x.ctid, {', '.join(f'_x.{rs.ident(c)}' for c in chaves)} "
+            f"FROM {tab} AS _x JOIN {r} ON {junta}) SELECT _t, _c FROM {r})")
 
 # Nome de tipo como o `format_type` do catálogo escreve: nomes simples ou entre aspas (com `""` dobrado), um
 # schema opcional, `(n)`/`(n,m)`, as palavras fixas dos tipos de hora e de intervalo e `[]`. Só isso pode ir
@@ -195,10 +249,10 @@ class Consulta:
         n = len(colunas)
         return [(tuple(l[:n]), tuple(l[n:])) for l in linhas]
 
-    def _grafo(self) -> Optional[Dict[int, List[tuple]]]:
-        """Todas as chaves estrangeiras do banco (de qualquer schema), por tabela pai: (oid da filha, esquema,
-        nome, colunas da filha, colunas do pai, ação ao apagar, o SET NULL cai numa coluna NOT NULL). As cópias
-        que o PostgreSQL faz nas partições (`conparentid`) ficam de fora: a tabela mãe já conta por elas."""
+    def _grafo(self) -> Optional[Dict[int, List[_Aresta]]]:
+        """Todas as chaves estrangeiras do banco (de qualquer schema), por tabela pai. As que o PostgreSQL copia nas
+        partições da tabela FILHA ficam de fora (a tabela mãe já conta por elas); as copiadas para cada partição da
+        tabela PAI ficam, e só são alcançadas quando se apaga direto numa partição."""
         anula = ("CASE WHEN cardinality(coalesce(k.confdelsetcols, '{}')) > 0 THEN k.confdelsetcols ELSE k.conkey END"
                  if self.versao() >= 150000 else "k.conkey")           # ON DELETE SET NULL (colunas), do PG 15
         linhas = self._rodar(
@@ -211,50 +265,131 @@ class Consulta:
             "EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = k.conrelid AND a.attnotnull "
             f"        AND a.attnum = ANY ({anula})) "
             "FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace "
-            "WHERE k.contype = 'f' AND k.conparentid = 0 ORDER BY k.oid", engolir=True)
+            "WHERE k.contype = 'f' AND NOT c.relispartition ORDER BY k.oid", engolir=True)
         if linhas is None:
             return None
-        grafo: Dict[int, List[tuple]] = {}
-        for pai, *resto in linhas:
-            grafo.setdefault(pai, []).append(tuple(resto))
+        grafo: Dict[int, List[_Aresta]] = {}
+        for pai, filha, esquema, nome, minhas, delas, tipo, nulo in linhas:
+            grafo.setdefault(pai, []).append(_Aresta(filha, esquema, nome, tuple(minhas), tuple(delas),
+                                                     _ACOES.get(tipo, "NO ACTION"), bool(nulo)))
         return grafo
 
-    def cascata(self, esquema, tabela, onde: str, ligacoes=None, m=None) -> Optional[List[Tuple[str, str, int]]]:
-        """O que apagar as linhas do WHERE faz nas outras tabelas: [(tabela filha, ação, quantas linhas)], só as que
-        têm alguma. As chaves estrangeiras vêm do catálogo (de qualquer schema, não só do `Modelo`), e a CASCADE é
-        seguida até os netos (até `_PROFUNDIDADE` níveis). A ação é a da chave (`CASCADE`, `SET NULL`, `SET DEFAULT`,
-        `NO ACTION`, `RESTRICT`), salvo `NULO_EM_OBRIGATORIA`: SET NULL numa coluna NOT NULL, que o PostgreSQL
-        recusaria. CASCADE soma por tabela (uma linha alcançada por dois caminhos conta duas vezes). `ligacoes` e
-        `m` ficam pela interface antiga e não são usados. None se o tempo acabar ou o WHERE falhar."""
+    def cascata(self, esquema, tabela, onde: str) -> Optional["Cascata"]:
+        """O que apagar as linhas do WHERE faz nas outras tabelas: uma `Cascata` [(tabela, ação, linhas)], só as que
+        têm alguma. As chaves estrangeiras vêm do catálogo (de qualquer schema). Para cada tabela alcançada por
+        CASCADE monta-se o conjunto exato das linhas que sairiam (as das tabelas pai, e numa chave para a própria
+        tabela um `WITH RECURSIVE … UNION`, que termina mesmo num ciclo); "CASCADE" conta linhas DISTINTAS além das
+        do WHERE. As outras ações contam as linhas filhas que apontam para as que saem e não saem junto: `NO ACTION`/
+        `RESTRICT` impedem, `NULO_EM_OBRIGATORIA` é SET NULL numa coluna NOT NULL (também impede). Ciclo entre
+        tabelas diferentes, mais de `_PROFUNDIDADE` níveis ou mais de `_ORCAMENTO_S` segundos: o que se viu é o
+        mínimo e a cascata fica `incompleta`. Tabela que não se pode ler vai em `sem_permissao`. None se uma
+        consulta estourar o tempo ou o WHERE falhar."""
+        comeco = time.monotonic()
         inicio = self._rodar("SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
                              "WHERE n.nspname = %s AND c.relname = %s", (esquema, tabela), engolir=True)
         grafo = self._grafo() if inicio else None
         if not inicio or grafo is None:
             return None
-        somas: Dict[Tuple[str, str], int] = {}
-        fila = [(inicio[0][0], sql.Identifier(esquema, tabela), onde, 0)]
-        while fila:
-            pai_oid, pai, pred, nivel = fila.pop(0)
-            for filha_oid, f_esquema, f_nome, minhas, delas, tipo, nulo_obrigatoria in grafo.get(pai_oid, []):
-                filha = sql.Identifier(f_esquema, f_nome)
-                pega = sql.SQL("({}) IN (SELECT {} FROM {}{})").format(
-                    sql.SQL(", ").join(sql.SQL("{}.{}").format(filha, sql.Identifier(c)) for c in minhas),
-                    sql.SQL(", ").join(sql.SQL("{}.{}").format(pai, sql.Identifier(c)) for c in delas),
-                    pai, catalogo.onde_sql(pred))
-                linhas = self._rodar(sql.SQL("SELECT count(*) FROM {} WHERE {}").format(filha, pega), engolir=True)
-                if linhas is None:
-                    return None
-                k = int(linhas[0][0])
-                if not k:
+        t0 = inicio[0][0]
+        res = Cascata()
+        nomes = {t0: _qualificado(esquema, tabela)}
+        rotulos = {t0: f"{esquema}.{tabela}"}
+
+        # 1. as tabelas que perdem linhas (por CASCADE), em ordem topológica; ciclo ou teto cortam e marcam
+        ordem: List[int] = []
+        estado: Dict[int, int] = {}
+        cortadas = set()
+
+        def visitar(oid, nivel):
+            estado[oid] = 1
+            for i, a in enumerate(grafo.get(oid, [])):
+                if a.acao != "CASCADE" or a.filha == oid:
                     continue
-                acao = _ACOES.get(tipo, "NO ACTION")
-                if acao == "SET NULL" and nulo_obrigatoria:
-                    acao = NULO_EM_OBRIGATORIA
-                chave = (f"{f_esquema}.{f_nome}", acao)
-                somas[chave] = somas.get(chave, 0) + k
-                if acao == "CASCADE" and nivel + 1 < _PROFUNDIDADE:      # as filhas apagadas apagam as delas
-                    fila.append((filha_oid, filha, pega.as_string(self.conexao), nivel + 1))
-        return [(t_, a, n) for (t_, a), n in somas.items()]
+                nomes.setdefault(a.filha, _qualificado(a.esquema, a.nome))
+                rotulos.setdefault(a.filha, f"{a.esquema}.{a.nome}")
+                if estado.get(a.filha) == 1 or (a.filha not in estado and nivel + 1 >= _PROFUNDIDADE):
+                    cortadas.add((oid, i))
+                    res.incompleta = True
+                elif a.filha not in estado:
+                    visitar(a.filha, nivel + 1)
+            estado[oid] = 2
+            ordem.append(oid)
+        visitar(t0, 0)
+        ordem.reverse()
+
+        # 2. o predicado de cada uma: "esta linha sai"
+        chegam: Dict[int, List[Tuple[int, _Aresta]]] = {}
+        for pai in ordem:
+            for i, a in enumerate(grafo.get(pai, [])):
+                if a.acao == "CASCADE" and a.filha != pai and (pai, i) not in cortadas:
+                    chegam.setdefault(a.filha, []).append((pai, a))
+        sai: Dict[int, str] = {}
+        depende: Dict[int, set] = {}
+        for n_, x in enumerate(ordem):
+            partes = [onde or "true"] if x == t0 else []
+            depende[x] = set()
+            for pai, a in chegam.get(x, []):
+                if pai in sai:
+                    partes.append(_pega(nomes[x], a.minhas, nomes[pai], a.delas, sai[pai]))
+                    depende[x] |= depende[pai] | {pai}
+            base = " OR ".join(f"({p})" for p in partes) if partes else "false"
+            proprias = [a for a in grafo.get(x, []) if a.acao == "CASCADE" and a.filha == x]
+            sai[x] = _recursivo(nomes[x], base, proprias, n_) if proprias else base
+            if len(sai[x]) > _TAMANHO_MAX:
+                del sai[x]
+                res.incompleta = True
+
+        # 3. as contagens, dentro do orçamento de tempo
+        presas = set()
+
+        def contar(consulta: str, tabela_oid: int) -> Optional[int]:
+            if time.monotonic() - comeco > _ORCAMENTO_S:
+                res.incompleta = True
+                return -1
+            try:
+                linhas = self._rodar(consulta)
+            except psycopg.errors.InsufficientPrivilege:
+                presas.add(tabela_oid)
+                if rotulos[tabela_oid] not in res.sem_permissao:
+                    res.sem_permissao.append(rotulos[tabela_oid])
+                res.incompleta = True
+                return -1
+            except psycopg.Error as e:
+                self._falhou(e)
+                return None
+            return None if linhas is None else int(linhas[0][0])
+
+        somas: Dict[Tuple[str, str], int] = {}
+        for x in ordem:
+            if x not in sai or depende[x] & presas:
+                continue
+            proprias = any(a.acao == "CASCADE" and a.filha == x for a in grafo.get(x, []))
+            if x != t0 or proprias:
+                extra = f" AND ({onde or 'true'}) IS NOT TRUE" if x == t0 else ""
+                k = contar(f"SELECT count(*) FROM {nomes[x]} WHERE ({sai[x]}){extra}", x)
+                if k is None:
+                    return None
+                if k > 0:
+                    somas[(rotulos[x], "CASCADE")] = somas.get((rotulos[x], "CASCADE"), 0) + k
+            if x in presas:
+                continue
+            for a in grafo.get(x, []):
+                if a.acao == "CASCADE":
+                    continue
+                nomes.setdefault(a.filha, _qualificado(a.esquema, a.nome))
+                rotulos.setdefault(a.filha, f"{a.esquema}.{a.nome}")
+                consulta = f"SELECT count(*) FROM {nomes[a.filha]} WHERE " + \
+                    _pega(nomes[a.filha], a.minhas, nomes[x], a.delas, sai[x])
+                if a.filha in sai:                  # quem também sai junto não impede nem fica vazio
+                    consulta += f" AND ({sai[a.filha]}) IS NOT TRUE"
+                k = contar(consulta, a.filha)
+                if k is None:
+                    return None
+                if k > 0:
+                    acao = NULO_EM_OBRIGATORIA if a.acao == "SET NULL" and a.nulo_em_obrigatoria else a.acao
+                    somas[(rotulos[a.filha], acao)] = somas.get((rotulos[a.filha], acao), 0) + k
+        res.extend((t_, a, n) for (t_, a), n in somas.items())
+        return res
 
     def versao(self) -> int:
         return catalogo.versao(self.conexao)
@@ -580,8 +715,16 @@ class _Dados:
         if achados is None:
             self.falhou(self.op.tabela)
             return
+        incompleta = bool(getattr(achados, "incompleta", False))
+        for tabela in getattr(achados, "sem_permissao", None) or []:
+            self.avisar(self.op.tabela, "atencao", "chk.sem_permissao_ver", tabela=tabela)
+        if incompleta:
+            self.avisar(self.op.tabela, "atencao", "chk.cascata_incompleta")
         for filha, acao, k in achados or []:
             if not k:
+                continue
+            if acao == "CASCADE" and incompleta:        # o que se viu é o mínimo
+                self.avisar(self.op.tabela, "atencao", "chk.cascata_apaga_pelo_menos", n=k, tabela=filha)
                 continue
             chave, nivel = {"CASCADE": ("chk.cascata_apaga", "atencao"), "SET NULL": ("chk.cascata_esvazia", "atencao"),
                             "SET DEFAULT": ("chk.cascata_padrao", "atencao"),

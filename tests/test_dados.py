@@ -629,6 +629,10 @@ def test_apagar_com_filhos_que_impedem_e_sugestao_de_soft_delete():
         avisos = checagem.avisos_da_operacao(rascunho.Apagar("t1", _G()), r,
                                              ConsultaFalsa(contar_onde=1, cascata=[("public.pedidos", acao, 3)]))
         assert (nivel, chave) in _chaves(avisos), acao
+    incompleta = checagem.Cascata([("public.pedidos", "CASCADE", 3)], incompleta=True, sem_permissao=["outro.x"])
+    avisos = checagem.avisos_da_operacao(rascunho.Apagar("t1", _G()), r, ConsultaFalsa(contar_onde=1, cascata=incompleta))
+    assert {("atencao", "chk.cascata_apaga_pelo_menos"), ("atencao", "chk.cascata_incompleta"),
+            ("atencao", "chk.sem_permissao_ver")} <= set(_chaves(avisos))
     avisos = checagem.avisos_da_operacao(rascunho.Apagar("t1", _G()), r,
                                          ConsultaFalsa(contar_onde=1, cascata=[("public.pedidos", "RESTRICT", 0)]))
     assert not any(a.chave == "chk.impede_filhos" for a in avisos)
