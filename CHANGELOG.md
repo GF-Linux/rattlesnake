@@ -10,19 +10,27 @@ vê antes de responder `[s/N]`.
   chave estrangeira é uma linha entre as caixas, com o pé de galinha (`<`) do lado "muitos" e o
   `┼` do lado "um". A coluna que aceita vazio ganha um `o` na ponta da linha, e a tabela de
   junção aparece ligada às duas pontas — o N:N.
-  - Num banco grande, `f` mostra só a tabela escolhida e as vizinhas; `F` mostra tudo de novo.
-    `s` troca o schema. Setas, `PageUp` e `PageDown` rolam; `shift` com as setas move a caixa.
+  - Num banco grande, `f` mostra só a tabela escolhida e as vizinhas (no máximo 25); `F` mostra
+    tudo de novo. A tabela muito referenciada aparece recolhida com `←N`; `+` a abre. `s` troca
+    o schema. Setas, `PageUp` e `PageDown` rolam; `shift` com as setas move a caixa.
+  - Um `⚠` marca tabela sem chave primária e chave estrangeira sem índice ou que aceita vazio;
+    a linha acima do painel do SQL diz em palavras os avisos do que está selecionado.
   - **Editar pelo desenho**: `a` nova tabela, `c` nova coluna, `l` liga duas colunas (ou liga
     duas tabelas "como N:N", e o ratt cria a tabela de junção), `espaço` abre o menu da coluna
     (renomear, obrigatória/opcional, única), `x` apaga — e mostra antes o que cai junto — e
     `u` desfaz.
   - **O rascunho**: nada vai para o banco ao editar. O SQL do que você fez fica sempre à vista,
-    embaixo do desenho, com os avisos (apagar dado, perder a unicidade…), e é guardado: se você
-    sair e voltar, ele está lá. `r` põe o foco no painel do SQL. Esse SQL é só para ler e
-    exportar; para mexer nele, `w` salva num `.sql`, e aí é o VS Code e o `ratt db run`.
-  - **Aplicar e ensaiar**: `enter` mostra o SQL e pede a confirmação antes de aplicar, tudo numa
-    transação — se um comando falha, nada muda e a operação que falhou aparece marcada.
-    `e` é o ensaio: roda tudo e desfaz no fim, igual ao `--dry-run`.
+    embaixo do desenho, cada tabela com o schema (`public.users`), e é guardado em
+    `~/.local/share/ratt/canvas/{porta}-{banco}/`: se você sair e voltar, ele está lá. Cada
+    formulário mostra antes os avisos do que a operação vai encontrar no banco (linhas com
+    NULL, valores repetidos, linhas sem pai, o que depende do que você apaga). `r` põe o foco no
+    painel do SQL. Esse SQL é só para ler e exportar; para mexer nele, `w` salva num `.sql`, e
+    aí é o VS Code e o `ratt db run`.
+  - **Aplicar e ensaiar**: `enter` mostra o SQL — e no alto o que ele apaga, com as linhas que
+    somem quando foram contadas — e pede a confirmação antes de aplicar, tudo numa transação:
+    se um comando falha, nada muda e a operação que falhou aparece marcada. O SQL aplicado fica
+    em `aplicados/`, na mesma pasta do rascunho. `e` é o ensaio: roda tudo e desfaz no fim,
+    igual ao `--dry-run`.
 - corrigido: a tela do `ratt db` agora percebe quando mudam as restrições, o NOT NULL e os
   índices (um `ALTER TABLE` pelo `ratt db run` ou pelo `psql`) e se atualiza sozinha.
 

@@ -132,13 +132,23 @@ linha entre elas — `<` do lado "muitos", `┼` do lado "um", `o` quando a colu
 
 As teclas principais: `a` nova tabela, `c` nova coluna, `l` ligar (ou ligar "como N:N"),
 `espaço` o menu da coluna (renomear, obrigatória/opcional, única), `x` apagar (mostrando o que
-cai junto), `u` desfazer, `f` / `F` foco numa tabela e suas vizinhas / tudo, `s` troca o
-schema, setas e `PageUp` / `PageDown` rolam, `shift` com as setas move a caixa, `Esc` volta.
+cai junto), `u` desfazer, `f` / `F` foco numa tabela e suas vizinhas (no máximo 25) / tudo,
+`+` abre a tabela muito referenciada que aparece recolhida com `←N`, `s` troca o schema, setas
+e `PageUp` / `PageDown` rolam, `shift` com as setas move a caixa, `Esc` volta.
+
+Um `⚠` ao lado de uma tabela ou coluna marca um aviso (tabela sem chave primária, chave
+estrangeira sem índice ou que aceita vazio); a linha logo acima do painel do SQL diz, em
+palavras, os avisos do que está selecionado.
 
 O que você edita vira um rascunho: o SQL fica sempre à vista embaixo do desenho (`r` leva o
-foco até ele), com os avisos. `enter` aplica — mostrando o SQL e pedindo a confirmação —,
-`e` ensaia (roda e desfaz) e `w` salva o SQL num `.sql`. O SQL gerado é só leitura e
-exportação: para editá-lo, `w`, depois o VS Code e o `ratt db run`.
+foco até ele), com o nome do schema em cada tabela (`public.users`). `enter` aplica —
+mostrando o SQL, e no alto o que ele apaga, e pedindo a confirmação —, `e` ensaia (roda e
+desfaz) e `w` salva o SQL num `.sql`. O SQL gerado é só leitura e exportação: para editá-lo,
+`w`, depois o VS Code e o `ratt db run`.
+
+O rascunho de cada schema fica guardado em `~/.local/share/ratt/canvas/{porta}-{banco}/`
+(ou em `$XDG_DATA_HOME/ratt/canvas/…`), junto com as posições das caixas; o SQL de cada
+rascunho aplicado vai para a pasta `aplicados/` ali dentro, com a data e a hora no nome.
 
 Funciona nas famílias Debian/Ubuntu, Fedora/RHEL e Arch; `ratt db status` diz o que falta e
 `ratt db reset` volta ao antes do setup (com backup e a trava do nome da máquina).
