@@ -2511,7 +2511,10 @@ def test_mover_no_foco_guarda_posicao(monkeypatch, tmp_path):
             tela._selecionar(("tabela", "t2"))
             await piloto.press("shift+down"); await piloto.pause()
             lidas = guardar.ler_posicoes(5432, "teste", "public")
-            assert "t2" in lidas and lidas["t1"] == (42, 11) and lidas["t5"] == (90, 30)
+            dx = tela.posicoes["t2"][0] - tela.posicoes["t1"][0]
+            dy = tela.posicoes["t2"][1] - tela.posicoes["t1"][1]
+            assert lidas["t2"] == (42 + dx, 11 + dy)             # relativa à tabela do foco, que tem posição guardada
+            assert lidas["t1"] == (42, 11) and lidas["t5"] == (90, 30)
     asyncio.run(roteiro())
 
 
@@ -2573,4 +2576,103 @@ def test_tudo_grande_descarta_se_trocou_de_schema(monkeypatch, tmp_path):
             await app.workers.wait_for_complete(); await piloto.pause(0.1)
             assert tela.esquema == "outro" and not tela._desenhando and tela._grade_pronta is None
             assert tela.foco == "t0" and len(tela.vista.tabelas) == canvas.LIMITE_FOCO   # o schema novo abriu em foco
+    asyncio.run(roteiro())
+
+
+def test_mover_no_foco_sem_nenhuma_posicao_guardada_nao_grava(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa(_tela_com_30_tabelas()))
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            app.screen._selecionar(("tabela", "t2"))
+            await piloto.press("shift+down"); await piloto.pause()
+            assert guardar.ler_posicoes(5432, "teste", "public") == {}
+    asyncio.run(roteiro())
+
+
+def _tudo_bloqueado(monkeypatch, soltar):
+    original = canvas.TelaCanvas._posicionar
+    monkeypatch.setattr(canvas.TelaCanvas, "_posicionar",
+                        staticmethod(lambda mm, g: (soltar.wait(5), original(mm, g))[1]))
+
+
+def test_mover_durante_o_desenho_nao_se_perde(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    m = _hub_tela(200)
+    guardar.gravar_posicoes(5432, "teste", "public", {"t0": (40, 10), "t1": (80, 10), "t2": (120, 10)})
+    soltar = threading.Event()
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa(m))
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            _tudo_bloqueado(monkeypatch, soltar)
+            await piloto.press("F"); await piloto.pause()
+            await piloto.click("#sim"); await piloto.pause(0.1)
+            tela._selecionar(("tabela", "t1"))
+            await piloto.press("shift+down"); await piloto.pause()           # mexe enquanto desenha
+            assert guardar.ler_posicoes(5432, "teste", "public")["t1"] == (80, 11)
+            soltar.set()
+            await app.workers.wait_for_complete(); await piloto.pause(0.1)
+            assert not tela._desenhando
+            tela._selecionar(("tabela", "t2"))
+            await piloto.press("shift+down"); await piloto.pause()
+            lidas = guardar.ler_posicoes(5432, "teste", "public")
+            assert lidas["t1"] == (80, 11) and lidas["t2"] == (120, 11)      # a primeira mexida continua no disco
+    asyncio.run(roteiro())
+
+
+def test_desenho_velho_nao_desfaz_a_escolha_do_foco(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    m = _hub_tela(200)
+    soltar = threading.Event()
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa(m))
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            _tudo_bloqueado(monkeypatch, soltar)
+            await piloto.press("F"); await piloto.pause()
+            await piloto.click("#sim"); await piloto.pause(0.1)
+            await piloto.press("f"); await piloto.pause()
+            await piloto.press(*"r005"); await piloto.press("enter"); await piloto.pause()
+            assert tela.foco == "t5" and not tela._desenhando
+            soltar.set()
+            await app.workers.wait_for_complete(); await piloto.pause(0.1)
+            assert tela.foco == "t5" and len(tela.vista.tabelas) < 201
+    asyncio.run(roteiro())
+
+
+def test_releitura_durante_o_desenho_nao_desenha_o_schema_inteiro_na_thread_da_tela(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    m = _hub_tela(200)
+    soltar = threading.Event()
+    na_tela = []
+    original = desenho.desenhar_grade
+
+    def espia(modelo_, *a, **k):
+        if threading.current_thread() is threading.main_thread() and len(modelo_.tabelas) > canvas.TelaCanvas.LIMITE_TUDO:
+            na_tela.append(1)
+        return original(modelo_, *a, **k)
+    monkeypatch.setattr(desenho, "desenhar_grade", espia)
+
+    async def roteiro():
+        fonte = FonteFalsa(m)
+        app = AppTeste(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            _tudo_bloqueado(monkeypatch, soltar)
+            await piloto.press("F"); await piloto.pause()
+            await piloto.click("#sim"); await piloto.pause(0.1)
+            fonte.sig += 1
+            tela.ler("public")                                    # o banco mudou: a leitura chega no meio do desenho
+            await piloto.pause(0.3)
+            soltar.set()
+            await piloto.pause(0.5)                                # (o worker velho pode ter sido cancelado: não se espera por ele)
+            assert tela.foco == "t0" and not tela._desenhando and not na_tela
     asyncio.run(roteiro())
