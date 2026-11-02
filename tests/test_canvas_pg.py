@@ -1,48 +1,6 @@
 """Testes do canvas com PostgreSQL de verdade; pulam sozinhos sem servidor ou sem permissão de criar banco."""
-import getpass
-import os
-
-import pytest
-
-from ratt.db import acesso, canvas, catalogo, modelo, rascunho, rodar
-
-PNG_SQL = """
-CREATE TABLE users (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, first_name text, last_name text,
-                    email text NOT NULL, password_hash text);
-CREATE TABLE roles (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name text NOT NULL);
-CREATE TABLE users_roles (user_id bigint NOT NULL REFERENCES users (id), role_id bigint NOT NULL REFERENCES roles (id),
-                          PRIMARY KEY (user_id, role_id));
-CREATE TABLE profiles (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, bio text, description text,
-                       user_id bigint REFERENCES users (id));
-"""
-
-
-@pytest.fixture
-def banco():
-    """Um banco descartável ratt_teste_<pid>; pula sem PostgreSQL ou sem permissão de criar banco."""
-    import psycopg
-    porta = int(os.environ.get("PGPORT") or 5432)
-    usuario = getpass.getuser()
-    admin, _ = acesso.entrar(porta, usuario)
-    if admin is None:
-        pytest.skip("sem PostgreSQL acessível")
-    nome = "ratt_teste_%d" % os.getpid()
-    try:
-        admin.execute('CREATE DATABASE "%s"' % nome)
-    except psycopg.Error:
-        admin.close()
-        pytest.skip("sem permissão de criar banco")
-    conexao = None
-    try:
-        conexao, _ = acesso.entrar(porta, usuario, nome)
-        if conexao is None:
-            pytest.skip("não entrou no banco de teste")
-        yield conexao
-    finally:
-        if conexao is not None:
-            conexao.close()
-        admin.execute('DROP DATABASE IF EXISTS "%s" WITH (FORCE)' % nome)
-        admin.close()
+from conftest import PNG_SQL
+from ratt.db import canvas, catalogo, modelo, rascunho, rodar
 
 
 def test_modelo_do_png(banco):
