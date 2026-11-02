@@ -718,4 +718,6 @@ ratt db user passwd [name]            changes a password (no name: yours)
     "canvas.d.coluna": {"pt": "os valores dela somem de todas as linhas", "en": "its values go from every row"},
     "canvas.d.restricao": {"pt": "só a regra some, nenhum dado", "en": "only the rule goes, no data"},
     "canvas.d.cascata": {"pt": " — e, com CASCADE, o que depende dela", "en": " — and, with CASCADE, what depends on it"},
+    "canvas.k.expandir": {"pt": "expandir ←N", "en": "expand ←N"},
+    "canvas.em_foco_corte": {"pt": "foco: {tabela} ({n} de {total} tabelas)", "en": "focus: {tabela} ({n} of {total} tables)"},
 }

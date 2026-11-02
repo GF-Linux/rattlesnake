@@ -2085,3 +2085,104 @@ def test_nomes_malformados_sao_corrompidos():
     d["operacoes"][0]["nomes"] = ["t1"]
     with pytest.raises(rascunho.RascunhoCorrompido):
         rascunho.Rascunho.de_dict(d, modelo_png())
+
+
+def _hub_tela(n):
+    """Schema com `users` (t0) referenciada por `n` tabelas (em foco, por passar de LIMITE_FOCO)."""
+    m, _ = _hub(n)
+    for k in range(1, n + 1):
+        m.tabelas["t%d" % k].nome = "r%03d" % k           # ordem por nome estável
+    m.tabelas["t0"].nome = "a_users"                     # a primeira pelo nome: o foco começa nela
+    return m
+
+
+def test_avisos_de_ligacao_viram_aviso_na_coluna_de_origem():
+    m = modelo_png()
+    mapa = canvas.TelaCanvas._avisos(m)
+    assert mapa["t4.c4"] == "atencao"                      # profiles.user_id: sem índice e opcional
+    d = desenho.desenhar(m, desenho.posicionar(m, {}), mapa)
+    x, y, w, h = d.caixas["t4"]
+    assert d.papel_em(x + w, y + 4) == "aviso"            # 4ª coluna de profiles
+
+
+def test_linha_de_avisos_mostra_os_textos_da_selecao(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    valores = {"tabela": "profiles", "coluna": "user_id", "ligacao": "profiles_user_id_fkey"}
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(160, 40)) as piloto:
+            await pronto(app)
+            await _selecionar(piloto, app, "profiles")
+            linha = str(app.screen.query_one("#canvas_avisos").render())
+            assert t("chk.fk_opcional", **valores) in linha and t("chk.fk_sem_indice", **valores) in linha
+            await _selecionar(piloto, app, "roles")
+            assert "profiles" not in str(app.screen.query_one("#canvas_avisos").render())
+            app.screen._selecionar(("ligacao", "k3"))
+            assert t("chk.fk_opcional", **valores) in str(app.screen.query_one("#canvas_avisos").render())
+    asyncio.run(roteiro())
+
+
+def test_mais_expande_a_tabela_recolhida(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    m, _ = _hub(10)
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa(m))
+        async with app.run_test(size=(160, 50)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            tela._selecionar(("tabela", "t0"))
+            assert "←10" in tela.query_one(canvas.Quadro).desenho.texto()
+            await piloto.press("plus"); await piloto.pause()
+            assert "←10" not in tela.query_one(canvas.Quadro).desenho.texto() and "t0" in tela.expandidas
+            await piloto.press("plus"); await piloto.pause()
+            assert "←10" in tela.query_one(canvas.Quadro).desenho.texto()
+    asyncio.run(roteiro())
+
+
+def test_mudar_so_a_selecao_nao_roteia_de_novo(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    chamadas = []
+    original = desenho.rotear
+    monkeypatch.setattr(desenho, "rotear", lambda *a, **k: chamadas.append(1) or original(*a, **k))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            antes = len(chamadas)
+            assert antes > 0
+            for tecla in ("tab", "tab", "down", "down", "shift+tab"):
+                await piloto.press(tecla)
+            assert len(chamadas) == antes
+            assert app.screen.query_one(canvas.Quadro).desenho.papel_em(
+                *app.screen.query_one(canvas.Quadro).desenho.caixas[app.screen.selecao[1]][:2]) == "selecao"
+    asyncio.run(roteiro())
+
+
+def test_foco_desenha_o_recorte_perto_da_origem_e_corta_em_25(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    m = _hub_tela(200)
+    # posições guardadas do schema inteiro, bem longe da origem: o foco não as usa
+    guardar.gravar_posicoes(5432, "teste", "public", {"t%d" % k: (500 + k, 900 + k) for k in range(201)})
+
+    async def roteiro():
+        import time as _time
+        app = AppTeste(FonteFalsa(m))
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            assert tela.foco == "t0"
+            assert len(tela.vista.tabelas) == canvas.LIMITE_FOCO
+            assert min(x for x, _ in tela.posicoes.values()) == canvas.MIN_X
+            assert min(y for _, y in tela.posicoes.values()) == canvas.MIN_Y
+            assert "←200" in tela.query_one(canvas.Quadro).desenho.texto()    # o contador conta o schema todo
+            inicio = _time.monotonic()
+            for _ in range(5):
+                await piloto.press("tab")
+            assert (_time.monotonic() - inicio) / 5 < 1.0
+            await piloto.press("shift+down"); await piloto.pause()
+            # mexer no foco não grava as posições do recorte por cima das do schema inteiro
+            assert guardar.ler_posicoes(5432, "teste", "public")["t1"] == (501, 901)
+    asyncio.run(roteiro())

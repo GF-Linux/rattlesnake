@@ -211,11 +211,43 @@ def _caracter(antes: Tuple[int, int], c: Tuple[int, int], depois: Tuple[int, int
 
 @dataclass
 class Desenho:
+    """A grade pronta. A seleção é uma camada por cima (`_sel`): trocar de seleção não refaz a grade nem as
+    setas — `com_selecao` devolve outro `Desenho` que divide as mesmas células."""
     largura: int
     altura: int
     caixas: Dict[str, Tuple[int, int, int, int]]
     _celulas: Dict[Tuple[int, int], Celula] = field(default_factory=dict, repr=False)
     _alvos: Dict[Tuple[int, int], tuple] = field(default_factory=dict, repr=False)
+    _sel: AbstractSet[Tuple[int, int]] = field(default_factory=frozenset, repr=False)
+    _indice: Optional[Dict[object, List[Tuple[int, int]]]] = field(default=None, repr=False)
+
+    def _celula(self, pos: Tuple[int, int]) -> Celula:
+        ch, papel = self._celulas.get(pos, (" ", ""))
+        return (ch, "selecao") if pos in self._sel else (ch, papel)
+
+    def _por_alvo(self) -> Dict[object, List[Tuple[int, int]]]:
+        """Células por alvo, e as bordas de cada tabela (chave `("borda", id)`), montado uma vez por grade."""
+        if self._indice is None:
+            indice: Dict[object, List[Tuple[int, int]]] = {}
+            for pos, alvo in self._alvos.items():
+                indice.setdefault(alvo, []).append(pos)
+                if alvo[0] != "ligacao" and self._celulas[pos][1] == "borda":
+                    indice.setdefault(("borda", alvo[1]), []).append(pos)
+            self._indice = indice
+        return self._indice
+
+    def com_selecao(self, selecao: Optional[tuple]) -> "Desenho":
+        """O mesmo desenho com `selecao` pintada: as células do alvo e, numa tabela, a borda inteira dela."""
+        if selecao is None:
+            sel: AbstractSet[Tuple[int, int]] = frozenset()
+        else:
+            indice = self._por_alvo()
+            sel = set(indice.get(selecao, ()))
+            if selecao[0] == "tabela":
+                sel.update(indice.get(("borda", selecao[1]), ()))
+        if self._indice is None:
+            self._por_alvo()
+        return Desenho(self.largura, self.altura, self.caixas, self._celulas, self._alvos, sel, self._indice)
 
     def trechos(self, y: int) -> List[Tuple[str, str]]:
         """A linha `y` como pedaços `(texto, papel)` de papel igual; vazio fora da grade."""
@@ -223,7 +255,7 @@ class Desenho:
             return []
         saida: List[Tuple[str, str]] = []
         for x in range(self.largura):
-            ch, papel = self._celulas.get((x, y), (" ", ""))
+            ch, papel = self._celula((x, y))
             if saida and saida[-1][1] == papel:
                 saida[-1] = (saida[-1][0] + ch, papel)
             else:
@@ -235,6 +267,8 @@ class Desenho:
         return "\n".join("".join(t for t, _ in self.trechos(y)).rstrip() for y in range(self.altura))
 
     def papel_em(self, x: int, y: int) -> str:
+        if (x, y) in self._sel:
+            return "selecao"
         return self._celulas.get((x, y), ("", ""))[1]
 
     def onde(self, x: int, y: int) -> Optional[tuple]:
@@ -416,14 +450,25 @@ def _ligacoes(vista: Modelo, caixas: Dict[str, Tuple[int, int, int, int]], recol
 
 def desenhar(vista: Modelo, posicoes: Dict[str, Tuple[int, int]], avisos: Optional[Dict[str, str]] = None,
              selecao: Optional[tuple] = None, expandidas: AbstractSet[str] = frozenset(),
-             limite_chegando: int = 8) -> Desenho:
-    """Desenha as tabelas que têm posição e as ligações entre elas.
+             limite_chegando: int = 8, contagem: Optional[Dict[str, int]] = None) -> Desenho:
+    """Desenha as tabelas que têm posição e as ligações entre elas, com `selecao` pintada.
 
     Uma tabela com mais de `limite_chegando` ligações chegando, e fora de `expandidas`, fica recolhida: não
     recebe as setas e o título mostra `←N`. Alargar o título por causa disso é aceitável porque a posição vem
-    de quem chama; `caixas` guarda a largura realmente desenhada."""
+    de quem chama; `caixas` guarda a largura realmente desenhada. `contagem` troca a conta das ligações que
+    chegam (o modo foco mostra um recorte, mas o `←N` conta o schema inteiro)."""
+    return desenhar_grade(vista, posicoes, avisos, expandidas, limite_chegando, contagem).com_selecao(selecao)
+
+
+def desenhar_grade(vista: Modelo, posicoes: Dict[str, Tuple[int, int]], avisos: Optional[Dict[str, str]] = None,
+                   expandidas: AbstractSet[str] = frozenset(), limite_chegando: int = 8,
+                   contagem: Optional[Dict[str, int]] = None) -> Desenho:
+    """A grade sem seleção — a parte cara (o roteamento das setas). Quem redesenha só porque a seleção mudou
+    reaproveita a grade e chama `com_selecao`."""
     avisos = avisos or {}
-    cheg = chegando(vista)
+    cheg = dict(chegando(vista))
+    if contagem:
+        cheg.update({i: n for i, n in contagem.items() if i in cheg})
     cel: Dict[Tuple[int, int], Celula] = {}
     alvos: Dict[Tuple[int, int], tuple] = {}
     caixas: Dict[str, Tuple[int, int, int, int]] = {}
@@ -486,12 +531,6 @@ def desenhar(vista: Modelo, posicoes: Dict[str, Tuple[int, int]], avisos: Option
         pôr(x0, yb, "└" + "─" * (w - 2) + "┘", "borda", alvo_t)
 
     _ligacoes(vista, caixas, recolhidas, cel, alvos)
-
-    if selecao is not None:
-        for pos, alvo in alvos.items():
-            if alvo == selecao or (selecao[0] == "tabela" and alvo[0] != "ligacao" and alvo[1] == selecao[1]
-                                   and cel[pos][1] == "borda"):
-                cel[pos] = (cel[pos][0], "selecao")
 
     largura = max((x for x, _ in cel), default=-1) + 1
     altura = max((y for _, y in cel), default=-1) + 1

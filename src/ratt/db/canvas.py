@@ -408,17 +408,26 @@ class TelaCanvas(Screen):
         Binding("s", "esquema", t("canvas.k.esquema")),
         Binding("f", "foco", t("canvas.k.foco")),
         Binding("F,shift+f", "tudo", t("canvas.k.tudo")),
+        Binding("plus", "expandir", t("canvas.k.expandir")),
         Binding("escape,q", "voltar", t("canvas.k.voltar")),
     ]
     DEFAULT_CSS = """
     #canvas_titulo { height: 1; padding: 0 1; background: $panel; }
+    #canvas_avisos { height: 1; padding: 0 1; }
     """
 
     def __init__(self, fonte, esquema: str):
         super().__init__()
         self.fonte, self.esquema = fonte, esquema
         self.selecao: Optional[tuple] = None
-        self.posicoes: Dict[str, Tuple[int, int]] = {}
+        self.posicoes: Dict[str, Tuple[int, int]] = {}     # as do que se vê: `_pos_todo` ou, em foco, `_pos_foco`
+        self._pos_todo: Dict[str, Tuple[int, int]] = {}    # as do schema inteiro (as que vão ao disco)
+        self._pos_foco: Dict[str, Tuple[int, int]] = {}    # as do recorte do foco, desde a origem (só na memória)
+        self._foco_total = 0                # tabelas na vizinhança do foco (o recorte mostra no máximo LIMITE_FOCO)
+        self.expandidas: set = set()        # tabelas recolhidas (`←N`) que a pessoa abriu com `+`
+        self._versao = 0                    # sobe a cada nova vista: a grade em cache vale para uma versão só
+        self._grade = None                  # (chave, Desenho sem seleção): trocar a seleção não roteia de novo
+        self._lista_avisos: list = []       # os avisos estáticos da vista, para a linha de avisos
         self.vista: _modelo.Modelo = _modelo.Modelo(esquema)
         self.rascunho = _rascunho.Rascunho(_modelo.Modelo(esquema))
         self.todo: _modelo.Modelo = self.vista      # o schema inteiro com o rascunho; `vista` é o que se vê (o foco recorta)
@@ -439,6 +448,7 @@ class TelaCanvas(Screen):
     def compose(self) -> ComposeResult:
         yield Static(id="canvas_titulo")
         yield Quadro(id="quadro")
+        yield Static(id="canvas_avisos")
         yield PainelSQL(id="canvas_sql")
         yield Footer()
 
@@ -535,15 +545,26 @@ class TelaCanvas(Screen):
         """Refaz `todo` (base + rascunho), o recorte do foco, os avisos e o painel, e redesenha."""
         m = self.todo = self.rascunho.vista()
         if primeira:
-            self.posicoes = guardar.ler_posicoes(self.fonte.porta, self.fonte.banco, self.esquema)
+            self._pos_todo = guardar.ler_posicoes(self.fonte.porta, self.fonte.banco, self.esquema)
+            self._pos_foco = {}
             self.foco = None
             if len(m.tabelas) > LIMITE_FOCO:
                 self.foco = self._ordem(m)[0]
-        self.posicoes = self._posicionar(m, self.posicoes)
         if self.foco not in m.tabelas:
             self.foco = None
-        self.vista = _modelo.recortar(m, self.foco, 1) if self.foco else m
-        self.avisos = self._avisos(self.vista)
+        if self.foco:
+            # o recorte tem a sua própria posição automática, a partir da origem: com as posições do schema
+            # inteiro ele ficaria espalhado por uma grade enorme (e cada seta roteada nela)
+            self.vista, self._foco_total = self._recorte(m, self.foco)
+            self._pos_foco = self._posicionar(self.vista, self._pos_foco)
+            self.posicoes = self._pos_foco
+        else:
+            self.vista = m
+            self._pos_todo = self._posicionar(m, self._pos_todo)
+            self.posicoes = self._pos_todo
+        self._lista_avisos = checagem.avisos_do_modelo(self.vista)
+        self.avisos = self._avisos(self.vista, self._lista_avisos)
+        self._versao += 1
         if self.selecao and not self._existe(self.selecao):
             self.selecao = None
         self.query_one(PainelSQL).atualizar(self.rascunho.passos(), self.falha)
@@ -569,12 +590,62 @@ class TelaCanvas(Screen):
         return {i: (x + MIN_X, y + MIN_Y) for i, (x, y) in desenho.posicionar(m, firmes).items()}
 
     @staticmethod
-    def _avisos(vista) -> Dict[str, str]:
+    def _recorte(m: _modelo.Modelo, foco: str) -> Tuple[_modelo.Modelo, int]:
+        """O foco e as vizinhas a uma ligação — no máximo LIMITE_FOCO tabelas: o foco e as primeiras vizinhas pela
+        ordem do nome. Devolve também quantas tabelas a vizinhança tem (o título diz que cortou)."""
+        viz = _modelo.recortar(m, foco, 1)
+        total = len(viz.tabelas)
+        if total <= LIMITE_FOCO:
+            return viz, total
+        outras = sorted((i for i in viz.tabelas if i != foco), key=lambda i: (viz.tabelas[i].nome, i))
+        dentro = {foco, *outras[:LIMITE_FOCO - 1]}
+        return _modelo.Modelo(m.esquema, {i: tb for i, tb in viz.tabelas.items() if i in dentro},
+                              {i: k for i, k in viz.ligacoes.items() if k.origem in dentro and k.destino in dentro}), total
+
+    @staticmethod
+    def _avisos(vista, lista=None) -> Dict[str, str]:
+        """Id -> o nível mais alto dos avisos dele. Um aviso de ligação (FK sem índice, FK opcional) vale também
+        para a coluna de origem dela: é ali que o ⚠ aparece no desenho."""
         saida: Dict[str, str] = {}
-        for a in checagem.avisos_do_modelo(vista):
-            if a.alvo not in saida or _NIVEIS[a.nivel] > _NIVEIS[saida[a.alvo]]:
-                saida[a.alvo] = a.nivel
+        for a in (checagem.avisos_do_modelo(vista) if lista is None else lista):
+            alvos = [a.alvo]
+            lig = vista.ligacoes.get(a.alvo)
+            if lig is not None and lig.colunas:
+                alvos.append(lig.colunas[0])
+            for alvo in alvos:
+                if alvo not in saida or _NIVEIS[a.nivel] > _NIVEIS[saida[alvo]]:
+                    saida[alvo] = a.nivel
         return saida
+
+    def _avisos_da_selecao(self) -> list:
+        """Os avisos do que está selecionado: numa tabela, os dela, das colunas e das ligações que saem dela;
+        numa coluna, os dela e das ligações que saem dela; numa ligação, os da ligação."""
+        sel = self.selecao
+        if not sel:
+            return []
+        saida = []
+        for a in self._lista_avisos:
+            lig = self.vista.ligacoes.get(a.alvo)
+            if sel[0] == "ligacao":
+                ok = a.alvo == sel[1]
+            elif sel[0] == "tabela":
+                tab = self.vista.tabelas.get(sel[1])
+                ok = (a.alvo == sel[1] or (tab is not None and tab.coluna(a.alvo) is not None)
+                      or (lig is not None and lig.origem == sel[1]))
+            else:
+                ok = a.alvo == sel[2] or (lig is not None and lig.colunas[:1] == (sel[2],))
+            if ok:
+                saida.append(a)
+        return saida
+
+    def _linha_avisos(self) -> None:
+        partes = []
+        for a in self._avisos_da_selecao():
+            marca, cor = ("!", COR["amarelo"]) if a.nivel != "info" else ("·", COR["cinza"])
+            if partes:
+                partes.append(("   ", ""))
+            partes += [(marca + " ", cor), (a.texto(), cor if a.nivel != "info" else "")]
+        self.query_one("#canvas_avisos", Static).update(Text.assemble(*partes, no_wrap=True, overflow="ellipsis"))
 
     def _existe(self, alvo) -> bool:
         if alvo[0] == "tabela":
@@ -586,10 +657,19 @@ class TelaCanvas(Screen):
     # ── desenhar ────────────────────────────────────────────────────────────
 
     def redesenhar(self) -> None:
+        """Refaz a grade (e as setas) só quando a vista, as posições ou as expandidas mudaram; trocar a seleção
+        só repinta por cima da grade guardada."""
         self._ultimo = time.monotonic()
-        d = desenho.desenhar(self.vista, self.posicoes, self.avisos, self.selecao)
-        self.query_one(Quadro).definir(d, self._aviso_vazio())
+        chave = (self._versao, tuple(sorted(self.posicoes.items())), frozenset(self.expandidas))
+        if self._grade is None or self._grade[0] != chave:
+            contagem = None
+            if self.foco:
+                contagem = {i: n for i, n in _modelo.chegando(self.todo).items() if i in self.vista.tabelas}
+            self._grade = (chave, desenho.desenhar_grade(self.vista, self.posicoes, self.avisos, self.expandidas,
+                                                          contagem=contagem))
+        self.query_one(Quadro).definir(self._grade[1].com_selecao(self.selecao), self._aviso_vazio())
         self._titulo()
+        self._linha_avisos()
 
     def _aviso_vazio(self) -> str:
         """O que o quadro diz sem tabela nenhuma: lendo, não deu para ler, ou o schema está vazio mesmo."""
@@ -604,7 +684,10 @@ class TelaCanvas(Screen):
                   (" › ", COR["cinza"]), (t("canvas.titulo"), ""), (" · ", COR["cinza"]), (self.esquema, ""),
                   (" · ", COR["cinza"]), (t("canvas.rascunho", n=len(self.rascunho.operacoes)), COR["laranja"] if self.rascunho.operacoes else COR["cinza"])]
         if self.foco:
-            partes += [(" · ", COR["cinza"]), (t("canvas.em_foco", tabela=self.todo.tabelas[self.foco].nome), COR["amarelo"])]
+            nome = self.todo.tabelas[self.foco].nome
+            texto = (t("canvas.em_foco", tabela=nome) if self._foco_total <= len(self.vista.tabelas)
+                     else t("canvas.em_foco_corte", tabela=nome, n=len(self.vista.tabelas), total=self._foco_total))
+            partes += [(" · ", COR["cinza"]), (texto, COR["amarelo"])]
         self.query_one("#canvas_titulo", Static).update(Text.assemble(*partes))
 
     def _agendar(self) -> None:
@@ -659,6 +742,9 @@ class TelaCanvas(Screen):
         self._guardar()
 
     def _guardar(self) -> None:
+        """Só as posições do schema inteiro vão ao disco; as do recorte do foco valem enquanto o foco durar."""
+        if self.foco:
+            return
         guardar.gravar_posicoes(self.fonte.porta, self.fonte.banco, self.esquema, self.posicoes)
 
     # ── as teclas ───────────────────────────────────────────────────────────
@@ -729,7 +815,7 @@ class TelaCanvas(Screen):
             if not achadas:
                 self.notify(t("canvas.foco_nao_achou", nome=nome), severity="warning")
                 return
-            self.foco = (exata or achadas)[0]
+            self.foco, self._pos_foco = (exata or achadas)[0], {}
             self.selecao = ("tabela", self.foco)
             self._montar()
             self._rolar_para_caixas()
@@ -739,6 +825,14 @@ class TelaCanvas(Screen):
         if self.foco:
             self.foco = None
             self._montar()
+
+    def action_expandir(self) -> None:
+        """`+` abre (ou recolhe de novo) a tabela selecionada que está recolhida com `←N`."""
+        if not self.selecao or self.selecao[0] not in ("tabela", "coluna"):
+            self.notify(t("canvas.sel_tabela_ou_coluna"), severity="warning")
+            return
+        self.expandidas ^= {self.selecao[1]}
+        self.redesenhar()
 
     # ── editar ──────────────────────────────────────────────────────────────
 
@@ -1031,7 +1125,7 @@ class TelaCanvas(Screen):
                 self._falhou(esquema, erro)
             return
         por_nome = {tab.nome: tab.id for tab in m.tabelas.values()}
-        posicoes = self.posicoes if mesma else guardar.ler_posicoes(self.fonte.porta, self.fonte.banco, esquema)
+        posicoes = self._pos_todo if mesma else guardar.ler_posicoes(self.fonte.porta, self.fonte.banco, esquema)
         for velho, nome in nomes.items():
             if velho in posicoes and nome in por_nome:
                 posicoes[por_nome[nome]] = posicoes.pop(velho)
@@ -1042,7 +1136,7 @@ class TelaCanvas(Screen):
             self.notify(t("canvas.erro_gravar", erro=e), severity="error")
         if not mesma:
             return
-        self.posicoes = posicoes
+        self._pos_todo = posicoes
         self.rascunho = _rascunho.Rascunho(m)
         self._montar()
 
@@ -1141,9 +1235,12 @@ class TelaCanvas(Screen):
             return
         self.esquema, self.selecao, self.foco = nome, None, None
         self.posicoes, self.carregado, self.marca = {}, False, None
+        self._pos_todo, self._pos_foco, self.expandidas = {}, {}, set()
         self.falha, self._sem_gravar, self._contagens = None, False, {}
         self._sem_leitura = self._tentando = False
         self.todo = self.vista = _modelo.Modelo(nome)
+        self._lista_avisos, self.avisos = [], {}
+        self._versao += 1
         self.rascunho = _rascunho.Rascunho(self.todo)
         self.query_one(PainelSQL).atualizar([])
         self.redesenhar()
