@@ -565,6 +565,18 @@ class RascunhoCorrompido(ValueError):
     """O rascunho lido do disco não tem a forma esperada (editado à mão ou estragado)."""
 
 
+# o que um JSON editado à mão pode provocar dentro de uma operação: nunca passa daqui
+_ERROS_OP = (KeyError, ValueError, TypeError, AttributeError, IndexError)
+
+
+def _conferir(op: Operacao) -> None:
+    """Os ids que a operação usa têm de ser textos: uma lista ou um objeto no lugar de um id quebraria
+    cada conta do rascunho (conjuntos, dependências), não só esta operação."""
+    for i in op.refere() | op.cria():
+        if not isinstance(i, str):
+            raise TypeError(f"id inválido: {i!r}")
+
+
 class Rascunho:
     """A base (o que está no banco) mais a lista de operações que a pessoa fez em cima dela."""
 
@@ -599,14 +611,15 @@ class Rascunho:
         m = self.base.copia()
         passos = []
         for op in self.operacoes:
-            valida, desc, cmds = _valida(m, op), op.tipo, []
-            if valida:
-                try:
+            desc, cmds = op.tipo, []
+            try:
+                valida = _valida(m, op)
+                if valida:
                     cmds = op.comandos(m)
                     desc = " ".join(op.descricao(m).splitlines())   # uma linha só: vai para um comentário SQL
                     op.aplicar(m)
-                except (KeyError, ValueError, TypeError, AttributeError):
-                    valida, cmds = False, []
+            except _ERROS_OP:
+                valida, cmds = False, []
             passos.append((op, valida, desc, cmds))
         return m, passos
 
@@ -654,15 +667,19 @@ class Rascunho:
             ops = []
             for n, o in enumerate(d.get("operacoes", []), 1):
                 try:
-                    ops.append(_op_de_dict(o))
-                except (KeyError, TypeError, AttributeError, ValueError) as e:
+                    op = _op_de_dict(o)
+                    _conferir(op)
+                    ops.append(op)
+                except _ERROS_OP as e:
                     raise RascunhoCorrompido(f"operação {n} ilegível: {type(e).__name__}: {e}") from e
             r = cls(base, ops, int(d.get("proximo", 1)))
+            r.rebase(base)
+            for i in range(len(r.operacoes)):
+                r.dependentes(i)
         except RascunhoCorrompido:
             raise
-        except (KeyError, TypeError, AttributeError, ValueError) as e:
+        except _ERROS_OP as e:
             raise RascunhoCorrompido(f"rascunho ilegível: {type(e).__name__}: {e}") from e
-        r.rebase(base)
         return r
 
     def modelo(self) -> Modelo:

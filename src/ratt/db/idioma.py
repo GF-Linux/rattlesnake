@@ -706,4 +706,10 @@ ratt db user passwd [name]            changes a password (no name: yours)
     "canvas.e.sem_pk": {"pt": "{tabela} não tem uma chave primária de uma coluna só: não dá para apontar para ela",
                         "en": "{tabela} has no single-column primary key: nothing to point to"},
     "canvas.e.operacao": {"pt": "não deu para montar o SQL: {erro}", "en": "could not build the SQL: {erro}"},
+    "canvas.interrompido": {"pt": "interrompido (Ctrl+C): nada foi gravado", "en": "interrupted (Ctrl+C): nothing was written"},
+    "canvas.sem_gravar": {"pt": "Não consegui ler o rascunho salvo ({erro}); nesta sessão o rascunho deste schema não será gravado, para não apagar o que está lá.",
+                          "en": "Could not read the saved draft ({erro}); this session will not save this schema's draft, so nothing there is overwritten."},
+    "canvas.lendo": {"pt": "Lendo o banco…", "en": "Reading the database…"},
+    "canvas.sem_leitura": {"pt": "Não consegui ler este schema; tento de novo a cada 2 s.",
+                           "en": "Could not read this schema; retrying every 2 s."},
 }

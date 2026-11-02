@@ -429,6 +429,9 @@ class TelaCanvas(Screen):
         self.falha: Optional[int] = None    # operação que falhou ao aplicar; some na próxima mudança do rascunho
         self._aplicando = False             # entre o commit e a releitura: o vigia não mexe no rascunho
         self._gravado: Optional[dict] = None    # o rascunho como está no disco, até onde esta tela sabe
+        self._sem_gravar = False            # não deu para LER o rascunho deste schema: gravar seria por cima do que não se viu
+        self._sem_leitura = False           # a leitura do schema falhou e ainda não deu certo: o vigia tenta de novo
+        self._tentando = False              # uma nova tentativa está no ar (o vigia não empilha outra)
         self._ultimo = 0.0
         self._timer = None
 
@@ -458,10 +461,13 @@ class TelaCanvas(Screen):
             self.rascunho = self._abrir_rascunho(m)
         else:
             antes = self.rascunho.invalidas
-            novas = self.rascunho.rebase(m) - antes
+            depois = self.rascunho.rebase(m)
+            novas = depois - antes
             if novas:
                 self.notify(t("canvas.invalidas", n=len(novas)), severity="warning")
-            if self.app.screen is self:         # coberta, a tela não grava: quem está por cima pode ter mudado o disco
+            # o rebase só grava se o rascunho mudou de fato; e coberta, a tela não grava (quem está por cima pode
+            # ter mudado o disco)
+            if depois != antes and self.app.screen is self:
                 self._persistir(so_se_mudou=True)
         self._montar(primeira)
 
@@ -474,6 +480,8 @@ class TelaCanvas(Screen):
             dados = guardar.ler_rascunho(self.fonte.porta, self.fonte.banco, self.esquema)
         except _rascunho.RascunhoCorrompido:
             dados = {}                          # diferente de qualquer coisa: `_abrir_rascunho` o põe de lado
+        except OSError:
+            return                              # não deu para ler agora: fica o da memória, nada se grava por cima
         if dados == self._gravado:
             return
         self.rascunho = self._abrir_rascunho(self.rascunho.base)
@@ -482,7 +490,14 @@ class TelaCanvas(Screen):
     def _abrir_rascunho(self, m: _modelo.Modelo) -> _rascunho.Rascunho:
         self._gravado = None
         try:
-            dados = guardar.ler_rascunho(self.fonte.porta, self.fonte.banco, self.esquema)
+            try:
+                dados = guardar.ler_rascunho(self.fonte.porta, self.fonte.banco, self.esquema)
+            except OSError as erro:
+                # o arquivo pode ter operações que não se leram: nesta sessão o rascunho deste schema não vai ao disco
+                if not self._sem_gravar:
+                    self.notify(t("canvas.sem_gravar", erro=erro), severity="error", timeout=15)
+                self._sem_gravar = True
+                return _rascunho.Rascunho(m)
             if dados is None:
                 return _rascunho.Rascunho(m)
             r = _rascunho.Rascunho.de_dict(dados, m)
@@ -501,6 +516,8 @@ class TelaCanvas(Screen):
     def _persistir(self, so_se_mudou: bool = False) -> None:
         """Grava o rascunho a cada mudança; vazio apaga o arquivo. `so_se_mudou`: nada a fazer se o disco já
         tem exatamente isso (o rebase do vigia não reescreve o arquivo a cada volta)."""
+        if self._sem_gravar:
+            return
         dados = self.rascunho.para_dict() if self.rascunho.operacoes else None
         if dados is not None:
             dados = json.loads(json.dumps(dados))   # tuplas viram listas: igual ao que se lê do disco
@@ -570,8 +587,16 @@ class TelaCanvas(Screen):
     def redesenhar(self) -> None:
         self._ultimo = time.monotonic()
         d = desenho.desenhar(self.vista, self.posicoes, self.avisos, self.selecao)
-        self.query_one(Quadro).definir(d, t("canvas.vazio") if not self.vista.tabelas else "")
+        self.query_one(Quadro).definir(d, self._aviso_vazio())
         self._titulo()
+
+    def _aviso_vazio(self) -> str:
+        """O que o quadro diz sem tabela nenhuma: lendo, não deu para ler, ou o schema está vazio mesmo."""
+        if self.vista.tabelas:
+            return ""
+        if not self.carregado:
+            return t("canvas.sem_leitura") if self._sem_leitura else t("canvas.lendo")
+        return t("canvas.vazio")
 
     def _titulo(self) -> None:
         partes = [("ratt db", f"bold {COR['azul']}"), (" · ", COR["cinza"]), (self.fonte.banco, "bold"),
@@ -894,8 +919,8 @@ class TelaCanvas(Screen):
         try:
             with self.app.suspend():
                 resultado = self._sessao(conexao, arquivo, ensaio, cabecalho)
-        except Exception as erro:             # o rascunho fica: nada foi decidido
-            self.notify(t("canvas.erro_aplicar", erro=erro), severity="error")
+        except (Exception, KeyboardInterrupt) as erro:     # o rascunho fica: nada foi decidido
+            self.notify(t("canvas.erro_aplicar", erro=str(erro) or type(erro).__name__), severity="error")
             return
         finally:
             conexao.close()
@@ -907,11 +932,19 @@ class TelaCanvas(Screen):
         modo = c(f" · {t('run.modo_ensaio')}", "amarelo") if ensaio else ""
         quem = f"{t('canvas.run_rascunho')} · {getattr(self.fonte, 'usuario', None) or getpass.getuser()} @ {self.fonte.banco}"
         print(f"{c('ratt db run', 'azul', 'negrito')} {c(quem, 'cinza')}{modo}")
-        with conexao:
-            resultado = aplicar_rascunho(self.rascunho, conexao, arquivo, ensaio, cabecalho)
+        try:
+            with conexao:
+                resultado = aplicar_rascunho(self.rascunho, conexao, arquivo, ensaio, cabecalho)
+        except KeyboardInterrupt:       # Ctrl+C no meio: nada fica, o rascunho continua, a tela não cai
+            try:
+                conexao.rollback()
+            except Exception:
+                pass
+            print("\n" + c(f"↺ {t('canvas.interrompido')}", "amarelo"))
+            resultado = (1, None)
         try:
             input("\n" + t("canvas.enter_volta"))
-        except EOFError:
+        except (EOFError, KeyboardInterrupt):   # Ctrl+C aqui é o mesmo que Enter: o que rodou já está decidido
             pass
         try:                    # o Textual não descarta o que foi digitado enquanto estava suspenso
             import termios
@@ -1020,25 +1053,40 @@ class TelaCanvas(Screen):
     @work(thread=True, exclusive=True, group="vigia_canvas")
     def ler(self, esquema: str, so_se_mudou: bool = False):
         """Lê o modelo de `esquema`. Se a tela já trocou de schema ou saiu quando a resposta chega, ela é descartada."""
-        avisar = not self.carregado
+        primeira = not self.carregado
         try:
             marca = self.fonte.assinatura()
             if so_se_mudou and marca == self.marca:
                 return
             m = self.fonte.modelo(esquema)
         except Exception as erro:
-            if avisar:                  # o poller falha em silêncio; quem abre ou troca de schema precisa saber
-                self.app.call_from_thread(self._falhou, esquema, erro)
+            if primeira:                # o poller falha em silêncio; quem abre ou troca de schema precisa saber
+                self.app.call_from_thread(self._nao_leu, esquema, erro)
             return
         self.app.call_from_thread(self._chegou, esquema, marca, m)
 
     def vigiar(self):
         if self.carregado:
             self.ler(self.esquema, so_se_mudou=True)
+        elif self._sem_leitura and not self._tentando:     # a primeira leitura falhou: tenta de novo
+            self._tentando = True
+            self.ler(self.esquema)
+
+    def _nao_leu(self, esquema, erro) -> None:
+        """A leitura que abriria o schema falhou: o quadro diz isso (não "schema vazio"), o aviso sai uma vez só
+        e o vigia segue tentando."""
+        if not self.is_attached or esquema != self.esquema or self.carregado:
+            return
+        self._tentando = False
+        if not self._sem_leitura:
+            self._falhou(esquema, erro)
+        self._sem_leitura = True
+        self.redesenhar()
 
     def _chegou(self, esquema, marca, m) -> None:
         if not self.is_attached or esquema != self.esquema or self._aplicando:
             return
+        self._sem_leitura = self._tentando = False
         self.marca = marca
         primeira, self.carregado = not self.carregado, True
         self.carregar(m, primeira=primeira)
@@ -1066,7 +1114,8 @@ class TelaCanvas(Screen):
             return
         self.esquema, self.selecao, self.foco = nome, None, None
         self.posicoes, self.carregado, self.marca = {}, False, None
-        self.falha = None
+        self.falha, self._sem_gravar = None, False
+        self._sem_leitura = self._tentando = False
         self.todo = self.vista = _modelo.Modelo(nome)
         self.rascunho = _rascunho.Rascunho(self.todo)
         self.query_one(PainelSQL).atualizar([])

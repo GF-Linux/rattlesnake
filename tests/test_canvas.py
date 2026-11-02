@@ -1006,7 +1006,7 @@ def test_erro_ao_ler_o_banco_nao_derruba_a_tela(monkeypatch, tmp_path):
         async with app.run_test(size=(80, 24)) as piloto:
             await pronto(app)
             assert isinstance(app.screen, canvas.TelaCanvas)
-            assert t("canvas.vazio") in app.screen.query_one(canvas.Quadro).aviso_vazio
+            assert app.screen.query_one(canvas.Quadro).aviso_vazio == t("canvas.sem_leitura")
             assert avisos and avisos[0][1] == "error" and "a conexão caiu" in avisos[0][0]
     asyncio.run(roteiro())
 
@@ -1831,4 +1831,169 @@ def test_canvas_coberto_nao_apaga_o_rascunho_de_outro(monkeypatch, tmp_path):
             fonte.sig += 1
             a.vigiar(); await pronto(app)
             assert len(guardar.ler_rascunho(5432, "teste", "public")["operacoes"]) == 1
+    asyncio.run(roteiro())
+
+
+# ---- revisão final: Importants --------------------------------------------------------------------------------
+
+class _ConCtx:
+    """Conexão falsa que aguenta `with` e conta os rollbacks."""
+
+    def __init__(self):
+        self.rollbacks = 0
+        self.fechada = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def rollback(self):
+        self.rollbacks += 1
+
+    def close(self):
+        self.fechada = True
+
+
+def _interrompe(*a, **k):
+    raise KeyboardInterrupt
+
+
+def test_ctrl_c_durante_o_aplicar_desfaz_e_nao_derruba(monkeypatch, tmp_path):
+    _com_rascunho(tmp_path, monkeypatch)
+    monkeypatch.setattr(canvas, "aplicar_rascunho", _interrompe)
+    monkeypatch.setattr("builtins.input", lambda *a: "")
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            con = _ConCtx()
+            assert app.screen._sessao(con, tmp_path / "a.sql", False, "") == (1, None)
+            assert con.rollbacks == 1
+    asyncio.run(roteiro())
+
+
+def test_ctrl_c_no_enter_para_voltar_vale_como_enter(monkeypatch, tmp_path):
+    _com_rascunho(tmp_path, monkeypatch)
+    monkeypatch.setattr(canvas, "aplicar_rascunho", lambda *a, **k: (0, None))
+    monkeypatch.setattr("builtins.input", _interrompe)
+    monkeypatch.setattr(canvas.TelaCanvas, "_reler_aplicado", lambda self, *a: None)
+    from contextlib import contextmanager
+
+    @contextmanager
+    def sem_suspender(self):
+        yield
+    monkeypatch.setattr(App, "suspend", sem_suspender)
+    fonte = FonteFalsa(); fonte.conexao_para_aplicar = lambda: _ConCtx()
+
+    async def roteiro():
+        app = AppTeste(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            app.screen._rodar(False)
+            await piloto.pause()
+            assert app.screen.rascunho.operacoes == []
+    asyncio.run(roteiro())
+    assert guardar.ler_rascunho(5432, "teste", "public") is None          # o aplicado não fica pendente
+
+
+def test_rascunho_malformado_nunca_derruba_so_corrompido_ou_invalida():
+    base = modelo_png()
+    lig_vazia = {"id": "novo-k1", "origem": "t1", "colunas": [], "destino": "t2", "colunas_destino": [], "nome": ""}
+    ruins = [
+        {"operacoes": [{"tipo": "renomear", "tabela": "t1", "coluna": ["x"], "novo": "a"}]},
+        {"operacoes": [{"tipo": "apagar_tabela", "tabela": {"a": 1}}]},
+        {"operacoes": [{"tipo": "renomear", "tabela": "t1", "coluna": None, "novo": 5}]},
+        {"operacoes": [{"tipo": "ligar", "ligacao": lig_vazia}]},
+        {"operacoes": [{"tipo": "ligar", "ligacao": dict(lig_vazia, colunas=["t1.c2"])}]},
+        {"operacoes": [{"tipo": "ligar_nn", "tabela_id": "novo-t1", "nome": "x", "a": "t1", "b": "t2",
+                        "colunas_ids": [], "ligacoes_ids": []}]},
+        {"operacoes": [{"tipo": "criar_tabela", "tabela": {"id": "novo-t1", "esquema": "public", "nome": "x",
+                                                           "colunas": [{"id": ["c"], "nome": "a", "tipo": "text"}]}}]},
+    ]
+    for d in ruins:
+        try:
+            r = rascunho.Rascunho.de_dict(d, base)
+        except rascunho.RascunhoCorrompido:
+            continue
+        # o que passa é usável em tudo o que a tela faz com ele
+        assert r.invalidas == {0}, d
+        r.vista(); r.passos(); r.sql_texto(); r.dependentes(0); r.modelo()
+
+
+def _leitura_falha(monkeypatch, alvo_nome):
+    """Faz a leitura do arquivo `alvo_nome` falhar com um erro de disco (não 'não existe'); devolve o desfazer."""
+    from pathlib import Path
+    original = Path.read_text
+
+    def read_text(self, *a, **k):
+        if self.name == alvo_nome:
+            raise PermissionError(13, "Permission denied", str(self))
+        return original(self, *a, **k)
+    monkeypatch.setattr(Path, "read_text", read_text)
+    return lambda: monkeypatch.setattr(Path, "read_text", original)
+
+
+def test_ler_rascunho_com_erro_de_disco_levanta(monkeypatch, tmp_path):
+    _com_rascunho(tmp_path, monkeypatch)
+    _leitura_falha(monkeypatch, "rascunho-public.json")
+    with pytest.raises(OSError):
+        guardar.ler_rascunho(5432, "teste", "public")
+
+
+def test_erro_ao_ler_o_rascunho_nao_deixa_gravar_por_cima(monkeypatch, tmp_path):
+    _com_rascunho(tmp_path, monkeypatch)
+    antes = guardar.ler_rascunho(5432, "teste", "public")
+    desfazer = _leitura_falha(monkeypatch, "rascunho-public.json")
+
+    async def roteiro():
+        fonte = FonteFalsa()
+        app = AppTeste(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            assert tela.rascunho.operacoes == []
+            tela.rascunho.acrescentar(rascunho.AdicionarColuna("t1", Coluna(tela.rascunho.novo_id("c"), "birth", "date")))
+            tela._mudou()                               # editar segue, mas não grava por cima do que não se leu
+            tela.rascunho.desfazer(); tela._mudou()     # nem apaga
+            fonte.sig += 1
+            tela.vigiar(); await pronto(app)
+            desfazer()
+            assert guardar.ler_rascunho(5432, "teste", "public") == antes
+    asyncio.run(roteiro())
+
+
+def test_lendo_enquanto_carrega_e_tenta_de_novo_depois_da_falha(monkeypatch, tmp_path):
+    import threading
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    avisos = []
+    monkeypatch.setattr(canvas.TelaCanvas, "notify", lambda self, msg, **kw: avisos.append(msg))
+    solta = threading.Event()
+
+    class Lenta(FonteFalsa):
+        quebrada = True
+
+        def modelo(self, esquema):
+            solta.wait(5)
+            if self.quebrada:
+                raise RuntimeError("a conexão caiu")
+            return super().modelo(esquema)
+
+    async def roteiro():
+        fonte = Lenta()
+        app = AppTeste(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await piloto.pause(0.1)
+            quadro = app.screen.query_one(canvas.Quadro)
+            assert quadro.aviso_vazio == t("canvas.lendo")
+            solta.set()
+            await pronto(app)
+            assert quadro.aviso_vazio == t("canvas.sem_leitura")
+            app.screen.vigiar(); await pronto(app)          # ainda quebrada: tenta, falha, não repete o aviso
+            assert len(avisos) == 1
+            fonte.quebrada = False
+            app.screen.vigiar(); await pronto(app)
+            assert app.screen.carregado and quadro.aviso_vazio == "" and app.screen.vista.tabelas
     asyncio.run(roteiro())

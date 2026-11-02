@@ -64,7 +64,8 @@ def _arquivo_rascunho(porta: int, banco: str, esquema: str) -> Path:
 
 def ler_rascunho(porta: int, banco: str, esquema: str) -> Optional[dict]:
     """O rascunho gravado, ou None se não há arquivo. Arquivo que existe mas não é um objeto JSON legível levanta
-    `RascunhoCorrompido`: quem chama o põe de lado, em vez de tratá-lo como vazio e depois apagá-lo."""
+    `RascunhoCorrompido`: quem chama o põe de lado, em vez de tratá-lo como vazio e depois apagá-lo. Qualquer outro
+    erro de disco (permissão, E/S) sobe como `OSError`: "não consegui ler" nunca vira "não há rascunho"."""
     from ratt.db.rascunho import RascunhoCorrompido
     arquivo = _arquivo_rascunho(porta, banco, esquema)
     try:
@@ -73,8 +74,6 @@ def ler_rascunho(porta: int, banco: str, esquema: str) -> Optional[dict]:
         return None
     except UnicodeDecodeError as e:
         raise RascunhoCorrompido(f"rascunho ilegível: {e}") from e
-    except OSError:
-        return None
     try:
         dados = json.loads(texto)
     except ValueError as e:
