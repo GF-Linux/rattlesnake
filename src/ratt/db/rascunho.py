@@ -708,12 +708,14 @@ class Rascunho:
     def linhas_das_operacoes(self, cabecalho: str = "") -> List[int]:
         return self._linhas(cabecalho)[1]
 
-    def operacao_da_linha(self, linha: int) -> int:
-        """Índice (0-based) da operação a que a linha do texto pertence; -1 se não há operação válida."""
+    def operacao_da_linha(self, linha: int, cabecalho: str = "") -> int:
+        """Índice (0-based) da operação a que a linha do texto pertence; -1 se não há operação válida.
+        `cabecalho` tem de ser o mesmo de `sql_texto`: ele ocupa uma linha e desloca todas as outras."""
+        marcas = self.linhas_das_operacoes(cabecalho)
         idx = -1
-        for i, ln in enumerate(self.linhas_das_operacoes()):
+        for i, ln in enumerate(marcas):
             if ln and ln <= linha:
                 idx = i
         if idx < 0 and self.operacoes:
-            return next((i for i, ln in enumerate(self.linhas_das_operacoes()) if ln), -1)
+            return next((i for i, ln in enumerate(marcas) if ln), -1)
         return idx

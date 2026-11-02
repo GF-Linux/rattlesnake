@@ -7,8 +7,10 @@ do rascunho moram em `formularios.py`. Nada aqui executa DDL: o rascunho só vai
 """
 from __future__ import annotations
 
+import getpass
 import threading
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from rich.segment import Segment
@@ -228,6 +230,7 @@ class PainelSQL(VerticalScroll):
         super().__init__(**kw)
         self.passos: list = []
         self.indice = 0
+        self.falhou: Optional[int] = None   # a operação que o servidor recusou ao aplicar
         self._linhas: List[int] = []        # linha em que cada operação começa no texto desenhado
         self._plano = ""
 
@@ -237,8 +240,9 @@ class PainelSQL(VerticalScroll):
     def texto_plano(self) -> str:
         return self._plano
 
-    def atualizar(self, passos) -> None:
+    def atualizar(self, passos, falhou: Optional[int] = None) -> None:
         self.passos = passos
+        self.falhou = falhou
         self.indice = max(0, min(self.indice, len(passos) - 1))
         self._desenhar()
 
@@ -263,6 +267,10 @@ class PainelSQL(VerticalScroll):
             else:
                 codigo = f"-- {n + 1}. {t('canvas.invalida')}"
                 partes.append(Text(codigo, style=Style(color=COR["laranja"], bgcolor=fundo)))
+            if n == self.falhou:
+                marca = t("canvas.falhou")
+                partes.append(Text(marca, style=Style(color=COR["laranja"], bold=True)))
+                codigo += "\n" + marca
             plano.append(codigo)
             y += len(codigo.splitlines())
         self._plano = "\n".join(plano)
@@ -334,17 +342,36 @@ class PerguntarNome(ModalScreen):
     PerguntarNome > Vertical { width: 60; height: auto; border: round $primary; background: $surface; padding: 1 2; }
     """
 
-    def __init__(self, pergunta):
+    def __init__(self, pergunta, valor: str = ""):
         super().__init__()
-        self.pergunta = pergunta
+        self.pergunta, self.valor = pergunta, valor
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Static(Text(self.pergunta, style="bold"))
-            yield Input()
+            yield Input(value=self.valor)
 
     def on_input_submitted(self, evento):
         self.dismiss(evento.value.strip())
+
+
+# ── aplicar ─────────────────────────────────────────────────────────────────
+
+def aplicar_rascunho(r: _rascunho.Rascunho, conexao, arquivo: Path, ensaio: bool, cabecalho: str) -> Tuple[int, Optional[int]]:
+    """Grava o SQL do rascunho em `arquivo` e o roda com o mesmo executor do `ratt db run`.
+    Devolve (código, índice da operação que falhou ou None). O cabeçalho entra no texto e na conta das linhas."""
+    from ratt.db import rodar
+    arquivo.parent.mkdir(parents=True, exist_ok=True)
+    arquivo.write_text(r.sql_texto(cabecalho), encoding="utf-8")
+    falhou: List[int] = []
+
+    def ao_falhar(comando) -> None:
+        indice = r.operacao_da_linha(comando.linha, cabecalho)
+        if indice >= 0:
+            falhou.append(indice)
+
+    codigo = rodar.executar(arquivo, conexao, ensaio=ensaio, ao_falhar=ao_falhar)
+    return codigo, (falhou[0] if falhou else None)
 
 
 # ── a tela ──────────────────────────────────────────────────────────────────
@@ -366,6 +393,9 @@ class TelaCanvas(Screen):
         Binding("shift+down", "mover(0,1)", show=False),
         Binding("shift+left", "mover(-2,0)", show=False),
         Binding("shift+right", "mover(2,0)", show=False),
+        Binding("enter", "aplicar", t("canvas.k.aplicar")),
+        Binding("e", "ensaio", t("canvas.k.ensaio")),
+        Binding("w", "exportar", t("canvas.k.exportar")),
         Binding("a", "nova_tabela", t("canvas.k.tabela")),
         Binding("c", "nova_coluna", t("canvas.k.coluna")),
         Binding("l", "ligar", t("canvas.k.ligar")),
@@ -394,6 +424,8 @@ class TelaCanvas(Screen):
         self.avisos: Dict[str, str] = {}
         self.marca = None
         self.carregado = False          # já chegou o primeiro modelo deste schema?
+        self.falha: Optional[int] = None    # operação que falhou ao aplicar; some na próxima mudança do rascunho
+        self._aplicando = False             # entre o commit e a releitura: o vigia não mexe no rascunho
         self._ultimo = 0.0
         self._timer = None
 
@@ -469,13 +501,14 @@ class TelaCanvas(Screen):
         self.avisos = self._avisos(self.vista)
         if self.selecao and not self._existe(self.selecao):
             self.selecao = None
-        self.query_one(PainelSQL).atualizar(self.rascunho.passos())
+        self.query_one(PainelSQL).atualizar(self.rascunho.passos(), self.falha)
         self.redesenhar()
         if primeira and self.vista.tabelas:
             self._rolar_para_caixas()
 
     def _mudou(self) -> None:
         """Uma edição entrou ou saiu do rascunho: grava, redesenha e mantém a seleção à vista."""
+        self.falha = None
         self._persistir()
         self._montar()
         self._mostrar_selecao()
@@ -770,6 +803,160 @@ class TelaCanvas(Screen):
         self.rascunho.tirar(indices)
         self._mudou()
 
+    # ── aplicar, ensaiar e exportar ─────────────────────────────────────────
+
+    def _cabecalho(self) -> str:
+        """A linha de comentário do topo do SQL. A mesma para o texto e para achar a operação pela linha."""
+        return t("canvas.cabecalho_sql", banco=self.fonte.banco, esquema=self.esquema, n=len(self.rascunho.operacoes))
+
+    def _pode_enviar(self) -> bool:
+        """Vazio ou com operações que deixaram de valer: não vai ao banco nem ao arquivo."""
+        if not self._pronto():
+            return False
+        if not self.rascunho.operacoes:
+            self.notify(t("canvas.rascunho_vazio"), severity="warning")
+            return False
+        invalidas = self.rascunho.invalidas
+        if invalidas:
+            self.notify(t("canvas.tem_invalidas", n=len(invalidas)), severity="warning")
+            return False
+        return True
+
+    def action_aplicar(self) -> None:
+        if not self._pode_enviar():
+            return
+        passos = self.rascunho.passos()
+        self.app.push_screen(
+            formularios.Confirmar(t("canvas.f.aplicar_pergunta", banco=self.fonte.banco, n=len(passos)),
+                                  [p[2] for p in passos], t("canvas.f.aplicar")),
+            lambda sim: self._rodar(False) if sim else None)
+
+    def action_ensaio(self) -> None:
+        if self._pode_enviar():
+            self._rodar(True)
+
+    def _rodar(self, ensaio: bool) -> None:
+        """Entrega o rascunho ao `ratt db run`: a tela se suspende, a pessoa vê a mesma saída e volta com Enter.
+        Tudo o que decide algo depois está em `_concluir`, que roda fora da suspensão (e é testável)."""
+        if not self._pode_enviar():             # o banco pode ter mudado enquanto a confirmação estava aberta
+            return
+        cabecalho = self._cabecalho()
+        texto = self.rascunho.sql_texto(cabecalho)
+        arquivo = guardar.pasta(self.fonte.porta, self.fonte.banco) / f"aplicando-{self.esquema}.sql"
+        conexao = self.fonte.conexao_para_aplicar()
+        if conexao is None:
+            self.notify(t("canvas.sem_conexao"), severity="error")
+            return
+        try:
+            with self.app.suspend():
+                resultado = self._sessao(conexao, arquivo, ensaio, cabecalho)
+        except OSError as erro:
+            self.notify(t("canvas.erro_aplicar", erro=erro), severity="error")
+            return
+        finally:
+            conexao.close()
+        self._concluir(resultado[0], resultado[1], ensaio, texto)
+
+    def _sessao(self, conexao, arquivo: Path, ensaio: bool, cabecalho: str) -> Tuple[int, Optional[int]]:
+        """A parte que fala com o terminal de verdade (não roda sob `run_test`): cabeçalho, execução, Enter."""
+        from ratt.cli import c
+        modo = c(f" · {t('run.modo_ensaio')}", "amarelo") if ensaio else ""
+        quem = f"{t('canvas.run_rascunho')} · {getattr(self.fonte, 'usuario', None) or getpass.getuser()} @ {self.fonte.banco}"
+        print(f"{c('ratt db run', 'azul', 'negrito')} {c(quem, 'cinza')}{modo}")
+        with conexao:
+            resultado = aplicar_rascunho(self.rascunho, conexao, arquivo, ensaio, cabecalho)
+        try:
+            input("\n" + t("canvas.enter_volta"))
+        except EOFError:
+            pass
+        return resultado
+
+    def _concluir(self, codigo: int, indice: Optional[int], ensaio: bool, texto: str) -> None:
+        if codigo != 0:
+            self._marcar_falha(indice)
+            self.notify(t("canvas.ensaio_falhou" if ensaio else "canvas.aplicar_falhou"), severity="error")
+            return
+        if ensaio:
+            self.falha = None
+            self.query_one(PainelSQL).atualizar(self.rascunho.passos(), None)
+            self.notify(t("canvas.ensaio_ok"))
+            return
+        v = self.rascunho.vista()
+        nomes = {i: tab.nome for i, tab in v.tabelas.items() if i.startswith("novo-t") and tab.estado != "apagado"}
+        self._aplicando = True
+        self._reler_aplicado(self.esquema, texto, nomes)
+
+    def _marcar_falha(self, indice: Optional[int]) -> None:
+        self.falha = indice if indice is not None and indice >= 0 else None
+        self.query_one(PainelSQL).atualizar(self.rascunho.passos(), self.falha)
+
+    @work(thread=True, exclusive=True, group="aplicar_canvas")
+    def _reler_aplicado(self, esquema: str, texto: str, nomes: Dict[str, str]) -> None:
+        try:
+            m = self.fonte.modelo(esquema)
+        except Exception as erro:
+            self.app.call_from_thread(self._aplicado, None, texto, nomes, erro)
+            return
+        self.app.call_from_thread(self._aplicado, m, texto, nomes)
+
+    def _aplicado(self, m: Optional[_modelo.Modelo], texto: str, nomes: Dict[str, str], erro=None) -> None:
+        """O banco já gravou: guarda o SQL, leva as posições das tabelas novas para os ids do catálogo (pelo nome),
+        esvazia o rascunho e passa a mostrar o banco como ele ficou."""
+        self._aplicando = False
+        if not self.is_attached:
+            return
+        try:
+            caminho = guardar.guardar_aplicado(self.fonte.porta, self.fonte.banco, texto)
+            self.notify(t("canvas.aplicado", caminho=caminho))
+        except OSError as e:
+            self.notify(t("canvas.erro_gravar", erro=e), severity="error")
+        if m is None:
+            self._falhou(self.esquema, erro)
+            m = self.rascunho.modelo()          # o vigia traz o catálogo de verdade na próxima volta
+            self.marca = None
+        else:
+            por_nome = {tab.nome: tab.id for tab in m.tabelas.values()}
+            for velho, nome in nomes.items():
+                if velho in self.posicoes and nome in por_nome:
+                    self.posicoes[por_nome[nome]] = self.posicoes.pop(velho)
+        self.posicoes = {i: xy for i, xy in self.posicoes.items() if not i.startswith("novo-")}
+        self.rascunho = _rascunho.Rascunho(m)
+        self.falha = None
+        self.selecao = None
+        try:
+            self._guardar()
+        except OSError as e:
+            self.notify(t("canvas.erro_gravar", erro=e), severity="error")
+        self._persistir()
+        self._montar()
+
+    def action_exportar(self) -> None:
+        if not self._pode_enviar():
+            return
+        padrao = f"rascunho-{self.fonte.banco}-{self.esquema}.sql"
+        self.app.push_screen(PerguntarNome(t("canvas.f.caminho"), padrao), lambda valor: self._exportar(valor or padrao))
+
+    def _exportar(self, valor: Optional[str]) -> None:
+        if not valor:
+            return
+        caminho = Path(valor).expanduser()
+        if caminho.exists():
+            self.app.push_screen(
+                formularios.Confirmar(t("canvas.f.sobrescrever", caminho=caminho), [], t("canvas.f.sobrescrever_sim"), foco="nao"),
+                lambda sim: self._gravar_exportado(caminho) if sim else None)
+        else:
+            self._gravar_exportado(caminho)
+
+    def _gravar_exportado(self, caminho: Path) -> None:
+        if not self._pode_enviar():             # o banco pode ter mudado enquanto a pergunta estava aberta
+            return
+        try:
+            caminho.write_text(self.rascunho.sql_texto(self._cabecalho()), encoding="utf-8")
+        except OSError as erro:
+            self.notify(t("canvas.erro_exportar", caminho=caminho, erro=erro), severity="error")
+            return
+        self.notify(t("canvas.exportado", caminho=caminho))
+
     # ── ler o banco (sempre fora da thread da tela) ─────────────────────────
 
     @work(thread=True, exclusive=True, group="vigia_canvas")
@@ -792,7 +979,7 @@ class TelaCanvas(Screen):
             self.ler(self.esquema, so_se_mudou=True)
 
     def _chegou(self, esquema, marca, m) -> None:
-        if not self.is_attached or esquema != self.esquema:
+        if not self.is_attached or esquema != self.esquema or self._aplicando:
             return
         self.marca = marca
         primeira, self.carregado = not self.carregado, True
@@ -821,6 +1008,7 @@ class TelaCanvas(Screen):
             return
         self.esquema, self.selecao, self.foco = nome, None, None
         self.posicoes, self.carregado, self.marca = {}, False, None
+        self.falha = None
         self.todo = self.vista = _modelo.Modelo(nome)
         self.rascunho = _rascunho.Rascunho(self.todo)
         self.query_one(PainelSQL).atualizar([])

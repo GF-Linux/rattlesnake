@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from ratt.db import acesso, catalogo, modelo, rascunho
+from ratt.db import acesso, canvas, catalogo, modelo, rascunho, rodar
 
 PNG_SQL = """
 CREATE TABLE users (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, first_name text, last_name text,
@@ -186,3 +186,55 @@ def test_consulta_respeita_tempo_limite(banco):
     banco.execute("CREATE TABLE grande AS SELECT g AS x FROM generate_series(1, 3000000) g")
     assert checagem.Consulta(banco, limite_ms=1).repetidos("public", "grande", "x") is None
     assert checagem.Consulta(banco).linhas("public", "grande") == 3000000      # a conexão segue de pé
+
+
+def test_aplicar_rascunho(banco, tmp_path):
+    import psycopg
+    banco.execute(PNG_SQL)
+    r = rascunho.Rascunho(catalogo.modelo(banco, "public"))
+    users = r.base.por_nome("users")
+    r.acrescentar(rascunho.AdicionarColuna(users.id, modelo.Coluna(r.novo_id("c"), "birth", "date")))
+    con2 = psycopg.connect(banco.info.dsn)
+    assert canvas.aplicar_rascunho(r, con2, tmp_path / "a.sql", ensaio=True, cabecalho="") == (0, None)
+    assert "birth" not in [c.nome for c in catalogo.modelo(banco, "public").por_nome("users").colunas]
+    assert canvas.aplicar_rascunho(r, con2, tmp_path / "a.sql", ensaio=False, cabecalho="") == (0, None)
+    con2.close()
+    assert "birth" in [c.nome for c in catalogo.modelo(banco, "public").por_nome("users").colunas]
+
+
+def test_aplicar_aponta_a_operacao_que_falhou(banco, tmp_path):
+    import psycopg
+    banco.execute(PNG_SQL)
+    banco.execute("INSERT INTO users (email) VALUES ('a')")
+    r = rascunho.Rascunho(catalogo.modelo(banco, "public"))
+    users = r.base.por_nome("users")
+    r.acrescentar(rascunho.Renomear(users.id, None, "pessoas"))
+    r.acrescentar(rascunho.Obrigatoria(users.id, users.colunas[1].id, True))   # first_name tem NULL: falha
+    con2 = psycopg.connect(banco.info.dsn)
+    codigo, indice = canvas.aplicar_rascunho(r, con2, tmp_path / "a.sql", False, "")
+    con2.close()
+    assert (codigo, indice) == (1, 1)
+    assert catalogo.modelo(banco, "public").por_nome("users") is not None            # tudo desfeito
+
+
+def test_aplicar_aponta_a_operacao_com_cabecalho(banco, tmp_path):
+    import psycopg
+    banco.execute(PNG_SQL)
+    banco.execute("INSERT INTO users (email) VALUES ('a')")
+    r = rascunho.Rascunho(catalogo.modelo(banco, "public"))
+    users = r.base.por_nome("users")
+    r.acrescentar(rascunho.Renomear(users.id, None, "pessoas"))
+    r.acrescentar(rascunho.Obrigatoria(users.id, users.colunas[1].id, True))
+    con2 = psycopg.connect(banco.info.dsn)
+    assert canvas.aplicar_rascunho(r, con2, tmp_path / "a.sql", False, "ratt db · x") == (1, 1)
+    con2.close()
+
+
+def test_executar_nao_acumula_tratador_de_avisos(banco, tmp_path):
+    import psycopg
+    arquivo = tmp_path / "n.sql"
+    arquivo.write_text("DO $$ BEGIN RAISE NOTICE 'oi'; END $$;")
+    con = psycopg.connect(banco.info.dsn)
+    rodar.executar(arquivo, con); rodar.executar(arquivo, con)
+    assert len(con._notice_handlers) == 0
+    con.close()

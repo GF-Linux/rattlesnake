@@ -278,9 +278,11 @@ def _mostrar_erro(erro, comando, sql, arquivo):
             print(c(f"   {extra}", "cinza"))
 
 
-def executar(arquivo, conexao, ensaio=False, autocommit=False):
-    """Roda o arquivo na conexão. Devolve 0 se tudo deu certo, 1 se algum comando falhou."""
-    import psycopg
+def executar(arquivo, conexao, ensaio=False, autocommit=False, ao_falhar=None):
+    """Roda o arquivo na conexão. Devolve 0 se tudo deu certo, 1 se algum comando falhou.
+
+    `ao_falhar(comando)` é chamado com o `Comando` que falhou, antes do rollback: o canvas descobre assim
+    qual operação do rascunho quebrou. O tratador de avisos sai da conexão no fim — ela pode rodar outro arquivo."""
     sql = arquivo.read_text(encoding="utf-8")
     comandos = dividir(sql)
     sql_de_verdade = [cmd for cmd in comandos if not cmd.meta]
@@ -289,7 +291,16 @@ def executar(arquivo, conexao, ensaio=False, autocommit=False):
         return 0
     conexao.autocommit = autocommit and not ensaio
     avisos = []         # o servidor avisa durante o comando; eles aparecem embaixo do cabeçalho dele
-    conexao.add_notice_handler(lambda d: avisos.append(d.message_primary))
+    tratador = lambda d: avisos.append(d.message_primary)
+    conexao.add_notice_handler(tratador)
+    try:
+        return _rodar_comandos(arquivo, conexao, sql, comandos, sql_de_verdade, avisos, ensaio, ao_falhar)
+    finally:
+        conexao.remove_notice_handler(tratador)
+
+
+def _rodar_comandos(arquivo, conexao, sql, comandos, sql_de_verdade, avisos, ensaio, ao_falhar):
+    import psycopg
     total, feitos = len(comandos), 0
     for numero, comando in enumerate(comandos, 1):
         if comando.meta:
@@ -318,6 +329,8 @@ def executar(arquivo, conexao, ensaio=False, autocommit=False):
             _cabecalho(numero, total, comando, c("✗", "laranja", "negrito"))
             _mostrar_avisos(avisos)
             _mostrar_erro(erro, comando, sql, arquivo)
+            if ao_falhar:
+                ao_falhar(comando)
             if isinstance(erro, psycopg.errors.ActiveSqlTransaction):
                 print(c(f"   {t('run.fora_de_transacao')}", "cinza"))
             if not conexao.autocommit:

@@ -572,3 +572,38 @@ class ConfirmarTirar(ModalScreen):
 
     def on_button_pressed(self, evento: Button.Pressed) -> None:
         self.dismiss(evento.button.id == "tirar_todas")
+
+
+class Confirmar(ModalScreen):
+    """Uma pergunta de sim/não com uma lista opcional. O foco inicial vai no botão que `foco` diz: nas perguntas
+    perigosas (sobrescrever) é o cancelar, para um Enter distraído não destruir nada."""
+
+    BINDINGS = [Binding("escape", "dismiss(False)", t("canvas.f.cancelar"))]
+    DEFAULT_CSS = """
+    Confirmar { align: center middle; }
+    Confirmar > Vertical { width: 84; max-width: 100%; height: auto; max-height: 100%; border: round $primary;
+                           background: $surface; padding: 1 2; }
+    Confirmar #lista { height: auto; max-height: 14; }
+    Confirmar #botoes { height: 3; margin-top: 1; align-horizontal: right; }
+    Confirmar Button { margin-left: 1; }
+    """
+
+    def __init__(self, pergunta: str, itens: List[str], rotulo: str, foco: str = "sim"):
+        super().__init__()
+        self.pergunta, self.itens, self.rotulo, self.foco = pergunta, itens, rotulo, foco
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(Text(self.pergunta, style="bold"))
+            if self.itens:
+                with VerticalScroll(id="lista"):
+                    yield Static(Text("\n".join("  • " + i for i in self.itens)))
+            with Horizontal(id="botoes"):
+                yield Button(self.rotulo, id="sim", variant="warning")
+                yield Button(t("canvas.f.cancelar"), id="nao")
+
+    def on_mount(self) -> None:
+        self.query_one("#" + self.foco, Button).focus()
+
+    def on_button_pressed(self, evento: Button.Pressed) -> None:
+        self.dismiss(evento.button.id == "sim")

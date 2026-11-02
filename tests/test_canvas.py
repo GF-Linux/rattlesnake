@@ -1576,3 +1576,82 @@ def test_clique_no_painel_escolhe_a_operacao_certa_com_rolagem(monkeypatch, tmp_
             await piloto.click("#canvas_sql", offset=(5, painel.content_region.y - painel.region.y))
             assert painel.indice == esperada
     asyncio.run(roteiro())
+
+
+def test_aplicar_recusa_com_invalidas(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.Renomear("t2", None, "papeis"))
+    guardar.gravar_rascunho(5432, "teste", "public", r.para_dict())
+    m = modelo_png(); del m.tabelas["t2"]; m.ligacoes.pop("k2")
+    async def roteiro():
+        app = AppTeste(FonteFalsa(m))
+        async with app.run_test(size=(120, 40)) as piloto:
+            await piloto.press("enter")
+            await piloto.pause()
+            assert app.screen.rascunho.operacoes and isinstance(app.screen, canvas.TelaCanvas)
+    asyncio.run(roteiro())
+
+
+def test_exportar(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path)); monkeypatch.chdir(tmp_path)
+    r = rascunho.Rascunho(modelo_png()); r.acrescentar(rascunho.Renomear("t1", None, "pessoas"))
+    guardar.gravar_rascunho(5432, "teste", "public", r.para_dict())
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await piloto.press("w"); await piloto.press("enter"); await piloto.pause()
+    asyncio.run(roteiro())
+    assert "ALTER TABLE users RENAME TO pessoas;" in (tmp_path / "rascunho-teste-public.sql").read_text()
+
+
+def test_exportar_pede_confirmacao_para_sobrescrever(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path)); monkeypatch.chdir(tmp_path)
+    (tmp_path / "rascunho-teste-public.sql").write_text("antigo")
+    r = rascunho.Rascunho(modelo_png()); r.acrescentar(rascunho.Renomear("t1", None, "pessoas"))
+    guardar.gravar_rascunho(5432, "teste", "public", r.para_dict())
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            await piloto.press("w"); await piloto.press("enter"); await piloto.pause()
+            assert (tmp_path / "rascunho-teste-public.sql").read_text() == "antigo"   # parou na pergunta
+            await piloto.press("escape"); await piloto.pause()
+            assert (tmp_path / "rascunho-teste-public.sql").read_text() == "antigo"
+            await piloto.press("w"); await piloto.press("enter"); await piloto.pause()
+            await piloto.press("tab"); await piloto.press("enter"); await piloto.pause()
+    asyncio.run(roteiro())
+    assert "RENAME TO pessoas" in (tmp_path / "rascunho-teste-public.sql").read_text()
+
+
+def test_exportar_recusa_rascunho_vazio(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path)); monkeypatch.chdir(tmp_path)
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            await piloto.press("w"); await piloto.pause()
+            assert isinstance(app.screen, canvas.TelaCanvas)
+    asyncio.run(roteiro())
+    assert not (tmp_path / "rascunho-teste-public.sql").exists()
+
+
+def test_depois_de_aplicar_remapeia_posicoes_e_esvazia(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            nova = modelo.Tabela(tela.rascunho.novo_id("t"), "public", "pets", [modelo.Coluna("x", "id", "bigint", pk=True)])
+            tela.rascunho.acrescentar(rascunho.CriarTabela(nova))
+            tela._mudou()
+            antes = tela.posicoes[nova.id]
+            fresco = modelo_png()
+            fresco.tabelas["t9"] = modelo.Tabela("t9", "public", "pets", [modelo.Coluna("t9.c1", "id", "bigint", pk=True)])
+            tela._aplicado(fresco, "-- ok\n", {nova.id: "pets"})
+            assert tela.rascunho.operacoes == [] and tela.posicoes["t9"] == antes and nova.id not in tela.posicoes
+            assert guardar.ler_rascunho(5432, "teste", "public") is None
+            assert guardar.ler_posicoes(5432, "teste", "public")["t9"] == antes
+            assert len(list((guardar.pasta(5432, "teste") / "aplicados").glob("*.sql"))) == 1
+    asyncio.run(roteiro())
