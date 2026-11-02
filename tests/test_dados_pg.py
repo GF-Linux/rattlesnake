@@ -4,6 +4,7 @@ import psycopg
 import pytest
 
 from ratt.db import catalogo, checagem, filtro, rascunho
+from ratt.db.idioma import t
 from test_dados import modelo_pessoas
 
 
@@ -948,3 +949,131 @@ def test_e_numa_view_nao_le_o_banco_na_thread_da_tela(banco, tmp_path, monkeypat
             assert isinstance(tela, tela_dados.TelaDados) and tela.so_ver and len(tela.linhas) == 3
             assert leituras == [False]             # as colunas vieram na thread da tela Dados
     asyncio.run(roteiro())
+
+
+# ── Task 8: inserir pelo formulário ──
+
+def test_inserir_pelo_formulario_e_aplicar(banco, tmp_path, monkeypatch):
+    import asyncio
+    import getpass
+    from textual.widgets import Input, OptionList
+    from ratt.db import canvas, formularios_dados
+    from test_dados import AppDados
+    _apps_isolados(monkeypatch, tmp_path)
+    banco.execute(PESSOAS_SQL)
+    oid = lambda nome: banco.execute("SELECT %s::regclass::oid", (nome,)).fetchone()[0]
+
+    def digitar(form, coluna, texto):
+        form.campo(coluna).query_one(Input).value = texto
+
+    async def roteiro():
+        fonte = canvas.FonteBanco(None, banco.info.port, getpass.getuser(), banco.info.dbname)
+        app = AppDados(fonte, "t%d" % oid("public.pessoas"))
+        async with app.run_test(size=(140, 50)) as piloto:
+            await _pronto(app)
+            tela = app.screen
+            await piloto.press("i")
+            await piloto.pause()
+            form = app.screen
+            assert isinstance(form, formularios_dados.FormInserir)
+            digitar(form, "nome", "Zé d'Ávila")
+            digitar(form, "idade", "vinte")
+            await asyncio.sleep(0.4)
+            await _pronto(app)
+            assert t("chk.valor_invalido", coluna="idade", valor="vinte", tipo="integer") in \
+                str(form.query_one("#form_avisos").render())
+            digitar(form, "idade", "99999999999")                 # é número, mas não cabe num integer: o banco diz
+            await asyncio.sleep(0.4)
+            await _pronto(app)
+            assert t("chk.valor_invalido", coluna="idade", valor="99999999999", tipo="integer") in \
+                str(form.query_one("#form_avisos").render())
+            digitar(form, "idade", "33")
+            digitar(form, "email", "ana@x.com")
+            await asyncio.sleep(0.4)
+            await _pronto(app)
+            assert t("chk.ja_existe", coluna="email", valor="ana@x.com", n=1) in str(form.query_one("#form_avisos").render())
+            digitar(form, "email", "ze@x.com")
+            digitar(form, "nascimento", "2001-02-03")
+            await asyncio.sleep(0.4)                       # os avisos chegam antes do clique (o formulário cresce)
+            await _pronto(app)
+            await piloto.click("#por_no_rascunho")
+            await _pronto(app)
+            assert app.screen is tela and len(tela.sessao.rascunho.operacoes) == 1
+            await piloto.press("escape")
+            await _pronto(app)
+
+        app = AppDados(canvas.FonteBanco(None, banco.info.port, getpass.getuser(), banco.info.dbname),
+                       "t%d" % oid("public.pedidos"))
+        async with app.run_test(size=(140, 50)) as piloto:
+            await _pronto(app)
+            tela = app.screen
+            assert len(tela.sessao.rascunho.operacoes) == 1                 # o mesmo rascunho do schema
+            await piloto.press("i")
+            await piloto.pause()
+            form = app.screen
+            campo = form.campo("pessoa_id")
+            await piloto.click("#" + campo.query_one(".escolher").id)
+            await _pronto(app)
+            escolher = app.screen
+            escolher.query_one("#busca", Input).value = "o'b"
+            await asyncio.sleep(0.4)
+            await _pronto(app)
+            lista = escolher.query_one(OptionList)
+            assert lista.option_count == 1 and "O'Brien" in str(lista.get_option_at_index(0).prompt)
+            lista.focus()
+            lista.highlighted = 0
+            await piloto.press("enter")
+            await _pronto(app)
+            assert app.screen is form and campo.valor() == "5"
+            digitar(form, "total", "12.50")
+            await asyncio.sleep(0.4)                       # os avisos chegam antes do clique (o formulário cresce)
+            await _pronto(app)
+            await piloto.click("#por_no_rascunho")
+            await _pronto(app)
+            s = tela.sessao
+            con = psycopg.connect(banco.info.dsn)
+            try:
+                codigo, indice, msg = s.aplicar(con, tmp_path / "a.sql", ensaio=False)
+            finally:
+                con.close()
+            assert (codigo, indice, msg) == (0, None, None)
+    asyncio.run(roteiro())
+    assert banco.execute("SELECT nome, idade, email, nascimento::text, ativo FROM public.pessoas WHERE id = 6").fetchone() \
+        == ("Zé d'Ávila", 33, "ze@x.com", "2001-02-03", True)
+    assert banco.execute("SELECT pessoa_id, total::text FROM public.pedidos WHERE id = 4").fetchone() == (5, "12.50")
+
+
+class _Espiao:
+    """Uma conexão de verdade que anota cada `execute` (com `prepare`)."""
+
+    def __init__(self, conexao):
+        self._c, self.comandos = conexao, []
+
+    def execute(self, consulta, params=None, **kw):
+        texto = consulta if isinstance(consulta, str) else consulta.as_string(self._c)
+        self.comandos.append((" ".join(texto.split()), params, kw.get("prepare")))
+        return self._c.execute(consulta, params, **kw)
+
+    def __getattr__(self, nome):
+        return getattr(self._c, nome)
+
+
+def test_escritas_da_tabela_so_leitura_com_tempo_limite(banco):
+    banco.execute(PESSOAS_SQL)
+    oid = banco.execute("SELECT 'public.pessoas'::regclass::oid").fetchone()[0]
+    espiao = _Espiao(banco)
+    n = catalogo.escritas_da_tabela(espiao, oid, limite_ms=1234)
+    assert n == catalogo.escritas_da_tabela(banco, oid) and n >= 0
+    textos = [c[0] for c in espiao.comandos]
+    assert textos[0] == "SET TRANSACTION READ ONLY"
+    assert espiao.comandos[1][1] == ("1234",) and "statement_timeout" in textos[1]
+    assert "pg_stat_user_tables" in textos[2] and espiao.comandos[2][2] is True         # um comando só
+    assert banco.execute("SELECT current_setting('statement_timeout'), current_setting('transaction_read_only')"
+                         ).fetchone() == ("0", "off")
+
+
+def test_coluna_gerada_vem_marcada_do_catalogo(banco):
+    banco.execute("CREATE TABLE public.conta (a int, b int, c int GENERATED ALWAYS AS (a * b) STORED, "
+                  "d int GENERATED BY DEFAULT AS IDENTITY)")
+    cols = {c.nome: c for c in catalogo.modelo(banco, "public").por_nome("conta").colunas}
+    assert cols["c"].gerada and not cols["a"].gerada and not cols["d"].gerada and cols["d"].identidade

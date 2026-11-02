@@ -107,6 +107,9 @@ class FonteBanco:
     def contar(self, esquema: str, tabela: str, onde: str) -> Optional[int]:
         return catalogo.contar_filtrado(self._aberta(), esquema, tabela, onde)
 
+    def linhas_pai(self, esquema: str, tabela: str, chave: str, busca: str, limite: int = 50):
+        return catalogo.linhas_pai(self._aberta(), esquema, tabela, chave, busca, limite)
+
     def classe(self, oid: int) -> Optional[str]:
         """O relkind (r, p, f, v, m...) da relação; None se ela não existe mais."""
         linha = self._aberta().execute("SELECT relkind FROM pg_class WHERE oid = %s", (oid,)).fetchone()

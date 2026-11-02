@@ -43,6 +43,25 @@ def _processo_vivo(pid):
     return True
 
 
+def apagar_banco(admin, nome, limite=5.0, espera=time.sleep, relogio=time.monotonic):
+    """`DROP DATABASE … WITH (FORCE)` com paciência: o PostgreSQL às vezes recusa terminar um processo que não é
+    nosso (um autovacuum do superusuário: "permissão negada para terminar o processo") ou o banco ainda está em uso.
+    Tenta de novo com espera crescente por até `limite` segundos; devolve False se não conseguiu (as sobras são
+    apagadas no começo da próxima rodada). Outro erro sobe na hora."""
+    import psycopg
+    fim = relogio() + limite
+    pausa = 0.1
+    while True:
+        try:
+            admin.execute('DROP DATABASE IF EXISTS "%s" WITH (FORCE)' % nome)
+            return True
+        except (psycopg.errors.InsufficientPrivilege, psycopg.errors.ObjectInUse):
+            if relogio() + pausa > fim:
+                return False
+            espera(pausa)
+            pausa = min(pausa * 2, 1.0)
+
+
 def _limpar_sobras(admin):
     """Apaga os ratt_teste_<pid> de rodadas que morreram sem limpar (só o nome exato, só pid que não roda mais)."""
     import psycopg
@@ -53,7 +72,7 @@ def _limpar_sobras(admin):
     for nome in nomes:
         if re.fullmatch(r"ratt_teste_\d+", nome) and not _processo_vivo(int(nome.rsplit("_", 1)[1])):
             try:
-                admin.execute('DROP DATABASE IF EXISTS "%s" WITH (FORCE)' % nome)
+                apagar_banco(admin, nome, limite=1.0)
             except psycopg.Error:
                 pass
 
@@ -72,6 +91,7 @@ def banco():
     criado = False
     try:
         _limpar_sobras(admin)
+        apagar_banco(admin, nome)       # o nosso nome, deixado por um teste anterior desta rodada que não conseguiu apagar
         erro = None
         for tentativa in range(2):
             try:
@@ -92,6 +112,6 @@ def banco():
             conexao.close()
         try:
             if criado:
-                admin.execute('DROP DATABASE IF EXISTS "%s" WITH (FORCE)' % nome)
+                apagar_banco(admin, nome)
         finally:
             admin.close()

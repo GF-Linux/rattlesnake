@@ -25,7 +25,7 @@ from ratt.db.tela import COR
 
 _ERROS_SQL = (KeyError, ValueError, TypeError, AttributeError)
 # só estas operações perguntam algo ao banco; as outras não mostram "contando…"
-_COM_CONTAGEM = (rs.Obrigatoria, rs.Unica, rs.AdicionarColuna, rs.Ligar, rs.ApagarColuna, rs.ApagarTabela)
+_COM_CONTAGEM = (rs.Obrigatoria, rs.Unica, rs.AdicionarColuna, rs.Ligar, rs.ApagarColuna, rs.ApagarTabela, rs.Inserir)
 _NIVEL = {"info": ("·", COR["cinza"]), "atencao": ("!", COR["amarelo"]), "impede": ("✖", COR["laranja"])}
 _ATRASO = 0.25                      # espera a pessoa parar de digitar antes de contar no banco
 
@@ -56,12 +56,17 @@ class FormBase(ModalScreen):
     """
 
     titulo = ""
+    avisa_sem_sql = False       # a operação se monta mas o SQL não (um valor que não serve): os avisos dizem o porquê
 
     def __init__(self, rascunho: rs.Rascunho, fonte):
         super().__init__()
-        self.rascunho, self.fonte = rascunho, fonte
+        self._rascunho, self.fonte = rascunho, fonte
         self._versao = 0
         self._timer = None
+
+    @property
+    def rascunho(self) -> rs.Rascunho:
+        return self._rascunho
 
     # ── a subclasse preenche ──
     def campos(self) -> ComposeResult:
@@ -74,6 +79,14 @@ class FormBase(ModalScreen):
     def depois_dos_avisos(self, avisos) -> None:
         """Gancho: a subclasse reage aos avisos que chegaram."""
 
+    def botoes(self) -> ComposeResult:
+        """Gancho: botões a mais, antes do "pôr no rascunho"."""
+        return iter(())
+
+    def acrescentar(self, op: rs.Operacao) -> None:
+        """Gancho: como a operação entra no rascunho (a tela que abriu grava e avisa depois do `dismiss`)."""
+        self.rascunho.acrescentar(op)
+
     # ── esqueleto ──
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -84,6 +97,7 @@ class FormBase(ModalScreen):
                 yield Static(id="form_avisos")
                 yield Static(id="erro")
             with Horizontal(id="form_botoes"):
+                yield from self.botoes()
                 yield Button(t("canvas.f.pr"), id="por_no_rascunho", variant="primary")
                 yield Button(t("canvas.f.cancelar"), id="cancelar")
 
@@ -112,6 +126,7 @@ class FormBase(ModalScreen):
             self._timer.stop()
             self._timer = None
         sql, avisos, erro = self.query_one("#form_sql", Static), self.query_one("#form_avisos", Static), self.query_one("#erro", Static)
+        op = None
         try:
             op = self.previa()
             comandos = rs.comandos_de(op, self.rascunho.vista())
@@ -119,14 +134,16 @@ class FormBase(ModalScreen):
             sql.update("")
             avisos.update("")
             erro.update(Text(str(e), style=COR["laranja"]))
-            return
+            if op is None or not self.avisa_sem_sql:
+                return
         except _ERROS_SQL as e:
             sql.update("")
             avisos.update("")
             erro.update(Text(t("canvas.e.operacao", erro=e), style=COR["laranja"]))
             return
-        erro.update("")
-        sql.update(sql_bonito(comandos))
+        else:
+            erro.update("")
+            sql.update(sql_bonito(comandos))
         if isinstance(op, _COM_CONTAGEM):
             avisos.update(Text(t("canvas.f.contando"), style=COR["cinza"]))
             self._timer = self.set_timer(_ATRASO, lambda v=self._versao, o=op: self._contar(o, v))
@@ -195,19 +212,25 @@ class FormBase(ModalScreen):
         self.dismiss(None)
 
     def por(self) -> None:
+        op = self.por_sem_fechar()
+        if op is not None:
+            self.dismiss(op)
+
+    def por_sem_fechar(self) -> Optional[rs.Operacao]:
+        """Acrescenta a operação dos campos; None (com o motivo em `#erro`) se ela não entrou."""
         guardado = self.rascunho.proximo
         try:
             op = self.operacao()
-            self.rascunho.acrescentar(op)
+            self.acrescentar(op)
         except ValueError as e:
             self.rascunho.proximo = guardado
             self.query_one("#erro", Static).update(Text(str(e), style=COR["laranja"]))
-            return
+            return None
         except _ERROS_SQL:                  # a tabela ou coluna sumiu do banco com o formulário aberto
             self.rascunho.proximo = guardado
             self.query_one("#erro", Static).update(Text(t("canvas.e.sumiu"), style=COR["laranja"]))
-            return
-        self.dismiss(op)
+            return None
+        return op
 
 
 def _nome_novo(texto: str, existentes) -> str:

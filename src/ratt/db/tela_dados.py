@@ -30,7 +30,7 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Static
 
 from ratt.db import catalogo, checagem, filtro, formularios, modelo as _modelo, rascunho as _rascunho, sessao
-from ratt.db.formularios_dados import FormCondicao
+from ratt.db.formularios_dados import FonteTravada, FormCondicao, FormInserir
 from ratt.db.grade_dados import Grade, condicao_da_celula, modelo_da_view, select_texto, texto_contagem
 from ratt.db.idioma import t
 from ratt.db.painel import AcoesRascunho, PainelSQL, PerguntarNome
@@ -38,7 +38,7 @@ from ratt.db.tela import COR, POR_PAGINA, _celula
 
 _NIVEL = {"info": ("·", COR["cinza"]), "atencao": ("!", COR["amarelo"]), "impede": ("✖", COR["laranja"])}
 _SO_VER = ("f", "v", "m")               # relkind das relações que só se veem: estrangeira, view, materializada
-_ACOES_DO_RASCUNHO = ("aplicar", "ensaio", "exportar", "desfazer")
+_ACOES_DO_RASCUNHO = ("aplicar", "ensaio", "exportar", "desfazer", "inserir")
 
 
 def _primeira_linha(erro: Exception) -> str:
@@ -48,6 +48,7 @@ def _primeira_linha(erro: Exception) -> str:
 
 class TelaDados(AcoesRascunho, Screen):
     BINDINGS = [
+        Binding("i", "inserir", t("dados.k.inserir")),
         Binding("f", "filtro", t("dados.k.filtro")),
         Binding("F,shift+f", "limpar", t("dados.k.limpar")),
         Binding("t", "texto", t("dados.k.texto")),
@@ -93,10 +94,11 @@ class TelaDados(AcoesRascunho, Screen):
         self._modelo_view: Optional[_modelo.Modelo] = None      # a view como um modelo de uma tabela só
         if colunas_view is not None:
             self._modelo_view = modelo_da_view(esquema, tabela_id, nome or tabela_id, colunas_view)
-        self._estado = "lendo"              # lendo, ok, sem_tempo, erro, so_depois, sumiu, sem_leitura
+        self._estado = "lendo"              # lendo, ok, sem_tempo, sem_tempo_filtro, erro, so_depois, sumiu, sem_leitura
         self._erro = ""
         self._token = 0                     # sobe a cada pedido de página: a resposta de outro é descartada
         self._pagina_mostrada = 0           # a página que está na grade (volta a ela se a próxima estourar o tempo)
+        self._onde_mostrado: Optional[str] = None   # o WHERE das linhas que estão na grade
         self._forma = None                  # as colunas desenhadas: iguais, a releitura só troca as linhas
         self._contando = False              # contagens e avisos a caminho (pedido separado da página)
         self._chave_pedida = None           # (tabela, WHERE, estrutura, escritas) das contagens pedidas
@@ -274,7 +276,14 @@ class TelaDados(AcoesRascunho, Screen):
     def _pagina_chegou(self, token: int, pacote: dict) -> None:
         if not self.is_attached or token != self._token:
             return
-        if pacote.get("sem_tempo"):         # a página anterior fica à vista, e o número dela também
+        if pacote.get("sem_tempo") and pacote["onde"] != self._onde_mostrado:
+            # outro filtro: as linhas à vista são do anterior e não podem ficar sob a barra do novo
+            self.linhas, self.avisos, self.total, self.total_tabela = [], [], None, None
+            self.pagina = self._pagina_mostrada = 0
+            self._onde_mostrado, self._estado = None, "sem_tempo_filtro"
+            self._mostrar()
+            return
+        if pacote.get("sem_tempo"):         # o mesmo filtro: a página anterior fica à vista, e o número dela também
             self.pagina = self._pagina_mostrada
             self._estado = "sem_tempo"
             self._linha_contagem()
@@ -286,7 +295,7 @@ class TelaDados(AcoesRascunho, Screen):
             return
         nomes, tipos, linhas = pacote["pagina"]
         self.nomes, self.tipos, self.linhas = list(nomes), list(tipos), list(linhas)
-        self._pagina_mostrada = pacote["pagina_pedida"]
+        self._pagina_mostrada, self._onde_mostrado = pacote["pagina_pedida"], str(pacote["onde"])
         self._estado = "ok"
         self._contagens(str(pacote["onde"]))
         self._mostrar(bool(pacote["manter"]))
@@ -594,7 +603,11 @@ class TelaDados(AcoesRascunho, Screen):
             self._abrir_form(c)
 
     def action_pagina(self, direcao: int) -> None:
-        """n/N. Depois de uma página que estourou o tempo, tenta de novo a partir da que está à vista."""
+        """n/N. Depois de uma página que estourou o tempo, tenta de novo a partir da que está à vista; depois de um
+        filtro novo que estourou, tenta de novo o filtro."""
+        if self._estado == "sem_tempo_filtro":
+            self._pedir_grade()
+            return
         if self._estado not in ("ok", "sem_tempo"):
             return
         nova = self.pagina + direcao
@@ -628,6 +641,15 @@ class TelaDados(AcoesRascunho, Screen):
         if not self.carregado:
             self.notify(t("canvas.carregando"))
         return self.carregado
+
+    def action_inserir(self) -> None:
+        """Uma linha nova pelo formulário (também numa tabela criada no rascunho: entra, e aparece ao aplicar)."""
+        if not self._pronto():
+            return
+        if self._tab_vista() is None:
+            self.notify(t("canvas.e.sumiu"), severity="warning")
+            return
+        self.app.push_screen(FormInserir(self.sessao, FonteTravada(self.fonte, self._trava), self.tabela_id))
 
     def depois_de_aplicar(self, esquema: str, nomes: Dict[str, str]) -> None:
         """O banco gravou: relê o catálogo (uma tabela criada pelo rascunho passa a ter o id do banco)."""

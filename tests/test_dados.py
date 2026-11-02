@@ -861,6 +861,14 @@ class FonteDadosFalsa(FonteFalsa):
         self.chamadas.append(("contar", tabela, onde))
         return None if self.sem_contagem else len(self._linhas(onde))
 
+    PAIS = [(1, "Gabriel · gab@x.com"), (2, "Ana · ana@x.com"), (3, "Giovana")]
+
+    def linhas_pai(self, esquema, tabela, chave, busca, limite=50):
+        self.chamadas.append(("linhas_pai", esquema, tabela, chave, busca))
+        if getattr(self, "busca_sem_tempo", False):
+            return None
+        return [p for p in self.PAIS if busca.lower() in p[1].lower() or busca == str(p[0])][:limite]
+
 
 class AppDados(App):
     def __init__(self, fonte, tabela_id="t1", **kw):
@@ -1083,8 +1091,13 @@ def test_sem_tempo_mantem_as_linhas_e_sem_contagem(monkeypatch, tmp_path):
             fonte.tempo_esgotado = True
             tela.acrescentar_condicao(filtro.Condicao("t1.c2", "comeca", ["G"]))
             await pronto_dados(app)
-            assert t("dados.sem_tempo") in _texto(tela, "#dados_contagem")
-            assert len(tela.linhas) == 5                          # a página anterior fica
+            # o filtro mudou: as linhas do filtro anterior não ficam sob a barra do filtro novo
+            assert t("dados.sem_tempo_filtro") in _texto(tela, "#dados_contagem")
+            assert tela.linhas == [] and tela.query_one("#dados_grade").row_count == 0
+            fonte.tempo_esgotado = False
+            await piloto.press("n")                               # tenta de novo o filtro novo
+            await pronto_dados(app)
+            assert [l[1] for l in tela.linhas] == ["Gabriel", "Giovana"] and tela.pagina == 0
             fonte.tempo_esgotado, fonte.sem_contagem = False, True
             await piloto.press("F")
             fonte.escritas += 1                                   # alguém escreveu: a contagem guardada não vale mais
@@ -1405,3 +1418,262 @@ def test_tabela_estrangeira_abre_so_para_ver(monkeypatch, tmp_path):
             assert perguntas == [1] and tela.so_ver and t("dados.so_ver") in _texto(tela, "#dados_filtro")
             assert not tela.check_action("aplicar", ()) and len(tela.linhas) == 5
     asyncio.run(roteiro())
+
+
+# ── Task 8: inserir ──
+
+async def _abrir_inserir(app, piloto):
+    from ratt.db import formularios_dados
+    await pronto_dados(app)
+    tela = app.screen
+    await piloto.press("i")
+    await piloto.pause()
+    form = app.screen
+    assert isinstance(form, formularios_dados.FormInserir)
+    return tela, form
+
+
+def _digitar(form, coluna, texto):
+    from textual.widgets import Input
+    form.campo(coluna).query_one(Input).value = texto
+
+
+def test_inserir_pelo_formulario(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Button, Input, Select
+
+    async def roteiro():
+        app = AppDados(FonteDadosFalsa())
+        async with app.run_test(size=(140, 50)) as piloto:
+            tela, form = await _abrir_inserir(app, piloto)
+            ident = form.campo("id")
+            assert ident.query_one(Input).disabled and ident.valor() is None
+            assert t("dados.banco_preenche") in ident.query_one(Input).placeholder
+            assert form.campo("ativo").query(Select) and form.campo("ativo").valor() is None
+            assert t("dados.f.data") in form.campo("nascimento").query_one(Input).placeholder
+            assert "true" in form.campo("ativo").query_one(Select).prompt          # vazio: o banco põe o padrão
+            assert t("dados.f.obrigatoria") in str(form.campo("nome").query_one(".rotulo").render())
+            _digitar(form, "nome", "O'Brien Zé")
+            _digitar(form, "idade", "30")
+            _digitar(form, "email", "50%_a@x.com")
+            await asyncio.sleep(0.4)                       # os avisos chegam (e o formulário cresce) antes do clique
+            await pronto_dados(app)
+            assert form.campo("nome").preenchido() and not form.campo("nascimento").preenchido()
+            sql = "INSERT INTO public.pessoas (nome, idade, email) VALUES ('O''Brien Zé', 30, '50%_a@x.com')"
+            assert sql in form.query_one("#form_sql").content.code
+            assert not form.query_one("#por_no_rascunho", Button).disabled
+            await piloto.click("#por_no_rascunho")
+            await pronto_dados(app)
+            assert app.screen is tela
+            ops = tela.sessao.rascunho.operacoes
+            assert len(ops) == 1 and ops[0].comandos(tela.sessao.rascunho.vista()) == [sql]
+            assert t("dados.pendentes", n=1) in _texto(tela, "#dados_pendentes")
+    asyncio.run(roteiro())
+
+
+def test_inserir_booleano_e_data():
+    from ratt.db import formularios_dados
+    m = modelo_pessoas()
+    campo = formularios_dados.CampoValor(m.tabelas["t1"].coluna("t1.c6"), None)
+    assert campo.familia == "booleano"
+    campo = formularios_dados.CampoValor(m.tabelas["t1"].coluna("t1.c5"), None)
+    assert campo.dica() == t("dados.f.data")
+    hora = Coluna("x", "quando", "timestamp with time zone")
+    assert formularios_dados.CampoValor(hora, None).dica() == t("dados.f.data_hora")
+    gerada = formularios_dados.CampoValor(Coluna("y", "total", "numeric", padrao="(a * b)", gerada=True), None)
+    assert gerada.desativado and gerada.dica() == t("dados.banco_preenche")
+    numero = formularios_dados.CampoValor(Coluna("z", "n", "integer", padrao="7"), None)
+    assert numero.dica() == t("dados.f.numero") + " · " + t("dados.f.padrao", padrao="7")
+
+
+def test_por_e_inserir_outra(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Input, Select
+
+    async def roteiro():
+        app = AppDados(FonteDadosFalsa())
+        async with app.run_test(size=(140, 50)) as piloto:
+            tela, form = await _abrir_inserir(app, piloto)
+            _digitar(form, "nome", "Um")
+            form.campo("ativo").query_one(Select).value = "false"
+            await asyncio.sleep(0.4)                       # os avisos chegam antes do clique (o formulário cresce)
+            await pronto_dados(app)
+            await piloto.click("#por_e_outra")
+            await pronto_dados(app)
+            assert app.screen is form
+            assert form.campo("nome").query_one(Input).value == "" and form.campo("ativo").valor() is None
+            _digitar(form, "nome", "Dois")
+            await asyncio.sleep(0.4)                       # os avisos chegam antes do clique (o formulário cresce)
+            await pronto_dados(app)
+            await piloto.click("#por_e_outra")
+            await pronto_dados(app)
+            assert app.screen is form
+            vista = tela.sessao.rascunho.vista()
+            assert [op.comandos(vista)[0] for op in tela.sessao.rascunho.operacoes] == [
+                "INSERT INTO public.pessoas (nome, ativo) VALUES ('Um', FALSE)",
+                "INSERT INTO public.pessoas (nome) VALUES ('Dois')"]
+            assert t("canvas.rascunho", n=2) in _texto(tela, "#dados_titulo")
+            await piloto.press("escape")
+            await piloto.pause()
+            assert app.screen is tela and len(tela.sessao.rascunho.operacoes) == 2
+    asyncio.run(roteiro())
+
+
+def test_inserir_nome_vazio_avisa_e_nao_trava(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Button
+
+    async def roteiro():
+        app = AppDados(FonteDadosFalsa())
+        async with app.run_test(size=(140, 50)) as piloto:
+            tela, form = await _abrir_inserir(app, piloto)
+            _digitar(form, "idade", "vinte")
+            await asyncio.sleep(0.4)
+            await pronto_dados(app)
+            avisos = str(form.query_one("#form_avisos").render())
+            assert "✖ " + t("chk.obrigatoria_vazia", coluna="nome") in avisos
+            assert t("chk.valor_invalido", coluna="idade", valor="vinte", tipo="integer") in avisos
+            assert not form.query_one("#por_no_rascunho", Button).disabled
+            await piloto.click("#por_no_rascunho")                 # "vinte" nem vira SQL: não entra
+            await pronto_dados(app)
+            assert app.screen is form and str(form.query_one("#erro").render())
+            _digitar(form, "idade", "20")
+            await asyncio.sleep(0.4)                       # os avisos chegam antes do clique (o formulário cresce)
+            await pronto_dados(app)
+            await piloto.click("#por_no_rascunho")                 # nome vazio: avisado, mas a pessoa decide
+            await pronto_dados(app)
+            assert app.screen is tela
+            assert tela.sessao.rascunho.operacoes[0].valores == {"t1.c3": "20"}
+    asyncio.run(roteiro())
+
+
+def test_inserir_chave_estrangeira_escolhida_na_lista(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Input, OptionList
+    from ratt.db import formularios_dados
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        app = AppDados(fonte, "t2")
+        async with app.run_test(size=(140, 50)) as piloto:
+            tela, form = await _abrir_inserir(app, piloto)
+            campo = form.campo("pessoa_id")
+            assert "pessoas.id" in str(campo.query_one(".rotulo").render())
+            await piloto.click("#" + campo.query_one(".escolher").id)
+            await pronto_dados(app)
+            escolher = app.screen
+            assert isinstance(escolher, formularios_dados.EscolherLinha)
+            assert ("linhas_pai", "public", "pessoas", "id", "") in fonte.chamadas
+            lista = escolher.query_one(OptionList)
+            assert lista.option_count == 3 and "Ana" in str(lista.get_option_at_index(1).prompt)
+            escolher.query_one("#busca", Input).value = "gab"
+            await asyncio.sleep(0.4)
+            await pronto_dados(app)
+            assert ("linhas_pai", "public", "pessoas", "id", "gab") in fonte.chamadas
+            assert lista.option_count == 1
+            escolher.query_one("#busca", Input).value = ""
+            await asyncio.sleep(0.4)
+            await pronto_dados(app)
+            lista.focus()
+            lista.highlighted = 1
+            await piloto.press("enter")
+            await pronto_dados(app)
+            assert app.screen is form
+            assert campo.valor() == "2" and "Ana" in str(campo.query_one(".escolhido").render())
+            assert "INSERT INTO public.pedidos (pessoa_id) VALUES (2)" in form.query_one("#form_sql").content.code
+            _digitar(form, "pessoa_id", "3")                      # também aceita digitar; o rótulo velho sai
+            await piloto.pause()
+            assert "Ana" not in str(campo.query_one(".escolhido").render())
+            fonte.busca_sem_tempo = True
+            await piloto.click("#" + campo.query_one(".escolher").id)
+            await pronto_dados(app)
+            assert t("dados.f.sem_tempo_busca") in str(app.screen.query_one("#estado").render())
+            await piloto.press("escape")
+            await piloto.pause()
+            assert app.screen is form and campo.valor() == "3"
+            await asyncio.sleep(0.4)
+            await pronto_dados(app)
+            await piloto.click("#por_no_rascunho")
+            await pronto_dados(app)
+            assert tela.sessao.rascunho.operacoes[0].valores == {"t2.c2": "3"}
+    asyncio.run(roteiro())
+
+
+def test_inserir_em_tabela_criada_no_rascunho_e_so_ver(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    r = rascunho.Rascunho(modelo_pessoas())
+    r.acrescentar(rascunho.CriarTabela(Tabela(r.novo_id("t"), "public", "notas", [
+        Coluna(r.novo_id("c"), "id", "bigint", obrigatoria=True, identidade=True, pk=True),
+        Coluna(r.novo_id("c"), "texto", "text", obrigatoria=True),
+        Coluna(r.novo_id("c"), "pessoa", "bigint")])))
+    tab = r.operacoes[0].tabela
+    r.acrescentar(rascunho.Ligar(Ligacao(r.novo_id("k"), tab.id, (tab.colunas[2].id,), "t1", ("t1.c1",),
+                                         "notas_pessoa_fkey"), indice=False))
+    guardar.gravar_rascunho(5432, "teste", "public", json.loads(json.dumps(r.para_dict())))
+
+    async def roteiro():
+        app = AppDados(FonteDadosFalsa(), tab.id)
+        async with app.run_test(size=(140, 50)) as piloto:
+            tela, form = await _abrir_inserir(app, piloto)
+            _digitar(form, "texto", "oi")
+            await asyncio.sleep(0.4)
+            await pronto_dados(app)
+            assert t("chk.so_depois_de_aplicar", tabela="notas") in str(form.query_one("#form_avisos").render())
+            assert not form.campo("pessoa").query_one(".escolher").disabled      # o pai (pessoas) já está no banco
+            await piloto.click("#por_no_rascunho")
+            await pronto_dados(app)
+            assert app.screen is tela and len(tela.sessao.rascunho.operacoes) == 3
+            assert tela.sessao.rascunho.operacoes[-1].comandos(tela.sessao.rascunho.vista()) == [
+                "INSERT INTO public.notas (texto) VALUES ('oi')"]
+    asyncio.run(roteiro())
+
+
+def test_so_ver_nao_insere(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        fonte.classe = lambda oid: "v"
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 44)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            assert tela.so_ver and not tela.check_action("inserir", ())
+            await piloto.press("i")
+            await piloto.pause()
+            assert app.screen is tela
+    asyncio.run(roteiro())
+
+
+# ── o banco descartável: apagar com paciência ──
+
+class _AdminTeimoso:
+    """Recusa o DROP algumas vezes (como com um autovacuum do superusuário no meio) e depois aceita."""
+
+    def __init__(self, erros):
+        self.erros, self.comandos = list(erros), []
+
+    def execute(self, comando):
+        self.comandos.append(comando)
+        if self.erros:
+            raise self.erros.pop(0)
+
+
+def test_apagar_banco_de_teste_tenta_de_novo():
+    import conftest
+    esperas = []
+    negado = psycopg.errors.InsufficientPrivilege("permissão negada para terminar o processo")
+    admin = _AdminTeimoso([negado, psycopg.errors.ObjectInUse("em uso")])
+    assert conftest.apagar_banco(admin, "ratt_teste_1", espera=esperas.append) is True
+    assert admin.comandos == ['DROP DATABASE IF EXISTS "ratt_teste_1" WITH (FORCE)'] * 3
+    assert len(esperas) == 2 and esperas[1] > esperas[0] > 0
+    admin = _AdminTeimoso([negado] * 100)
+    relogio = [0.0]
+
+    def espera(s):
+        relogio[0] += s
+    assert conftest.apagar_banco(admin, "ratt_teste_1", espera=espera, relogio=lambda: relogio[0]) is False
+    assert 4.0 <= relogio[0] <= 6.0                                 # desiste depois de uns 5 s
+    admin = _AdminTeimoso([psycopg.errors.SyntaxError("outra coisa")])
+    with pytest.raises(psycopg.errors.SyntaxError):                 # outro erro não é esperado: sobe na hora
+        conftest.apagar_banco(admin, "ratt_teste_1", espera=esperas.append)

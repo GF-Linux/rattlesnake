@@ -67,7 +67,8 @@ def texto_contagem(estado: str, *, por_pagina: int, pagina: int, n_linhas: int, 
     simples = {"lendo": (t("dados.lendo"), COR["cinza"]), "sem_leitura": (t("canvas.sem_leitura"), COR["laranja"]),
                "so_depois": (t("dados.so_depois_tabela", tabela=tabela), COR["amarelo"]),
                "sumiu": (t("canvas.e.sumiu"), COR["laranja"]), "erro": (t("dados.erro", erro=erro), COR["laranja"]),
-               "sem_tempo": (t("dados.sem_tempo"), COR["amarelo"])}
+               "sem_tempo": (t("dados.sem_tempo"), COR["amarelo"]),
+               "sem_tempo_filtro": (t("dados.sem_tempo_filtro"), COR["amarelo"])}
     if estado in simples:
         return simples[estado]
     inicio = pagina * por_pagina
