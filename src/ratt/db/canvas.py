@@ -2,7 +2,8 @@
 
 `FonteBanco` é o único ponto onde a tela toca o banco (nos testes entra uma fonte falsa).
 `Quadro` só exibe a grade de texto de `desenho.Desenho` e traduz o mouse; `TelaCanvas` guarda o estado
-(posições, seleção, foco) e redesenha quando algo muda. Nesta etapa a tela é só de leitura.
+(posições, seleção, foco, rascunho) e redesenha quando algo muda. Os formulários que montam as operações
+do rascunho moram em `formularios.py`. Nada aqui executa DDL: o rascunho só vai ao disco (`guardar`).
 """
 from __future__ import annotations
 
@@ -11,7 +12,9 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from rich.segment import Segment
+from rich.console import Group
 from rich.style import Style
+from rich.syntax import Syntax
 from rich.text import Text
 from textual import events, work
 from textual.app import ComposeResult
@@ -21,11 +24,11 @@ from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Footer, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from ratt.db import acesso, catalogo, checagem, desenho, guardar, modelo as _modelo
+from ratt.db import acesso, catalogo, checagem, desenho, formularios, guardar, modelo as _modelo, rascunho as _rascunho
 from ratt.db.idioma import t
 from ratt.db.tela import COR
 
@@ -199,6 +202,104 @@ class Quadro(ScrollView):
             self.post_message(self.Moveu(tabela, max(MIN_X, caixa[0] + dx), max(MIN_Y, caixa[1] + dy)))
 
 
+# ── o painel do SQL ─────────────────────────────────────────────────────────
+
+class PainelSQL(VerticalScroll):
+    """O SQL do rascunho, sempre à vista. Com o foco, ↑/↓ escolhem uma operação e x/delete a tiram."""
+
+    class Tirar(Message):
+        def __init__(self, indice: int):
+            super().__init__()
+            self.indice = indice
+
+    BINDINGS = [
+        Binding("up", "passo(-1)", show=False),
+        Binding("down", "passo(1)", show=False),
+        Binding("x,delete", "tirar", t("canvas.k.tirar")),
+        Binding("escape", "sair", t("canvas.k.voltar")),
+    ]
+    can_focus = True
+    DEFAULT_CSS = """
+    PainelSQL { height: auto; max-height: 10; padding: 0 1; border-top: solid $panel; }
+    PainelSQL:focus { border-top: solid $accent; }
+    """
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.passos: list = []
+        self.indice = 0
+        self._linhas: List[int] = []        # linha em que cada operação começa no texto desenhado
+        self._plano = ""
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="sql_conteudo")
+
+    def texto_plano(self) -> str:
+        return self._plano
+
+    def atualizar(self, passos) -> None:
+        self.passos = passos
+        self.indice = max(0, min(self.indice, len(passos) - 1))
+        self._desenhar()
+
+    def _desenhar(self) -> None:
+        alvo = self.query_one("#sql_conteudo", Static)
+        if not self.passos:
+            self._linhas, self._plano = [], t("canvas.sem_rascunho")
+            alvo.update(Text(self._plano, style=COR["cinza"]))
+            return
+        partes, plano, y, self._linhas = [], [], 0, []
+        for n, (op, valida, desc, comandos) in enumerate(self.passos):
+            escolhida = self.has_focus and n == self.indice
+            fundo = "#1f3550" if escolhida else None
+            if n:
+                partes.append(Text(""))
+                plano.append("")
+                y += 1
+            self._linhas.append(y)
+            if valida:
+                codigo = f"-- {n + 1}. {desc}\n" + "\n".join(c + ";" for c in comandos)
+                partes.append(Syntax(codigo, "sql", theme="ansi_dark", background_color=fundo or "default", word_wrap=True))
+            else:
+                codigo = f"-- {n + 1}. {t('canvas.invalida')}"
+                partes.append(Text(codigo, style=Style(color=COR["laranja"], bgcolor=fundo)))
+            plano.append(codigo)
+            y += len(codigo.splitlines())
+        self._plano = "\n".join(plano)
+        alvo.update(Group(*partes))
+
+    def _ver_escolhida(self) -> None:
+        if self._linhas:
+            self.scroll_to_region(Region(0, self._linhas[self.indice], 1, 2), animate=False)
+
+    def action_passo(self, passo: int) -> None:
+        if self.passos:
+            self.indice = max(0, min(self.indice + passo, len(self.passos) - 1))
+            self._desenhar()
+            self._ver_escolhida()
+
+    def action_tirar(self) -> None:
+        if self.passos:
+            self.post_message(self.Tirar(self.indice))
+
+    def action_sair(self) -> None:
+        self.screen.set_focus(None)
+
+    def on_focus(self) -> None:
+        self._desenhar()
+
+    def on_blur(self) -> None:
+        self._desenhar()
+
+    def on_click(self, evento: events.Click) -> None:
+        y = evento.y + self.scroll_offset.y - 0
+        for n in range(len(self._linhas) - 1, -1, -1):
+            if self._linhas[n] <= y:
+                self.indice = n
+                break
+        self._desenhar()
+
+
 # ── telas pequenas de perguntar ─────────────────────────────────────────────
 
 class EscolherEsquema(ModalScreen):
@@ -249,6 +350,7 @@ class PerguntarNome(ModalScreen):
 # ── a tela ──────────────────────────────────────────────────────────────────
 
 class TelaCanvas(Screen):
+    AUTO_FOCUS = ""         # o foco só vai ao painel do SQL quando a pessoa pede (r ou clique): as setas são do quadro
     BINDINGS = [
         Binding("tab", "tabela(1)", t("canvas.k.proxima")),
         Binding("shift+tab", "tabela(-1)", t("canvas.k.anterior"), show=False),
@@ -264,6 +366,13 @@ class TelaCanvas(Screen):
         Binding("shift+down", "mover(0,1)", show=False),
         Binding("shift+left", "mover(-2,0)", show=False),
         Binding("shift+right", "mover(2,0)", show=False),
+        Binding("a", "nova_tabela", t("canvas.k.tabela")),
+        Binding("c", "nova_coluna", t("canvas.k.coluna")),
+        Binding("l", "ligar", t("canvas.k.ligar")),
+        Binding("space", "menu", t("canvas.k.editar")),
+        Binding("x,delete", "apagar", t("canvas.k.apagar")),
+        Binding("u", "desfazer", t("canvas.k.desfazer")),
+        Binding("r", "painel", t("canvas.k.rascunho")),
         Binding("s", "esquema", t("canvas.k.esquema")),
         Binding("f", "foco", t("canvas.k.foco")),
         Binding("F,shift+f", "tudo", t("canvas.k.tudo")),
@@ -271,7 +380,6 @@ class TelaCanvas(Screen):
     ]
     DEFAULT_CSS = """
     #canvas_titulo { height: 1; padding: 0 1; background: $panel; }
-    #canvas_sql { height: auto; max-height: 10; padding: 0 1; border-top: solid $panel; color: $text-muted; }
     """
 
     def __init__(self, fonte, esquema: str):
@@ -280,7 +388,8 @@ class TelaCanvas(Screen):
         self.selecao: Optional[tuple] = None
         self.posicoes: Dict[str, Tuple[int, int]] = {}
         self.vista: _modelo.Modelo = _modelo.Modelo(esquema)
-        self.todo: _modelo.Modelo = self.vista      # o schema inteiro; `vista` é o que se vê (o foco recorta)
+        self.rascunho = _rascunho.Rascunho(_modelo.Modelo(esquema))
+        self.todo: _modelo.Modelo = self.vista      # o schema inteiro com o rascunho; `vista` é o que se vê (o foco recorta)
         self.foco: Optional[str] = None
         self.avisos: Dict[str, str] = {}
         self.marca = None
@@ -291,11 +400,12 @@ class TelaCanvas(Screen):
     def compose(self) -> ComposeResult:
         yield Static(id="canvas_titulo")
         yield Quadro(id="quadro")
-        yield Static(Text(t("canvas.sem_rascunho"), style=COR["cinza"]), id="canvas_sql")
+        yield PainelSQL(id="canvas_sql")
         yield Footer()
 
     def on_mount(self):
         self.redesenhar()
+        self.query_one(PainelSQL).atualizar([])
         self.ler(self.esquema)
         self.set_interval(2.0, self.vigiar)
 
@@ -307,8 +417,46 @@ class TelaCanvas(Screen):
     # ── o modelo e as posições ──────────────────────────────────────────────
 
     def carregar(self, m: _modelo.Modelo, primeira: bool = False) -> None:
-        """Troca o modelo mantendo posições e seleção; posiciona o que não tem lugar."""
-        self.todo = m
+        """Chegou o modelo do banco: é a base do rascunho. Na primeira vez o rascunho vem do disco; nas outras
+        ele é rebaseado (nada se perde; o que deixou de valer fica marcado) e gravado."""
+        if primeira:
+            self.rascunho = self._abrir_rascunho(m)
+        else:
+            antes = self.rascunho.invalidas
+            novas = self.rascunho.rebase(m) - antes
+            if novas:
+                self.notify(t("canvas.invalidas", n=len(novas)), severity="warning")
+            self._persistir()
+        self._montar(primeira)
+
+    def _abrir_rascunho(self, m: _modelo.Modelo) -> _rascunho.Rascunho:
+        dados = guardar.ler_rascunho(self.fonte.porta, self.fonte.banco, self.esquema)
+        if dados is None:
+            return _rascunho.Rascunho(m)
+        try:
+            r = _rascunho.Rascunho.de_dict(dados, m)
+        except _rascunho.RascunhoCorrompido:
+            try:
+                caminho = guardar.separar_rascunho(self.fonte.porta, self.fonte.banco, self.esquema)
+                self.notify(t("canvas.corrompido", caminho=caminho), severity="warning", timeout=15)
+            except OSError as erro:
+                self.notify(t("canvas.erro_gravar", erro=erro), severity="error")
+            return _rascunho.Rascunho(m)
+        if r.invalidas:
+            self.notify(t("canvas.invalidas", n=len(r.invalidas)), severity="warning")
+        return r
+
+    def _persistir(self) -> None:
+        """Grava o rascunho a cada mudança; vazio apaga o arquivo."""
+        try:
+            guardar.gravar_rascunho(self.fonte.porta, self.fonte.banco, self.esquema,
+                                    self.rascunho.para_dict() if self.rascunho.operacoes else None)
+        except OSError as erro:
+            self.notify(t("canvas.erro_gravar", erro=erro), severity="error")
+
+    def _montar(self, primeira: bool = False) -> None:
+        """Refaz `todo` (base + rascunho), o recorte do foco, os avisos e o painel, e redesenha."""
+        m = self.todo = self.rascunho.vista()
         if primeira:
             self.posicoes = guardar.ler_posicoes(self.fonte.porta, self.fonte.banco, self.esquema)
             self.foco = None
@@ -321,9 +469,16 @@ class TelaCanvas(Screen):
         self.avisos = self._avisos(self.vista)
         if self.selecao and not self._existe(self.selecao):
             self.selecao = None
+        self.query_one(PainelSQL).atualizar(self.rascunho.passos())
         self.redesenhar()
         if primeira and self.vista.tabelas:
             self._rolar_para_caixas()
+
+    def _mudou(self) -> None:
+        """Uma edição entrou ou saiu do rascunho: grava, redesenha e mantém a seleção à vista."""
+        self._persistir()
+        self._montar()
+        self._mostrar_selecao()
 
     @staticmethod
     def _ordem(m: _modelo.Modelo) -> List[str]:
@@ -361,7 +516,7 @@ class TelaCanvas(Screen):
     def _titulo(self) -> None:
         partes = [("ratt db", f"bold {COR['azul']}"), (" · ", COR["cinza"]), (self.fonte.banco, "bold"),
                   (" › ", COR["cinza"]), (t("canvas.titulo"), ""), (" · ", COR["cinza"]), (self.esquema, ""),
-                  (" · ", COR["cinza"]), (t("canvas.rascunho", n=0), COR["cinza"])]
+                  (" · ", COR["cinza"]), (t("canvas.rascunho", n=len(self.rascunho.operacoes)), COR["laranja"] if self.rascunho.operacoes else COR["cinza"])]
         if self.foco:
             partes += [(" · ", COR["cinza"]), (t("canvas.em_foco", tabela=self.todo.tabelas[self.foco].nome), COR["amarelo"])]
         self.query_one("#canvas_titulo", Static).update(Text.assemble(*partes))
@@ -488,14 +643,125 @@ class TelaCanvas(Screen):
                 return
             self.foco = (exata or achadas)[0]
             self.selecao = ("tabela", self.foco)
-            self.carregar(self.todo)
+            self._montar()
             self._rolar_para_caixas()
         self.app.push_screen(PerguntarNome(t("canvas.qual_foco")), nome_dado)
 
     def action_tudo(self) -> None:
         if self.foco:
             self.foco = None
-            self.carregar(self.todo)
+            self._montar()
+
+    # ── editar ──────────────────────────────────────────────────────────────
+
+    def _pronto(self) -> bool:
+        if not self.carregado:
+            self.notify(t("canvas.carregando"))
+        return self.carregado
+
+    def _abrir(self, form) -> None:
+        self.app.push_screen(form, self._depois_de_editar)
+
+    def _depois_de_editar(self, op) -> None:
+        if op is None:
+            return
+        criada = op.tabela.id if isinstance(op, _rascunho.CriarTabela) else op.tabela_id if isinstance(op, _rascunho.LigarNN) else None
+        if criada:
+            self.selecao = ("tabela", criada)
+        self._mudou()
+
+    def action_nova_tabela(self) -> None:
+        if self._pronto():
+            self._abrir(formularios.FormTabela(self.rascunho, self.fonte))
+
+    def action_nova_coluna(self) -> None:
+        if not self._pronto():
+            return
+        if not self.selecao or self.selecao[0] not in ("tabela", "coluna"):
+            self.notify(t("canvas.sel_tabela_ou_coluna"), severity="warning")
+            return
+        self._abrir(formularios.FormColuna(self.rascunho, self.fonte, self.selecao[1]))
+
+    def action_ligar(self) -> None:
+        if not self._pronto():
+            return
+        if not self.selecao or self.selecao[0] not in ("tabela", "coluna"):
+            self.notify(t("canvas.sel_tabela_ou_coluna"), severity="warning")
+            return
+        coluna = self.selecao[2] if self.selecao[0] == "coluna" else None
+        self._abrir(formularios.FormLigar(self.rascunho, self.fonte, self.selecao[1], coluna))
+
+    def action_apagar(self) -> None:
+        if not self._pronto():
+            return
+        if not self.selecao:
+            self.notify(t("canvas.sel_qualquer"), severity="warning")
+            return
+        self._abrir(formularios.ConfirmarApagar(self.rascunho, self.fonte, self.selecao))
+
+    def action_menu(self) -> None:
+        if not self._pronto():
+            return
+        if not self.selecao:
+            self.notify(t("canvas.sel_qualquer"), severity="warning")
+            return
+        v = self.rascunho.vista()
+        if self.selecao[0] == "ligacao":
+            self.notify(t("canvas.sem_menu"))
+            return
+        tab = v.tabelas[self.selecao[1]]
+        if self.selecao[0] == "tabela":
+            nome, itens = tab.nome, [("renomear", t("canvas.m.renomear"))]
+        else:
+            c = tab.coluna(self.selecao[2])
+            nome = f"{tab.nome}.{c.nome}"
+            itens = [("renomear", t("canvas.m.renomear")),
+                     ("opcional" if c.obrigatoria else "obrigatoria", t("canvas.m.opcional" if c.obrigatoria else "canvas.m.obrigatoria")),
+                     ("nao_unica" if c.unica else "unica", t("canvas.m.nao_unica" if c.unica else "canvas.m.unica"))]
+        sel = self.selecao
+        self.app.push_screen(formularios.MenuSelecao(nome, itens), lambda chave: self._do_menu(chave, sel, nome))
+
+    def _do_menu(self, chave, sel, nome) -> None:
+        if not chave:
+            return
+        tid, cid = sel[1], (sel[2] if sel[0] == "coluna" else None)
+        r, f = self.rascunho, self.fonte
+        if chave == "renomear":
+            atual = r.vista().tabelas[tid].nome if cid is None else r.vista().tabelas[tid].coluna(cid).nome
+            form = formularios.FormSimples(r, f, t("canvas.f.renomear", nome=nome),
+                                           lambda novo: _rascunho.Renomear(tid, cid, novo), valor=atual)
+        else:
+            sim = chave in ("obrigatoria", "unica")
+            classe = _rascunho.Obrigatoria if chave in ("obrigatoria", "opcional") else _rascunho.Unica
+            form = formularios.FormSimples(r, f, t("canvas.f." + chave, nome=nome),
+                                           lambda _: classe(tid, cid, sim))
+        self._abrir(form)
+
+    def action_desfazer(self) -> None:
+        if self.rascunho.desfazer() is None:
+            self.notify(t("canvas.nada_desfazer"))
+            return
+        self._mudou()
+
+    def action_painel(self) -> None:
+        self.query_one(PainelSQL).focus()
+
+    def on_painel_sql_tirar(self, evento: PainelSQL.Tirar) -> None:
+        i = evento.indice
+        if i >= len(self.rascunho.operacoes):
+            return
+        dependentes = self.rascunho.dependentes(i)
+        if not dependentes:
+            self._tirar([i])
+            return
+        passos = self.rascunho.passos()
+        descricoes = [passos[j][2] if passos[j][1] else passos[j][0].tipo for j in dependentes]
+        self.app.push_screen(formularios.ConfirmarTirar(descricoes),
+                             lambda sim: self._tirar([i] + dependentes) if sim else None)
+
+    def _tirar(self, indices) -> None:
+        self.rascunho.tirar(indices)
+        self._mudou()
 
     # ── ler o banco (sempre fora da thread da tela) ─────────────────────────
 
@@ -549,5 +815,7 @@ class TelaCanvas(Screen):
         self.esquema, self.selecao, self.foco = nome, None, None
         self.posicoes, self.carregado, self.marca = {}, False, None
         self.todo = self.vista = _modelo.Modelo(nome)
+        self.rascunho = _rascunho.Rascunho(self.todo)
+        self.query_one(PainelSQL).atualizar([])
         self.redesenhar()
         self.ler(nome)

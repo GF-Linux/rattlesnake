@@ -78,6 +78,21 @@ def gravar_rascunho(porta: int, banco: str, esquema: str, dados: Optional[dict])
     _escrever(arquivo, json.dumps(dados, ensure_ascii=False, indent=1))
 
 
+def separar_rascunho(porta: int, banco: str, esquema: str) -> Path:
+    """Tira de cena um rascunho ilegível sem perdê-lo: renomeia para `rascunho-{esquema}.corrompido-AAAAMMDD-HHMMSS.json`
+    (com `-2`, `-3`... se o nome já existir) e devolve o novo caminho. Nunca sobrescreve."""
+    origem = _arquivo_rascunho(porta, banco, esquema)
+    agora = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    base = f"rascunho-{_seguro(esquema)}.corrompido-{agora}"
+    destino = origem.with_name(base + ".json")
+    n = 1
+    while destino.exists():
+        n += 1
+        destino = origem.with_name(f"{base}-{n}.json")
+    os.replace(origem, destino)
+    return destino
+
+
 def guardar_aplicado(porta: int, banco: str, texto: str) -> Path:
     """Guarda o SQL que acabou de ser aplicado em `aplicados/AAAAMMDD-HHMMSS.sql` (nunca sobrescreve)."""
     agora = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")

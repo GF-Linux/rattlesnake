@@ -615,6 +615,10 @@ class Rascunho:
         """A base copiada com as operações válidas aplicadas, itens tocados marcados."""
         return self._percorrer()[0]
 
+    def passos(self) -> List[Tuple[Operacao, bool, str, List[str]]]:
+        """Para cada operação: (operação, válida, descrição, comandos). O painel do SQL desenha daqui."""
+        return self._percorrer()[1]
+
     @property
     def invalidas(self) -> Set[int]:
         """Índices das operações que não valem sobre a base de agora; seguem na lista, fora do resto."""

@@ -1173,3 +1173,323 @@ def test_tabela_selecionada_some_do_banco(monkeypatch, tmp_path):
             await pronto(app)
             assert "t4" not in tela.vista.tabelas and tela.selecao is None
     asyncio.run(roteiro())
+
+
+# ---- editar: formulários, rascunho no desenho, painel do SQL (Task 9) ---------------------------------------
+
+import json
+
+from ratt.db import checagem, formularios
+
+
+async def _selecionar(piloto, app, nome):
+    """Anda com `tab` até a tabela de nome `nome` (a ordem é a alfabética)."""
+    for _ in range(10):
+        await piloto.press("tab")
+        sel = app.screen.selecao
+        if sel and app.screen.vista.tabelas[sel[1]].nome == nome:
+            return
+    raise AssertionError("não achei " + nome)
+
+
+def test_nova_coluna_pelo_formulario(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            await _selecionar(piloto, app, "users")
+            await piloto.press("c")
+            await piloto.press(*"birth")
+            app.screen.query_one("#tipo").value = "date"
+            await piloto.click("#por_no_rascunho")
+            await pronto(app)
+            tela = app.screen
+            r = tela.rascunho
+            assert "ALTER TABLE users ADD COLUMN birth date;" in r.sql_texto()
+            assert guardar.ler_rascunho(5432, "teste", "public") is not None
+            assert t("canvas.rascunho", n=1) in str(tela.query_one("#canvas_titulo").render())
+            assert "birth" in tela.vista.tabelas["t1"].colunas[-1].nome
+            await piloto.press("u")
+            assert r.operacoes == []
+            assert guardar.ler_rascunho(5432, "teste", "public") is None      # vazio apaga o arquivo
+    asyncio.run(roteiro())
+
+
+def test_rascunho_volta_ao_reabrir(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.Renomear("t1", None, "pessoas"))
+    guardar.gravar_rascunho(5432, "teste", "public", r.para_dict())
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            assert "RENAME TO pessoas" in app.screen.rascunho.sql_texto()
+            assert "pessoas" in [tb.nome for tb in app.screen.vista.tabelas.values()]
+    asyncio.run(roteiro())
+
+
+def test_banco_muda_e_rascunho_marca_invalida(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.Renomear("t2", None, "papeis"))
+    guardar.gravar_rascunho(5432, "teste", "public", r.para_dict())
+
+    async def roteiro():
+        fonte = FonteFalsa()
+        app = AppTeste(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            del fonte.m.tabelas["t2"]
+            fonte.m.ligacoes.pop("k2")
+            fonte.sig = 2
+            app.screen.vigiar()
+            await piloto.pause(0.3)
+            assert app.screen.rascunho.invalidas == {0}
+            assert guardar.ler_rascunho(5432, "teste", "public")["operacoes"]      # não se perdeu
+    asyncio.run(roteiro())
+
+
+def test_rascunho_corrompido_vai_para_o_lado(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    pasta = guardar.pasta(5432, "teste")
+    pasta.mkdir(parents=True)
+    (pasta / "rascunho-public.json").write_text(json.dumps({"operacoes": [{"tipo": "nao_existe"}]}))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            assert app.screen.rascunho.operacoes == []
+            assert app.screen.vista.tabelas.keys() == modelo_png().tabelas.keys()
+    asyncio.run(roteiro())
+    assert not (pasta / "rascunho-public.json").exists()
+    guardados = list(pasta.glob("rascunho-public.corrompido-*.json"))
+    assert len(guardados) == 1 and "nao_existe" in guardados[0].read_text()
+
+
+def test_separar_rascunho_nunca_sobrescreve(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    real = guardar.datetime.datetime
+    monkeypatch.setattr(guardar.datetime, "datetime", type("D", (), {
+        "now": staticmethod(lambda: real(2026, 11, 1, 20, 0, 0))}))
+    caminhos = []
+    for i in range(2):
+        guardar.gravar_rascunho(5432, "teste", "public", {"n": i})
+        caminhos.append(guardar.separar_rascunho(5432, "teste", "public"))
+    assert caminhos[0] != caminhos[1] and all(c.exists() for c in caminhos)
+    assert caminhos[0].name == "rascunho-public.corrompido-20261101-200000.json"
+
+
+def test_ligar_como_nn_pelo_formulario(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            await _selecionar(piloto, app, "users")
+            await piloto.press("l")
+            form = app.screen
+            assert isinstance(form, formularios.FormLigar)
+            lista = form.query_one("#destino")
+            nomes = [str(lista.get_option_at_index(i).prompt) for i in range(lista.option_count)]
+            lista.highlighted = nomes.index("profiles")
+            form.query_one("#como_nn").value = True
+            await piloto.pause(0.1)
+            await piloto.click("#por_no_rascunho")
+            await pronto(app)
+            sql = app.screen.rascunho.sql_texto()
+            assert "CREATE TABLE users_profiles" in sql and sql.count("FOREIGN KEY") == 2
+    asyncio.run(roteiro())
+
+
+def test_ligar_tabela_cria_a_coluna_e_a_unica(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            await _selecionar(piloto, app, "profiles")
+            await piloto.press("l")
+            form = app.screen
+            lista = form.query_one("#destino")
+            nomes = [str(lista.get_option_at_index(i).prompt) for i in range(lista.option_count)]
+            lista.highlighted = nomes.index("roles")
+            form.query_one("#um").value = True              # cada role tem no máximo um profile
+            await piloto.pause(0.1)
+            await piloto.click("#por_no_rascunho")
+            await pronto(app)
+            sql = app.screen.rascunho.sql_texto()
+            assert "ADD COLUMN role_id bigint" in sql and "UNIQUE (role_id)" in sql
+    asyncio.run(roteiro())
+
+
+def test_formulario_mostra_o_erro_e_nao_fecha(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            await _selecionar(piloto, app, "users")
+            await piloto.press("c")
+            await piloto.click("#por_no_rascunho")            # nome vazio
+            assert isinstance(app.screen, formularios.FormColuna)
+            assert str(app.screen.query_one("#erro").render()).strip()
+            assert app.screen.rascunho.operacoes == []
+    asyncio.run(roteiro())
+
+
+def test_tecla_sem_selecao_explica(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            for tecla in ("c", "l", "x", "space"):
+                await piloto.press(tecla)
+                assert app.screen is tela
+            assert len(app._notifications) >= 4
+    asyncio.run(roteiro())
+
+
+def test_nova_tabela_pelo_formulario(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa(modelo.Modelo("public", {}, {})))
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            await piloto.press("a")
+            await piloto.press(*"tags")
+            app.screen.query_one("#col_nome").value = "nome"
+            await piloto.click("#add_coluna")
+            await piloto.click("#por_no_rascunho")
+            await pronto(app)
+            sql = app.screen.rascunho.sql_texto()
+            assert "CREATE TABLE tags (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, nome text)" in sql
+            assert "tags" in [tb.nome for tb in app.screen.vista.tabelas.values()]
+    asyncio.run(roteiro())
+
+
+def test_menu_torna_obrigatoria_e_renomeia(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            await _selecionar(piloto, app, "users")
+            await piloto.press("down", "down")               # first_name
+            assert app.screen.selecao[0] == "coluna"
+            await piloto.press("space")
+            assert isinstance(app.screen, formularios.MenuSelecao)
+            app.screen.dismiss("obrigatoria")
+            await pronto(app)
+            assert isinstance(app.screen, formularios.FormSimples)
+            await piloto.click("#por_no_rascunho")
+            await pronto(app)
+            assert "SET NOT NULL" in app.screen.rascunho.sql_texto()
+    asyncio.run(roteiro())
+
+
+def test_apagar_tabela_com_dependentes_oferece_cascade(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    dep = checagem.Dependente("fk", 3, "users_roles", 1, "users_roles_role_id_fkey")
+
+    class Fonte(FonteFalsa):
+        def consulta(self):
+            return ConsultaFalsa(dependentes=[dep])
+
+    async def roteiro():
+        app = AppTeste(Fonte())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            await _selecionar(piloto, app, "roles")
+            await piloto.press("x")
+            assert isinstance(app.screen, formularios.ConfirmarApagar)
+            await pronto(app)
+            casc = app.screen.query_one("#cascata")
+            assert casc.display
+            casc.value = True
+            await piloto.pause(0.1)
+            await piloto.click("#por_no_rascunho")
+            await pronto(app)
+            assert "DROP TABLE roles CASCADE;" in app.screen.rascunho.sql_texto()
+    asyncio.run(roteiro())
+
+
+def test_painel_tira_operacao_e_pergunta_pelas_dependentes(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    r = rascunho.Rascunho(modelo_png())
+    c = modelo.Coluna(r.novo_id("c"), "apelido", "text")
+    r.acrescentar(rascunho.AdicionarColuna("t1", c))
+    r.acrescentar(rascunho.Obrigatoria("t1", c.id, True))
+    r.acrescentar(rascunho.Renomear("t2", None, "papeis"))
+    guardar.gravar_rascunho(5432, "teste", "public", r.para_dict())
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            await piloto.press("r")
+            assert tela.focused is tela.query_one("#canvas_sql")
+            await piloto.press("down", "down", "x")           # a terceira, sem dependentes
+            assert [op.tipo for op in tela.rascunho.operacoes] == ["adicionar_coluna", "obrigatoria"]
+            await piloto.press("up", "up", "x")               # a primeira: a segunda depende dela
+            assert isinstance(app.screen, formularios.ConfirmarTirar)
+            await piloto.click("#tirar_todas")
+            await pronto(app)
+            assert tela.rascunho.operacoes == []
+            assert guardar.ler_rascunho(5432, "teste", "public") is None
+            await piloto.press("escape")
+            assert app.screen is tela and tela.focused is None
+    asyncio.run(roteiro())
+
+
+def test_painel_marca_invalida_em_laranja(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.Renomear("t2", None, "papeis"))
+    guardar.gravar_rascunho(5432, "teste", "public", r.para_dict())
+    fonte = FonteFalsa()
+    del fonte.m.tabelas["t2"]
+    fonte.m.ligacoes.pop("k2")
+
+    async def roteiro():
+        app = AppTeste(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            assert app.screen.rascunho.invalidas == {0}
+            assert t("canvas.invalida") in app.screen.query_one("#canvas_sql").texto_plano()
+    asyncio.run(roteiro())
+
+
+def test_formulario_cabe_em_80x24_com_botoes_a_vista(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    r = rascunho.Rascunho(modelo_png())
+    for k in range(6):
+        r.acrescentar(rascunho.Renomear("t1", "t1.c2", "nome%d" % k))
+    guardar.gravar_rascunho(5432, "teste", "public", r.para_dict())
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(80, 24)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            assert tela.query_one("#canvas_sql").region.bottom <= 24
+            await piloto.press("a")
+            assert isinstance(app.screen, formularios.FormTabela)
+            for botao in ("#por_no_rascunho", "#cancelar"):
+                assert app.screen.query_one(botao).region.bottom <= 24
+            await piloto.press("escape")
+            assert app.screen is tela
+    asyncio.run(roteiro())
