@@ -62,7 +62,10 @@ fazer e o que pode dar errado; quem decide é a pessoa.
 - Terminal: alvo principal Konsole (mouse e cores exatas). Linux.
 - Interface em português e inglês: todo texto novo entra em `ratt/db/idioma.py` (`TEXTOS`, com
   `pt` e `en`). O SQL é sempre SQL.
-- Identificadores sempre montados com `psycopg.sql.Identifier`/`sql.SQL`, nunca por f-string.
+- Identificadores sempre passam por **uma única função de citação**, testada com nomes hostis,
+  que só põe aspas quando o PostgreSQL exige (a regra do `quote_ident`) — para o SQL gerado ser
+  legível como o de uma pessoa experiente (`ALTER TABLE users …`, não `ALTER TABLE "public"."users" …`).
+  Nunca um nome cru em f-string. As consultas ao catálogo continuam com `psycopg.sql`.
 - A tela atual (`ratt/db/tela.py`) continua funcionando igual; o canvas é acrescentado a ela.
 
 ## Abordagens consideradas
