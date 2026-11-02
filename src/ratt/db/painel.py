@@ -58,6 +58,7 @@ class PainelSQL(VerticalScroll):
         self.passos: list = []
         self.indice = 0
         self.falhou: Optional[int] = None   # a operação que o servidor recusou ao aplicar
+        self.mensagem: Optional[str] = None # o porquê, quando foi a contagem (aparece junto da marca)
         self._linhas: List[int] = []        # linha em que cada operação começa no texto desenhado
         self._plano = ""
 
@@ -67,9 +68,10 @@ class PainelSQL(VerticalScroll):
     def texto_plano(self) -> str:
         return self._plano
 
-    def atualizar(self, passos, falhou: Optional[int] = None) -> None:
+    def atualizar(self, passos, falhou: Optional[int] = None, mensagem: Optional[str] = None) -> None:
         self.passos = passos
         self.falhou = falhou
+        self.mensagem = mensagem
         self.indice = max(0, min(self.indice, len(passos) - 1))
         self._desenhar()
 
@@ -95,7 +97,7 @@ class PainelSQL(VerticalScroll):
                 codigo = f"-- {n + 1}. {t('canvas.invalida')}"
                 partes.append(Text(codigo, style=Style(color=COR["laranja"], bgcolor=fundo)))
             if n == self.falhou:
-                marca = t("canvas.falhou")
+                marca = t("canvas.falhou") + (f" — {self.mensagem}" if self.mensagem else "")
                 partes.append(Text(marca, style=Style(color=COR["laranja"], bold=True)))
                 codigo += "\n" + marca
             plano.append(codigo)
@@ -332,7 +334,8 @@ class AcoesRascunho:
         if codigo != 0:
             self.sessao.concluir(codigo, indice, ensaio, texto)
             chave = "canvas.ensaio_falhou" if ensaio else "canvas.aplicar_falhou"
-            self.notify(t(chave if self.sessao.falha is not None else chave + "_sem_marca"), severity="error")
+            texto = self.sessao.mensagem_falha or t(chave if self.sessao.falha is not None else chave + "_sem_marca")
+            self.notify(texto, severity="error")
             return
         if ensaio:
             self.sessao.concluir(codigo, indice, ensaio, texto)

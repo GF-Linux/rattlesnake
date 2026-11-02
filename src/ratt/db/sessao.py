@@ -31,9 +31,13 @@ class Aviso(str):
         return {"severity": self.severidade} if self.tempo is None else {"severity": self.severidade, "timeout": self.tempo}
 
 
-def executar_rascunho(r: _rascunho.Rascunho, conexao, arquivo: Path, ensaio: bool, cabecalho: str) -> Tuple[int, Optional[int]]:
+def executar_rascunho(r: _rascunho.Rascunho, conexao, arquivo: Path, ensaio: bool, cabecalho: str,
+                      mensagens: Optional[List[str]] = None) -> Tuple[int, Optional[int]]:
     """Grava o SQL do rascunho em `arquivo` e o roda com o mesmo executor do `ratt db run`.
-    Devolve (código, índice da operação que falhou ou None). O cabeçalho entra no texto e na conta das linhas."""
+    Devolve (código, índice da operação que falhou ou None). O cabeçalho entra no texto e na conta das linhas.
+    Cada operação de dados com `vista` confere as linhas que pegou com as que a pessoa viu: no ensaio mostra
+    "pegou X (você viu Y)"; ao aplicar, se o banco mudou (e nenhuma operação anterior mexe na mesma tabela, que
+    explicaria a diferença) desfaz tudo e o texto vai para `mensagens`."""
     from ratt.db import rodar
     arquivo.parent.mkdir(parents=True, exist_ok=True)
     arquivo.write_text(r.sql_texto(cabecalho), encoding="utf-8")
@@ -44,7 +48,27 @@ def executar_rascunho(r: _rascunho.Rascunho, conexao, arquivo: Path, ensaio: boo
         if indice >= 0:
             falhou.append(indice)
 
-    codigo = rodar.executar(arquivo, conexao, ensaio=ensaio, ao_falhar=ao_falhar)
+    def conferir(comando, linhas: int, ensaio_: bool) -> Optional[str]:
+        i = r.operacao_da_linha(comando.linha, cabecalho)
+        op = r.operacoes[i] if 0 <= i < len(r.operacoes) else None
+        vista = getattr(op, "vista", None)
+        if vista is None:
+            return None
+        if ensaio_:
+            print(f"   {t('dados.pegou_viu', x=linhas, y=vista)}")
+            return None
+        if linhas == vista:
+            return None
+        tabela = getattr(op, "tabela", None)
+        if any(tabela == getattr(o, "tabela", None) or tabela in o.refere() for o in r.operacoes[:i]):
+            print(f"   {t('dados.pegou_viu', x=linhas, y=vista)}")     # a diferença é do próprio rascunho
+            return None
+        texto = t("dados.banco_mudou", x=linhas, y=vista)
+        if mensagens is not None:
+            mensagens.append(texto)
+        return texto
+
+    codigo = rodar.executar(arquivo, conexao, ensaio=ensaio, ao_falhar=ao_falhar, conferir=conferir)
     return codigo, (falhou[0] if falhou else None)
 
 
@@ -53,6 +77,7 @@ class SessaoRascunho:
         self.porta, self.banco, self.esquema = porta, banco, esquema
         self.rascunho = _rascunho.Rascunho(Modelo(esquema))
         self.falha: Optional[int] = None    # operação que falhou ao aplicar; some na próxima mudança do rascunho
+        self.mensagem_falha: Optional[str] = None   # o porquê, quando a falha foi a contagem; some junto com `falha`
         self.aplicando = False              # entre o commit e a releitura: ninguém mexe no rascunho
         self.sem_gravar = False             # não deu para LER o rascunho deste schema: gravar seria por cima do que não se viu
         self.contagens: Dict[str, int] = {}     # linhas de cada tabela apagada, contadas ao pôr no rascunho
@@ -179,7 +204,7 @@ class SessaoRascunho:
 
     def mudou(self) -> None:
         """Uma edição entrou ou saiu do rascunho (por estes métodos ou direto em `rascunho`): grava e avisa."""
-        self.falha = None
+        self.falha = self.mensagem_falha = None
         self.persistir()
         self._avisar_ouvintes()
 
@@ -209,8 +234,10 @@ class SessaoRascunho:
         o mesmo que entrou no SQL que a pessoa confirmou (sem ele, o de agora)."""
         if cabecalho is None:
             cabecalho = self.cabecalho()
-        codigo, indice = executar_rascunho(self.rascunho, conexao, arquivo, ensaio, cabecalho)
-        return codigo, indice, None
+        mensagens: List[str] = []
+        codigo, indice = executar_rascunho(self.rascunho, conexao, arquivo, ensaio, cabecalho, mensagens)
+        self.mensagem_falha = mensagens[0] if codigo != 0 and mensagens else None
+        return codigo, indice, self.mensagem_falha
 
     def concluir(self, codigo: int, indice: Optional[int], ensaio: bool, texto: str) -> None:
         """O que o aplicar decidiu. Falhou: marca a operação. Ensaio que deu certo: tira a marca. Aplicado: o banco
@@ -219,10 +246,12 @@ class SessaoRascunho:
         até a tela trazer o catálogo novo."""
         if codigo != 0:
             self.falha = indice if indice is not None and indice >= 0 else None
+            if self.falha is None:
+                self.mensagem_falha = None
             self._avisar_ouvintes()
             return
         if ensaio:
-            self.falha = None
+            self.falha = self.mensagem_falha = None
             self._avisar_ouvintes()
             return
         try:
@@ -231,7 +260,7 @@ class SessaoRascunho:
         except OSError as e:
             self._avisar(Aviso(t("canvas.erro_gravar", erro=e), "error"))
         self.rascunho = _rascunho.Rascunho(self.rascunho.modelo())
-        self.falha, self.contagens = None, {}
+        self.falha, self.mensagem_falha, self.contagens = None, None, {}
         self.persistir()
         self.aplicando = True
         self._avisar_ouvintes()

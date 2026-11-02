@@ -3,6 +3,7 @@ import getpass
 import os
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -71,11 +72,17 @@ def banco():
     criado = False
     try:
         _limpar_sobras(admin)
-        try:
-            admin.execute('CREATE DATABASE "%s"' % nome)
-            criado = True
-        except psycopg.Error:
-            pytest.skip("sem permissão de criar banco")
+        erro = None
+        for tentativa in range(2):
+            try:
+                admin.execute('CREATE DATABASE "%s"' % nome)
+                criado = True
+                break
+            except psycopg.Error as e:
+                erro = e
+                time.sleep(0.5)
+        if not criado:
+            pytest.skip("não deu para criar o banco de teste: %s: %s" % (type(erro).__name__, str(erro).strip()))
         conexao, _ = acesso.entrar(porta, usuario, nome)
         if conexao is None:
             pytest.skip("não entrou no banco de teste")

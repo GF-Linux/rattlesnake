@@ -436,7 +436,7 @@ class TelaCanvas(AcoesRascunho, Screen):
         self._versao += 1
         if self.selecao and not self._existe(self.selecao):
             self.selecao = None
-        self.query_one(PainelSQL).atualizar(self.rascunho.passos(), self.sessao.falha)
+        self.query_one(PainelSQL).atualizar(self.rascunho.passos(), self.sessao.falha, self.sessao.mensagem_falha)
         self.redesenhar()
         if primeira and self.vista.tabelas:
             self._rolar_para_caixas()

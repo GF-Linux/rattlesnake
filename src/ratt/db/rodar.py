@@ -283,11 +283,13 @@ def _mostrar_erro(erro, comando, sql, arquivo):
             print(c(f"   {extra}", "cinza"))
 
 
-def executar(arquivo, conexao, ensaio=False, autocommit=False, ao_falhar=None):
+def executar(arquivo, conexao, ensaio=False, autocommit=False, ao_falhar=None, conferir=None):
     """Roda o arquivo na conexão. Devolve 0 se tudo deu certo, 1 se algum comando falhou.
 
     `ao_falhar(comando)` é chamado com o `Comando` que falhou, antes do rollback: o canvas descobre assim
-    qual operação do rascunho quebrou. O tratador de avisos sai da conexão no fim — ela pode rodar outro arquivo."""
+    qual operação do rascunho quebrou. `conferir(comando, linhas, ensaio)` é chamado depois de cada comando que deu
+    certo, com as linhas que ele pegou: no ensaio só imprime (o retorno não aborta); ao aplicar, um texto devolvido
+    é o erro do comando — desfaz tudo e devolve 1. O tratador de avisos sai da conexão no fim — ela pode rodar outro arquivo."""
     sql = arquivo.read_text(encoding="utf-8")
     comandos = dividir(sql)
     sql_de_verdade = [cmd for cmd in comandos if not cmd.meta]
@@ -299,12 +301,12 @@ def executar(arquivo, conexao, ensaio=False, autocommit=False, ao_falhar=None):
     tratador = lambda d: avisos.append(d.message_primary)
     conexao.add_notice_handler(tratador)
     try:
-        return _rodar_comandos(arquivo, conexao, sql, comandos, sql_de_verdade, avisos, ensaio, ao_falhar)
+        return _rodar_comandos(arquivo, conexao, sql, comandos, sql_de_verdade, avisos, ensaio, ao_falhar, conferir)
     finally:
         conexao.remove_notice_handler(tratador)
 
 
-def _rodar_comandos(arquivo, conexao, sql, comandos, sql_de_verdade, avisos, ensaio, ao_falhar):
+def _rodar_comandos(arquivo, conexao, sql, comandos, sql_de_verdade, avisos, ensaio, ao_falhar, conferir=None):
     import psycopg
     total, feitos = len(comandos), 0
     for numero, comando in enumerate(comandos, 1):
@@ -329,6 +331,15 @@ def _rodar_comandos(arquivo, conexao, sql, comandos, sql_de_verdade, avisos, ens
                         print(tabela(colunas, tipos, linhas, total_linhas))
                     else:
                         print(c(f"   {t('run.nenhuma_linha')}", "cinza"))
+                recusa = conferir(comando, cur.rowcount, ensaio) if conferir else None
+            if recusa and not ensaio:
+                print(c(f"   ✗ {recusa}", "laranja", "negrito"))
+                if ao_falhar:
+                    ao_falhar(comando)
+                if not conexao.autocommit:
+                    conexao.rollback()
+                    print(c(f"   ↺ {t('run.desfeitos')}", "amarelo"))
+                return 1
             feitos += 1
         except psycopg.Error as erro:
             _cabecalho(numero, total, comando, c("✗", "laranja", "negrito"))

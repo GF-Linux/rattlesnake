@@ -660,3 +660,75 @@ def test_cascata_apagando_direto_numa_particao(banco):
         res = c.cascata("public", tabela, onde)
         assert _cascatas(res) == _real(banco, f"public.{tabela}", onde, ["public.anexo"]), (tabela, onde, res)
     assert c.cascata("public", "ev_2025", "id = 1") == [("public.anexo", "CASCADE", 2)]
+
+
+# ── Task 6: o aplicar confere as contagens ──
+
+def sessao_de_teste(r):
+    from ratt.db import sessao
+    s = sessao.SessaoRascunho(5432, "teste", "public")
+    s.rascunho = r
+    return s
+
+
+def _apagar_g(r, vista):
+    t = r.base.por_nome("pessoas")
+    nome = t.colunas[1].id
+    r.acrescentar(rascunho.Apagar(t.id, filtro.Filtro([filtro.Condicao(nome, "comeca", ["G"])]), vista=vista))
+    return t, nome
+
+
+def test_aplicar_desfaz_quando_o_banco_mudou(banco, tmp_path):
+    banco.execute(PESSOAS_SQL)
+    r = rascunho.Rascunho(catalogo.modelo(banco, "public"))
+    _apagar_g(r, 2)
+    banco.execute("INSERT INTO public.pessoas (nome) VALUES ('Gil')")          # o banco mudou depois
+    s = sessao_de_teste(r)
+    con = psycopg.connect(banco.info.dsn)
+    codigo, indice, msg = s.aplicar(con, tmp_path / "a.sql", ensaio=False)
+    con.close()
+    assert (codigo, indice) == (1, 0) and "3" in msg and "2" in msg
+    assert banco.execute("SELECT count(*) FROM public.pessoas WHERE nome LIKE 'G%'").fetchone()[0] == 3
+
+
+def test_com_operacao_anterior_na_mesma_tabela_nao_bloqueia(banco, tmp_path):
+    banco.execute(PESSOAS_SQL)
+    r = rascunho.Rascunho(catalogo.modelo(banco, "public"))
+    t = r.base.por_nome("pessoas")
+    r.acrescentar(rascunho.Inserir(t.id, {t.colunas[1].id: "Gil"}))
+    _apagar_g(r, 2)
+    s = sessao_de_teste(r)
+    con = psycopg.connect(banco.info.dsn)
+    codigo, indice, msg = s.aplicar(con, tmp_path / "a.sql", ensaio=False)
+    con.close()
+    assert codigo == 0 and msg is None
+    assert banco.execute("SELECT count(*) FROM public.pessoas WHERE nome LIKE 'G%'").fetchone()[0] == 0
+
+
+def test_ensaio_mostra_pegou_viu_e_nao_aborta(banco, tmp_path, capsys):
+    banco.execute(PESSOAS_SQL)
+    r = rascunho.Rascunho(catalogo.modelo(banco, "public"))
+    _apagar_g(r, 1)
+    s = sessao_de_teste(r)
+    con = psycopg.connect(banco.info.dsn)
+    codigo, indice, msg = s.aplicar(con, tmp_path / "a.sql", ensaio=True)
+    con.close()
+    saida = capsys.readouterr().out
+    assert codigo == 0 and "pegou 2 (você viu 1)" in saida
+
+
+def test_executar_sem_conferir_igual(banco, tmp_path, capsys):
+    from ratt.db import rodar
+    arq = tmp_path / "s.sql"
+    arq.write_text("DELETE FROM public.pessoas WHERE nome LIKE 'G%';")
+    con = psycopg.connect(banco.info.dsn)
+    banco.execute(PESSOAS_SQL)
+    import re
+    sem_ms = lambda x: re.sub(r"\d+ ms", "N ms", x)
+    assert rodar.executar(arq, con, ensaio=True) == 0
+    antes = sem_ms(capsys.readouterr().out)
+    assert "pegou" not in antes
+    chamadas = []
+    assert rodar.executar(arq, con, ensaio=True, conferir=lambda c, n, e: chamadas.append(n)) == 0
+    assert sem_ms(capsys.readouterr().out) == antes and chamadas == [2]
+    con.close()
