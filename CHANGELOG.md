@@ -40,11 +40,12 @@ vê antes de responder `[s/N]`.
     qualquer schema e em cadeia: as filhas apagadas, as que ficam vazias e as que impedem o
     apagar. Quando a conta não fecha, diz "pelo menos N". Sem filtro, pede uma confirmação a
     mais.
-  - **Duplicatas**: `D` apaga as repetidas de uma ou mais colunas e mantém uma por grupo — a de
-    menor chave, a de maior, ou as mais recentes por uma coluna de data. Linhas com a coluna
+  - **Duplicatas**: `D` apaga as repetidas de uma ou mais colunas e mantém por grupo a de menor
+    chave, a de maior, ou as mais recentes por uma coluna de data — você escolhe quantas ficam
+    (por padrão, uma). Linhas com a coluna
     vazia não contam como repetidas. Respeita o filtro atual.
   - **A contagem vem antes**: alterar, apagar e duplicatas só entram no rascunho depois que a
-    contagem chegou, e o botão espera por ela. Se o banco mudar enquanto o formulário está
+    contagem chegou (ou avisou que não deu para contar), e o botão espera por ela. Se o banco mudar enquanto o formulário está
     aberto, a contagem é refeita.
   - **Um rascunho só**: o canvas e a tela Dados dividem o mesmo rascunho. Criar a tabela no
     canvas e inserir linhas nela pela tela Dados vai tudo numa transação, na ordem em que foi
@@ -52,7 +53,8 @@ vê antes de responder `[s/N]`.
     painel do SQL (nele, `x` tira a operação), igual ao canvas.
   - **O aplicar confere**: cada alterar, apagar e duplicatas guarda quantas linhas você viu.
     No ensaio, cada um mostra "pegou X, você viu Y". No aplicar, se o número for outro, tudo é
-    desfeito e a operação fica marcada: o banco mudou desde que você olhou.
+    desfeito e a operação fica marcada: o banco mudou desde que você olhou — salvo quando uma
+    operação anterior do próprio rascunho mexe na mesma tabela; aí só mostra "pegou X (você viu Y)".
 - corrigido (da 0.9.0): ligar uma coluna nova ou criar um N:N com uma chave primária de tipo
   próprio (enum, domínio) agora funciona; mover uma caixa no modo foco guarda a posição; `F`,
   num schema grande, pergunta antes e desenha em segundo plano, sem travar a tela.

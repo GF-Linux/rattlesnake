@@ -157,16 +157,16 @@ filtrar, alterar e apagar linhas, sempre vendo o SQL que sai.
 
 ```
 ratt db · estudos › public.pessoas · Dados · rascunho: 2
-filtro: [ nome  começa com  "G" ]  E  [ nascimento  mês  é maior ou igual a  junho ]
+filtro: nome começa com G e mês(nascimento) é maior ou igual a junho   (f condição · F limpa · t texto · o E/OU · ⌫ tira a última)
 ── 3 de 454 linhas ──────────────────────────────────────────────────────────────────
  id    nome        nascimento   email
  int8  text        date         text
  12    Gabriel     1990-07-14   gab@x.com
  87    Gláucia     1985-06-02   ∅
  203   Guilherme   1992-11-30   gui@x.com
-⚠ 3 linhas com nascimento vazio (∅) ficam de fora: vazio não é "≥ junho" nem "< junho"
+! 3 linha(s) com nascimento vazia ficam de fora
 ┌ SQL ─────────────────────────────────────────────────────────────────────────────┐
-│ -- o filtro:  SELECT … FROM public.pessoas WHERE nome ILIKE 'G%' AND …           │
+│ -- o filtro:  SELECT … FROM public.pessoas WHERE nome ILIKE 'G%' … ORDER BY id;  │
 │ -- 1. inserir em pessoas                                                         │
 │ INSERT INTO public.pessoas (nome, email) VALUES ('Ana', 'ana@x.com');            │
 └──────────────────────────────────────────────────────────────────────────────────┘
@@ -180,7 +180,8 @@ e `Esc` volta.
 
 **A grade mostra o banco como está; o que está no rascunho aparece depois de aplicar.** O
 rascunho é o mesmo do canvas, e o aplicar confere: se um alterar ou apagar pegar um número de
-linhas diferente do que você viu, tudo é desfeito e a operação é marcada.
+linhas diferente do que você viu, tudo é desfeito e a operação é marcada — salvo quando uma
+operação anterior do próprio rascunho mexe na mesma tabela (aí só mostra "pegou X, você viu Y").
 
 Funciona nas famílias Debian/Ubuntu, Fedora/RHEL e Arch; `ratt db status` diz o que falta e
 `ratt db reset` volta ao antes do setup (com backup e a trava do nome da máquina).
