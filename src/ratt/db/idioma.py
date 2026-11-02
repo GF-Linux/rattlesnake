@@ -671,6 +671,7 @@ ratt db user passwd [name]            changes a password (no name: yours)
     "canvas.m.opcional": {"pt": "tornar opcional", "en": "make optional"},
     "canvas.m.unica": {"pt": "tornar única", "en": "make unique"},
     "canvas.m.nao_unica": {"pt": "tornar não única", "en": "make not unique"},
+    "canvas.e.sumiu": {"pt": "o que você selecionou não existe mais no banco", "en": "what you selected no longer exists in the database"},
     "canvas.e.nome_vazio": {"pt": "dê um nome", "en": "give it a name"},
     "canvas.e.nome_existe": {"pt": "já existe «{nome}»", "en": "«{nome}» already exists"},
     "canvas.e.tipo": {"pt": "tipo inválido: {tipo}", "en": "invalid type: {tipo}"},

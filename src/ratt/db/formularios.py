@@ -203,6 +203,10 @@ class FormBase(ModalScreen):
             self.rascunho.proximo = guardado
             self.query_one("#erro", Static).update(Text(str(e), style=COR["laranja"]))
             return
+        except _ERROS_SQL:                  # a tabela ou coluna sumiu do banco com o formulário aberto
+            self.rascunho.proximo = guardado
+            self.query_one("#erro", Static).update(Text(t("canvas.e.sumiu"), style=COR["laranja"]))
+            return
         self.dismiss(op)
 
 

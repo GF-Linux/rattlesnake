@@ -292,7 +292,7 @@ class PainelSQL(VerticalScroll):
         self._desenhar()
 
     def on_click(self, evento: events.Click) -> None:
-        y = evento.y + self.scroll_offset.y - 0
+        y = evento.y        # já inclui a rolagem do painel
         for n in range(len(self._linhas) - 1, -1, -1):
             if self._linhas[n] <= y:
                 self.indice = n
@@ -430,10 +430,10 @@ class TelaCanvas(Screen):
         self._montar(primeira)
 
     def _abrir_rascunho(self, m: _modelo.Modelo) -> _rascunho.Rascunho:
-        dados = guardar.ler_rascunho(self.fonte.porta, self.fonte.banco, self.esquema)
-        if dados is None:
-            return _rascunho.Rascunho(m)
         try:
+            dados = guardar.ler_rascunho(self.fonte.porta, self.fonte.banco, self.esquema)
+            if dados is None:
+                return _rascunho.Rascunho(m)
             r = _rascunho.Rascunho.de_dict(dados, m)
         except _rascunho.RascunhoCorrompido:
             try:
@@ -709,6 +709,9 @@ class TelaCanvas(Screen):
         if self.selecao[0] == "ligacao":
             self.notify(t("canvas.sem_menu"))
             return
+        if self.selecao[1] not in v.tabelas or (self.selecao[0] == "coluna" and v.tabelas[self.selecao[1]].coluna(self.selecao[2]) is None):
+            self.notify(t("canvas.e.sumiu"), severity="warning")
+            return
         tab = v.tabelas[self.selecao[1]]
         if self.selecao[0] == "tabela":
             nome, itens = tab.nome, [("renomear", t("canvas.m.renomear"))]
@@ -726,8 +729,12 @@ class TelaCanvas(Screen):
             return
         tid, cid = sel[1], (sel[2] if sel[0] == "coluna" else None)
         r, f = self.rascunho, self.fonte
-        if chave == "renomear":
+        try:
             atual = r.vista().tabelas[tid].nome if cid is None else r.vista().tabelas[tid].coluna(cid).nome
+        except (KeyError, AttributeError):
+            self.notify(t("canvas.e.sumiu"), severity="warning")
+            return
+        if chave == "renomear":
             form = formularios.FormSimples(r, f, t("canvas.f.renomear", nome=nome),
                                            lambda novo: _rascunho.Renomear(tid, cid, novo), valor=atual)
         else:

@@ -1493,3 +1493,86 @@ def test_formulario_cabe_em_80x24_com_botoes_a_vista(monkeypatch, tmp_path):
             await piloto.press("escape")
             assert app.screen is tela
     asyncio.run(roteiro())
+
+
+# ---- rodada de correções da Task 9 ---------------------------------------------------------------------------
+
+def test_json_truncado_vai_para_o_lado_e_nunca_se_perde(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    pasta = guardar.pasta(5432, "teste")
+    pasta.mkdir(parents=True)
+    bytes_originais = '{"operacoes": [{"tipo": "renomear", "tabela": "t1", "coluna": null, "novo": "x"}], "proximo": 1'
+    (pasta / "rascunho-public.json").write_text(bytes_originais)
+
+    async def roteiro():
+        fonte = FonteFalsa()
+        app = AppTeste(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            assert app.screen.rascunho.operacoes == []
+            fonte.sig = 2
+            app.screen.vigiar()
+            await pronto(app)
+            await _selecionar(piloto, app, "users")
+            await piloto.press("c")
+            await piloto.press(*"birth")
+            await piloto.click("#por_no_rascunho")
+            await pronto(app)
+    asyncio.run(roteiro())
+    guardados = list(pasta.glob("rascunho-public.corrompido-*.json"))
+    assert len(guardados) == 1 and guardados[0].read_text() == bytes_originais
+
+
+def test_json_que_nao_e_objeto_tambem_e_separado(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    pasta = guardar.pasta(5432, "teste")
+    pasta.mkdir(parents=True)
+    (pasta / "rascunho-public.json").write_text("[1, 2]")
+    with pytest.raises(rascunho.RascunhoCorrompido):
+        guardar.ler_rascunho(5432, "teste", "public")
+    assert guardar.ler_rascunho(5432, "teste", "outro") is None          # sem arquivo continua None
+
+
+def test_formulario_sobrevive_a_tabela_que_some(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        fonte = FonteFalsa()
+        app = AppTeste(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            await _selecionar(piloto, app, "profiles")
+            await piloto.press("c")
+            await piloto.press(*"x")
+            form = app.screen
+            del fonte.m.tabelas["t4"]
+            fonte.sig = 2
+            tela = [s for s in app.screen_stack if isinstance(s, canvas.TelaCanvas)][0]
+            tela.vigiar()
+            await pronto(app)
+            await piloto.click("#por_no_rascunho")
+            assert app.screen is form and form.rascunho.operacoes == []
+            assert str(form.query_one("#erro").render()).strip()
+    asyncio.run(roteiro())
+
+
+def test_clique_no_painel_escolhe_a_operacao_certa_com_rolagem(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    r = rascunho.Rascunho(modelo_png())
+    for k in range(8):
+        r.acrescentar(rascunho.Renomear("t1", "t1.c2", "nome%d" % k))
+    guardar.gravar_rascunho(5432, "teste", "public", r.para_dict())
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            painel = app.screen.query_one(canvas.PainelSQL)
+            assert painel.max_scroll_y > 0
+            painel.scroll_to(y=painel.max_scroll_y, animate=False)
+            await piloto.pause(0.1)
+            topo = painel.scroll_offset.y
+            esperada = max(n for n, ln in enumerate(painel._linhas) if ln <= topo)
+            await piloto.click("#canvas_sql", offset=(5, painel.content_region.y - painel.region.y))
+            assert painel.indice == esperada
+    asyncio.run(roteiro())

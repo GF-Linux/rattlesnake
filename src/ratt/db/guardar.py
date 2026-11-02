@@ -63,8 +63,25 @@ def _arquivo_rascunho(porta: int, banco: str, esquema: str) -> Path:
 
 
 def ler_rascunho(porta: int, banco: str, esquema: str) -> Optional[dict]:
-    dados = _ler_json(_arquivo_rascunho(porta, banco, esquema))
-    return dados if isinstance(dados, dict) else None
+    """O rascunho gravado, ou None se não há arquivo. Arquivo que existe mas não é um objeto JSON legível levanta
+    `RascunhoCorrompido`: quem chama o põe de lado, em vez de tratá-lo como vazio e depois apagá-lo."""
+    from ratt.db.rascunho import RascunhoCorrompido
+    arquivo = _arquivo_rascunho(porta, banco, esquema)
+    try:
+        texto = arquivo.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except UnicodeDecodeError as e:
+        raise RascunhoCorrompido(f"rascunho ilegível: {e}") from e
+    except OSError:
+        return None
+    try:
+        dados = json.loads(texto)
+    except ValueError as e:
+        raise RascunhoCorrompido(f"rascunho ilegível: {e}") from e
+    if not isinstance(dados, dict):
+        raise RascunhoCorrompido("rascunho ilegível: esperava um objeto JSON")
+    return dados
 
 
 def gravar_rascunho(porta: int, banco: str, esquema: str, dados: Optional[dict]) -> None:
