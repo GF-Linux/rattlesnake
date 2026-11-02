@@ -501,3 +501,78 @@ def test_coluna_nova_com_padrao_deduz_repetidos():
     assert uma == []
     lig = modelo.Ligacao(r.novo_id("k"), "t4", (c.id,), "t1", ("t1.c1",), "x")
     assert [a.chave for a in checagem.avisos_da_operacao(rascunho.Ligar(lig), r, ConsultaFalsa())] == ["chk.indeterminado"]
+
+
+# ---- Task 6: o desenhista ----------------------------------------------------------------------------------
+from ratt.db import desenho
+
+
+def test_caixa_do_users():
+    m = modelo_png()
+    d = desenho.desenhar(m, {"t1": (0, 0)})
+    assert d.texto().splitlines()[:3] == [
+        "┌─ users ───────────────┐",
+        "│ PK id          bigint │",
+        "│    first_name    text │",
+    ]
+
+
+def test_estado_do_rascunho_no_desenho():
+    r = rascunho.Rascunho(modelo_png())
+    c = modelo.Coluna(r.novo_id("c"), "birth", "date")
+    r.acrescentar(rascunho.AdicionarColuna("t1", c))
+    d = desenho.desenhar(r.vista(), {"t1": (0, 0)})
+    linha = d.texto().splitlines()[6]
+    assert linha.startswith("│+   birth") and d.papel_em(5, 6) == "novo"
+
+
+def test_posicionar_sem_sobrepor():
+    m = modelo_png()
+    pos = desenho.posicionar(m, {})
+    caixas = [(x, y, *desenho.tamanho_caixa(m.tabelas[i])) for i, (x, y) in pos.items()]
+    for i, a in enumerate(caixas):
+        for b in caixas[i + 1:]:
+            assert a[0] + a[2] + 1 <= b[0] or b[0] + b[2] + 1 <= a[0] or a[1] + a[3] + 1 <= b[1] or b[1] + b[3] + 1 <= a[1]
+    assert pos["t1"][0] < pos["t3"][0]          # users (referenciada) à esquerda de users_roles
+
+
+def test_posicao_guardada_e_respeitada():
+    pos = desenho.posicionar(modelo_png(), {"t2": (100, 50)})
+    assert pos["t2"] == (100, 50)
+
+
+def test_onde():
+    d = desenho.desenhar(modelo_png(), {"t1": (0, 0)})
+    assert d.onde(3, 0) == ("tabela", "t1")
+    assert d.onde(5, 2) == ("coluna", "t1", "t1.c2")
+    assert d.onde(60, 30) is None
+
+
+def test_tabela_larga_e_nomes_longos():
+    cols = [modelo.Coluna(f"t9.c{i}", f"coluna_numero_{i}", "timestamp with time zone") for i in range(30)]
+    cols.append(modelo.Coluna("t9.c99", "n" * 60, "character varying(255)"))
+    t = modelo.Tabela("t9", "public", "x" * 60, cols)
+    m = modelo.Modelo("public", {"t9": t}, {})
+    w, h = desenho.tamanho_caixa(t)
+    assert w == desenho.LARGURA_MAX and h == 33
+    d = desenho.desenhar(m, {"t9": (0, 0)})
+    assert all(len(l) <= desenho.LARGURA_MAX for l in d.texto().splitlines())
+    assert "timestamptz" in d.texto() and "…" in d.texto()
+    assert d.onde(5, 31) == ("coluna", "t9", "t9.c99")
+
+
+def test_schema_vazio_desenha_nada():
+    d = desenho.desenhar(modelo.Modelo("public", {}, {}), {})
+    assert d.texto() == "" and d.onde(0, 0) is None
+
+
+def test_aviso_particoes_selecao_e_fora_da_grade():
+    m = modelo_png()
+    m.tabelas["t1"].particoes = 55
+    d = desenho.desenhar(m, {"t1": (2, 1)}, avisos={"t1": "aviso", "t1.c2": "aviso"}, selecao=("coluna", "t1", "t1.c2"))
+    linhas = d.texto().splitlines()
+    assert "▤55" in linhas[1] and linhas[1].endswith("⚠")
+    assert linhas[3].endswith("⚠") and d.papel_em(6, 3) == "selecao"
+    x, y, w, h = d.caixas["t1"]
+    assert d.papel_em(x + w, 1) == "aviso" and d.largura == x + w + 1
+    assert d.trechos(-1) == [] and d.trechos(99) == [] and d.papel_em(-1, 0) == "" and d.onde(-1, -1) is None
