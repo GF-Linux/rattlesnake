@@ -30,7 +30,8 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Static
 
 from ratt.db import catalogo, checagem, filtro, formularios, modelo as _modelo, rascunho as _rascunho, sessao
-from ratt.db.formularios_dados import FonteTravada, FormCondicao, FormInserir
+from ratt.db.formularios_dados import (ConfirmarApagarLinhas, FonteTravada, FormAlterar, FormCondicao, FormDuplicatas,
+                                      FormInserir)
 from ratt.db.grade_dados import Grade, condicao_da_celula, modelo_da_view, select_texto, texto_contagem
 from ratt.db.idioma import t
 from ratt.db.painel import AcoesRascunho, PainelSQL, PerguntarNome
@@ -38,7 +39,7 @@ from ratt.db.tela import COR, POR_PAGINA, _celula
 
 _NIVEL = {"info": ("·", COR["cinza"]), "atencao": ("!", COR["amarelo"]), "impede": ("✖", COR["laranja"])}
 _SO_VER = ("f", "v", "m")               # relkind das relações que só se veem: estrangeira, view, materializada
-_ACOES_DO_RASCUNHO = ("aplicar", "ensaio", "exportar", "desfazer", "inserir")
+_ACOES_DO_RASCUNHO = ("aplicar", "ensaio", "exportar", "desfazer", "inserir", "alterar", "apagar", "duplicatas")
 
 
 def _primeira_linha(erro: Exception) -> str:
@@ -49,6 +50,9 @@ def _primeira_linha(erro: Exception) -> str:
 class TelaDados(AcoesRascunho, Screen):
     BINDINGS = [
         Binding("i", "inserir", t("dados.k.inserir")),
+        Binding("m", "alterar", t("dados.k.alterar")),
+        Binding("x", "apagar", t("dados.k.apagar")),           # com o foco no painel, o x dele (tirar) vale antes
+        Binding("D,shift+d", "duplicatas", t("dados.k.duplicatas")),
         Binding("f", "filtro", t("dados.k.filtro")),
         Binding("F,shift+f", "limpar", t("dados.k.limpar")),
         Binding("t", "texto", t("dados.k.texto")),
@@ -650,6 +654,40 @@ class TelaDados(AcoesRascunho, Screen):
             self.notify(t("canvas.e.sumiu"), severity="warning")
             return
         self.app.push_screen(FormInserir(self.sessao, FonteTravada(self.fonte, self._trava), self.tabela_id))
+
+    def action_alterar(self) -> None:
+        self._sobre_as_filtradas(FormAlterar)
+
+    def action_apagar(self) -> None:
+        self._sobre_as_filtradas(ConfirmarApagarLinhas)
+
+    def action_duplicatas(self) -> None:
+        self._sobre_as_filtradas(FormDuplicatas)
+
+    def _sobre_as_filtradas(self, formulario) -> None:
+        """m/x/D: o formulário sobre as linhas do filtro. Sem filtro, antes a pergunta "todas as N linhas" (com o
+        foco no cancelar)."""
+        if not self._pronto():
+            return
+        if self._tab_base() is None:
+            self.notify(t("dados.so_depois_tabela", tabela=self._nome_tabela()), severity="warning")
+            return
+        try:
+            self._onde()
+        except ValueError as e:
+            self.notify(str(e), severity="warning")
+            return
+
+        def abrir(sim: bool = True) -> None:
+            if sim:
+                self.app.push_screen(formulario(self.sessao, FonteTravada(self.fonte, self._trava), self.tabela_id,
+                                                self.filtro))
+        if not self.filtro.vazio():
+            abrir()
+            return
+        n, tabela = self.total_tabela, self._nome_tabela()
+        pergunta = t("dados.todas", n=n, tabela=tabela) if n is not None else t("dados.todas_sem_n", tabela=tabela)
+        self.app.push_screen(formularios.Confirmar(pergunta, [], t("dados.todas_sim"), foco="nao"), abrir)
 
     def depois_de_aplicar(self, esquema: str, nomes: Dict[str, str]) -> None:
         """O banco gravou: relê o catálogo (uma tabela criada pelo rascunho passa a ter o id do banco)."""

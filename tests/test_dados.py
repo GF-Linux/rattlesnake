@@ -13,7 +13,7 @@ from ratt.db import checagem, filtro, guardar, rascunho, sessao
 from ratt.db.modelo import Coluna, Ligacao, Modelo, Tabela
 from ratt.db.idioma import t
 
-from test_canvas import AppTeste, ConsultaFalsa, FonteFalsa, modelo_png, pronto
+from test_canvas import AppTeste, ConsultaFalsa, FonteFalsa, contado, modelo_png, pronto
 
 
 # ── a sessão de rascunho ──
@@ -1456,7 +1456,7 @@ def test_inserir_pelo_formulario(monkeypatch, tmp_path):
             _digitar(form, "nome", "O'Brien Zé")
             _digitar(form, "idade", "30")
             _digitar(form, "email", "50%_a@x.com")
-            await asyncio.sleep(0.4)                       # os avisos chegam (e o formulário cresce) antes do clique
+            await contado(app, form)
             await pronto_dados(app)
             assert form.campo("nome").preenchido() and not form.campo("nascimento").preenchido()
             sql = "INSERT INTO public.pessoas (nome, idade, email) VALUES ('O''Brien Zé', 30, '50%_a@x.com')"
@@ -1506,14 +1506,12 @@ def test_por_e_inserir_outra(monkeypatch, tmp_path):
             form.notify = lambda msg, **kw: avisos.append(msg)
             _digitar(form, "nome", "Um")
             form.campo("ativo").query_one(Select).value = "false"
-            await asyncio.sleep(0.4)                       # os avisos chegam antes do clique (o formulário cresce)
             await pronto_dados(app)
             await piloto.click("#por_e_outra")
             await pronto_dados(app)
             assert app.screen is form
             assert form.campo("nome").query_one(Input).value == "" and form.campo("ativo").valor() is None
             _digitar(form, "nome", "Dois")
-            await asyncio.sleep(0.4)                       # os avisos chegam antes do clique (o formulário cresce)
             await pronto_dados(app)
             await piloto.click("#por_e_outra")
             await pronto_dados(app)
@@ -1539,7 +1537,7 @@ def test_inserir_nome_vazio_avisa_e_nao_trava(monkeypatch, tmp_path):
         async with app.run_test(size=(140, 50)) as piloto:
             tela, form = await _abrir_inserir(app, piloto)
             _digitar(form, "idade", "vinte")
-            await asyncio.sleep(0.4)
+            await contado(app, form)
             await pronto_dados(app)
             avisos = str(form.query_one("#form_avisos").render())
             assert "✖ " + t("chk.obrigatoria_vazia", coluna="nome") in avisos
@@ -1549,7 +1547,6 @@ def test_inserir_nome_vazio_avisa_e_nao_trava(monkeypatch, tmp_path):
             await pronto_dados(app)
             assert app.screen is form and str(form.query_one("#erro").render())
             _digitar(form, "idade", "20")
-            await asyncio.sleep(0.4)                       # os avisos chegam antes do clique (o formulário cresce)
             await pronto_dados(app)
             await piloto.click("#por_no_rascunho")                 # nome vazio: avisado, mas a pessoa decide
             await pronto_dados(app)
@@ -1602,7 +1599,6 @@ def test_inserir_chave_estrangeira_escolhida_na_lista(monkeypatch, tmp_path):
             await piloto.press("escape")
             await piloto.pause()
             assert app.screen is form and campo.valor() == "3"
-            await asyncio.sleep(0.4)
             await pronto_dados(app)
             await piloto.click("#por_no_rascunho")
             await pronto_dados(app)
@@ -1627,7 +1623,7 @@ def test_inserir_em_tabela_criada_no_rascunho_e_so_ver(monkeypatch, tmp_path):
         async with app.run_test(size=(140, 50)) as piloto:
             tela, form = await _abrir_inserir(app, piloto)
             _digitar(form, "texto", "oi")
-            await asyncio.sleep(0.4)
+            await contado(app, form)
             await pronto_dados(app)
             assert t("chk.so_depois_de_aplicar", tabela="notas") in str(form.query_one("#form_avisos").render())
             assert not form.campo("pessoa").query_one(".escolher").disabled      # o pai (pessoas) já está no banco
@@ -1741,3 +1737,353 @@ def test_escolher_linha_mostra_a_destacada_em_tela_pequena():
             assert lista.scroll_offset.y <= 20 < lista.scroll_offset.y + visiveis, (altura, lista.scroll_offset, visiveis)
     asyncio.run(roteiro(80, 24))
     asyncio.run(roteiro(80, 16))
+
+
+# ── Task 9: alterar, apagar e apagar duplicatas ──
+
+import threading
+
+
+class ConsultaPresa(ConsultaFalsa):
+    """Uma consulta falsa cuja contagem (`contar_onde`) devolve `n` e, armada (`presa`), espera `solta` antes."""
+
+    def __init__(self, n=2, **respostas):
+        super().__init__(**respostas)
+        self.n, self.presa, self.solta = n, False, threading.Event()
+
+    def contar_onde(self, *args):
+        if self.presa:
+            assert self.solta.wait(5)
+        self.chamadas.append(("contar_onde", args))
+        return self.n
+
+
+def _botao(form):
+    from textual.widgets import Button
+    return form.query_one("#por_no_rascunho", Button)
+
+
+async def _com_filtro_g(app):
+    await pronto_dados(app)
+    tela = app.screen
+    tela.acrescentar_condicao(filtro.Condicao("t1.c2", "comeca", ["G"]))
+    await pronto_dados(app)
+    assert tela.total == 2
+    return tela
+
+
+async def _escolher(piloto, select, valor):
+    select.value = valor
+    await piloto.pause()
+
+
+def test_botoes_do_inserir_nao_andam_quando_os_avisos_chegam(monkeypatch, tmp_path):
+    """Os avisos chegam numa área de altura fixa (que rola): o botão está no mesmo lugar desde a abertura — um clique
+    nunca cai fora dele porque o formulário cresceu no meio."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        app = AppDados(FonteDadosFalsa())
+        async with app.run_test(size=(140, 50)) as piloto:
+            tela, form = await _abrir_inserir(app, piloto)
+            await piloto.pause()
+            regiao = _botao(form).region
+            await contado(app, form)
+            await piloto.pause()
+            assert _botao(form).region == regiao
+            _digitar(form, "idade", "vinte")             # quatro avisos onde havia um "contando…"
+            _digitar(form, "nascimento", "ontem")
+            _digitar(form, "email", " a@x.com ")
+            await piloto.pause()
+            assert _botao(form).region == regiao
+            await contado(app, form)
+            await piloto.pause()
+            assert len(str(form.query_one("#form_avisos").render()).splitlines()) >= 4
+            assert _botao(form).region == regiao
+    asyncio.run(roteiro())
+
+
+@pytest.mark.parametrize("tecla", ["m", "x", "D"])
+def test_sem_filtro_pede_confirmacao_de_todas_as_linhas(monkeypatch, tmp_path, tecla):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from ratt.db import formularios, formularios_dados
+    formulario = {"m": formularios_dados.FormAlterar, "x": formularios_dados.ConfirmarApagarLinhas,
+                  "D": formularios_dados.FormDuplicatas}[tecla]
+
+    async def roteiro():
+        app = AppDados(FonteDadosFalsa())
+        async with app.run_test(size=(140, 50)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            await piloto.press(tecla)
+            await piloto.pause()
+            conf = app.screen
+            assert isinstance(conf, formularios.Confirmar)
+            assert conf.pergunta == t("dados.todas", n=5, tabela="pessoas")
+            assert app.focused.id == "nao"                   # um enter distraído não abre nada
+            await piloto.press("enter")
+            await piloto.pause()
+            assert app.screen is tela
+            await piloto.press(tecla)
+            await piloto.pause()
+            await piloto.click("#sim")
+            await piloto.pause()
+            assert isinstance(app.screen, formulario)
+            assert app.screen.filtro.vazio()
+            await piloto.press("escape")
+            await pronto_dados(app)
+            assert app.screen is tela and tela.sessao.rascunho.operacoes == []
+    asyncio.run(roteiro())
+
+
+def test_alterar_minusculas_espera_a_contagem_e_guarda_a_vista(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Select
+    from ratt.db import formularios_dados
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        consulta = ConsultaPresa(2, antes_depois=[(("GAB@X.COM",), ("gab@x.com",)), ((" Gi@X.com",), (" gi@x.com",))])
+        fonte.consulta = lambda: consulta
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 50)) as piloto:
+            tela = await _com_filtro_g(app)
+            consulta.presa = True
+            await piloto.press("m")
+            await piloto.pause()
+            form = app.screen
+            assert isinstance(form, formularios_dados.FormAlterar)
+            assert _botao(form).disabled                     # nada escolhido: nada para contar nem pôr
+            regiao = _botao(form).region
+            linha = form.linhas()[0]
+            await _escolher(piloto, linha.query_one(".coluna", Select), "t1.c4")
+            await _escolher(piloto, linha.query_one(".tipo", Select), "minusculas")
+            sql = ("UPDATE public.pessoas SET email = lower(email) WHERE nome ILIKE 'G%' "
+                   "AND (email IS DISTINCT FROM lower(email))")
+            assert sql in form.query_one("#form_sql").content.code
+            assert form.contando and _botao(form).disabled   # contando: o botão espera
+            form.por()                                        # nem o enter num campo passa na frente da contagem
+            await piloto.pause()
+            assert app.screen is form and tela.sessao.rascunho.operacoes == []
+            assert t("dados.f.esperar") in str(form.query_one("#erro").render())
+            consulta.solta.set()
+            await contado(app, form)
+            await piloto.pause()
+            assert not _botao(form).disabled and _botao(form).region == regiao
+            assert t("chk.linhas_alteradas", n=2, tabela="pessoas") in str(form.query_one("#form_avisos").render())
+            amostra = str(form.query_one("#form_amostra").render())
+            assert t("dados.f.antes_depois") in amostra
+            assert "'GAB@X.COM' → 'gab@x.com'" in amostra and "' Gi@X.com' → ' gi@x.com'" in amostra
+            # qualquer mudança desliga o botão até a contagem nova chegar; a vista é a da contagem nova
+            consulta.solta.clear()
+            consulta.n = 3
+            await _escolher(piloto, linha.query_one(".tipo", Select), "maiusculas")
+            assert _botao(form).disabled
+            consulta.solta.set()
+            await contado(app, form)
+            assert not _botao(form).disabled
+            # um clique que chega antes da mensagem da última mudança não leva a contagem da operação anterior
+            linha.query_one(".tipo", Select).value = "trim"
+            form.por()
+            assert tela.sessao.rascunho.operacoes == [] and app.screen is form
+            await piloto.pause()
+            await _escolher(piloto, linha.query_one(".tipo", Select), "maiusculas")
+            await contado(app, form)
+            await piloto.click("#por_no_rascunho")
+            await pronto_dados(app)
+            assert app.screen is tela
+            op, = tela.sessao.rascunho.operacoes
+            assert isinstance(op, rascunho.Alterar) and op.vista == 3
+            assert op.mudancas == {"t1.c4": rascunho.Mudanca("maiusculas")}
+            assert op.filtro == tela.filtro and op.filtro is not tela.filtro
+            assert op.comandos(tela.sessao.rascunho.vista()) == [sql.replace("lower", "upper")]
+    asyncio.run(roteiro())
+
+
+def test_alterar_sem_contagem_entra_sem_vista_e_avisa(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Input, Select
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        consulta = ConsultaPresa(None)                    # o tempo acabou
+        fonte.consulta = lambda: consulta
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 50)) as piloto:
+            tela = await _com_filtro_g(app)
+            await piloto.press("m")
+            await piloto.pause()
+            form = app.screen
+            linha = form.linhas()[0]
+            await _escolher(piloto, linha.query_one(".coluna", Select), "t1.c3")
+            await _escolher(piloto, linha.query_one(".tipo", Select), "valor")
+            linha.query_one(Input).value = "30"
+            await contado(app, form)
+            texto = str(form.query_one("#form_avisos").render()) + str(form.query_one("#form_amostra").render())
+            assert t("chk.sem_tempo") in texto and t("dados.f.sem_contagem_vista") in texto
+            assert not _botao(form).disabled
+            await piloto.click("#por_no_rascunho")
+            await pronto_dados(app)
+            op, = tela.sessao.rascunho.operacoes
+            assert op.vista is None and op.mudancas == {"t1.c3": rascunho.Mudanca("valor", "30")}
+    asyncio.run(roteiro())
+
+
+def test_alterar_mudancas_por_familia_outra_coluna_e_fk(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Button, Select
+    from ratt.db import formularios_dados
+    from ratt.db.formularios_dados import CampoValor, FonteTravada, FormAlterar
+
+    def opcoes(select):
+        return [v for _, v in select._options if isinstance(v, str)]
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 50)) as piloto:
+            tela = await _com_filtro_g(app)
+            app.push_screen(FormAlterar(tela.sessao, FonteTravada(fonte, tela._trava), "t1", tela.filtro))
+            await piloto.pause()
+            form = app.screen
+            linha = form.linhas()[0]
+            colunas = opcoes(linha.query_one(".coluna", Select))
+            assert "t1.c1" not in colunas and "t1.c4" in colunas      # identidade ALWAYS não recebe valor
+            await _escolher(piloto, linha.query_one(".coluna", Select), "t1.c3")       # idade: número
+            assert opcoes(linha.query_one(".tipo", Select)) == ["valor", "vazio", "coluna"]
+            await _escolher(piloto, linha.query_one(".tipo", Select), "coluna")
+            assert opcoes(linha.query_one(".outra", Select)) == ["t1.c1"]            # só a mesma família
+            await _escolher(piloto, linha.query_one(".outra", Select), "t1.c1")
+            await _escolher(piloto, linha.query_one(".coluna", Select), "t1.c2")       # nome: texto
+            assert opcoes(linha.query_one(".tipo", Select)) == ["valor", "vazio", "coluna", "trim", "minusculas",
+                                                                 "maiusculas", "branco_vazio"]
+            await _escolher(piloto, linha.query_one(".tipo", Select), "trim")
+            await piloto.click("#mais_coluna")
+            await piloto.pause()
+            assert len(form.linhas()) == 2
+            segunda = form.linhas()[1]
+            await _escolher(piloto, segunda.query_one(".coluna", Select), "t1.c6")
+            await _escolher(piloto, segunda.query_one(".tipo", Select), "valor")
+            segunda.query_one(CampoValor).definir("não")
+            await piloto.pause()
+            assert ("UPDATE public.pessoas SET nome = trim(nome), ativo = FALSE WHERE nome ILIKE 'G%'"
+                    in form.query_one("#form_sql").content.code)
+            await _escolher(piloto, segunda.query_one(".coluna", Select), "t1.c2")
+            assert t("dados.e.coluna_repetida", coluna="nome") in str(form.query_one("#erro").render())
+            await piloto.click("#menos_coluna")
+            await piloto.pause()
+            assert len(form.linhas()) == 1
+            assert form.query_one("#form_sql").content.code.startswith("UPDATE public.pessoas SET nome = trim(nome) WHERE")
+            await piloto.press("escape")
+            await piloto.pause()
+            # a chave estrangeira recebe o valor pela lista do pai, como no inserir
+            app.push_screen(FormAlterar(tela.sessao, FonteTravada(fonte, tela._trava), "t2", filtro.Filtro()))
+            await piloto.pause()
+            form = app.screen
+            linha = form.linhas()[0]
+            await _escolher(piloto, linha.query_one(".coluna", Select), "t2.c2")
+            await _escolher(piloto, linha.query_one(".tipo", Select), "valor")
+            campo = linha.query_one(CampoValor)
+            await piloto.click("#" + campo.query_one(".escolher", Button).id)
+            await pronto_dados(app)
+            assert isinstance(app.screen, formularios_dados.EscolherLinha)
+            await piloto.press("enter")
+            await pronto_dados(app)
+            assert app.screen is form and campo.valor() == "1"
+            assert "UPDATE public.pedidos SET pessoa_id = 1 WHERE pessoa_id IS DISTINCT FROM 1" in \
+                form.query_one("#form_sql").content.code
+    asyncio.run(roteiro())
+
+
+def test_apagar_com_filhos_que_impedem_foco_no_cancelar(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from ratt.db import formularios_dados
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        consulta = ConsultaPresa(2, cascata=[("public.pedidos", "NO ACTION", 2)],
+                                 amostra=[FonteDadosFalsa.LINHAS[0], FonteDadosFalsa.LINHAS[2]])
+        fonte.consulta = lambda: consulta
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 50)) as piloto:
+            tela = await _com_filtro_g(app)
+            await piloto.press("x")
+            await piloto.pause()
+            form = app.screen
+            assert isinstance(form, formularios_dados.ConfirmarApagarLinhas)
+            assert app.focused.id == "cancelar"
+            regiao = _botao(form).region
+            await contado(app, form)
+            await piloto.pause()
+            assert _botao(form).region == regiao
+            avisos = str(form.query_one("#form_avisos").render())
+            assert "✖ " + t("chk.impede_filhos", n=2, tabela="public.pedidos") in avisos
+            assert t("chk.linhas_apagadas", n=2, tabela="pessoas") in avisos
+            assert t("chk.soft_delete", coluna="ativo") in avisos
+            amostra = str(form.query_one("#form_amostra").render())
+            assert "Gabriel" in amostra and "Giovana" in amostra and "∅" in amostra
+            assert ("amostra", ("public", "pessoas", "nome ILIKE 'G%'", FonteDadosFalsa.NOMES, 5)) in consulta.chamadas
+            assert app.focused.id == "cancelar"              # os avisos não tiram o foco do cancelar
+            await piloto.press("enter")
+            await pronto_dados(app)
+            assert app.screen is tela and tela.sessao.rascunho.operacoes == []
+            await piloto.press("x")
+            await piloto.pause()
+            form = app.screen
+            await contado(app, form)
+            await piloto.click("#por_no_rascunho")           # o aviso impede, mas a pessoa decide
+            await pronto_dados(app)
+            op, = tela.sessao.rascunho.operacoes
+            assert isinstance(op, rascunho.Apagar) and op.vista == 2
+            assert op.comandos(tela.sessao.rascunho.vista()) == ["DELETE FROM public.pessoas WHERE nome ILIKE 'G%'"]
+    asyncio.run(roteiro())
+
+
+def test_duplicatas_por_email_normalizado(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Checkbox, Input, Select, SelectionList
+    from ratt.db import formularios_dados
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        grupo = [(1, "Gabriel", 34, "gab@x.com", None, True, False, "gab@x.com"),
+                 (7, "Gabi", None, "GAB@x.com ", None, True, True, "gab@x.com"),
+                 (9, "Outro", None, "zz@x.com", None, True, False, "zz@x.com")]
+        consulta = ConsultaPresa(1, grupos_repetidos=(1, 2), cascata=[], selecionar=grupo)
+        fonte.consulta = lambda: consulta
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 50)) as piloto:
+            tela = await _com_filtro_g(app)
+            await piloto.press("D")
+            await piloto.pause()
+            form = app.screen
+            assert isinstance(form, formularios_dados.FormDuplicatas)
+            assert _botao(form).disabled
+            form.query_one("#por", SelectionList).select("t1.c4")
+            await piloto.pause()
+            form.query_one("#normalizar", Checkbox).value = True
+            await piloto.pause()
+            assert _botao(form).disabled
+            m = tela.sessao.rascunho.vista()
+            esperado = rascunho.ApagarDuplicatas("t1", tela.filtro, ("t1.c4",), normalizar=True)
+            assert esperado.comandos(m)[0] in form.query_one("#form_sql").content.code
+            await contado(app, form)
+            assert not _botao(form).disabled
+            avisos = str(form.query_one("#form_avisos").render())
+            assert t("chk.grupos_repetidos", grupos=1) in avisos and t("chk.linhas_apagadas", n=1, tabela="pessoas") in avisos
+            amostra = str(form.query_one("#form_amostra").render())
+            assert "Gabriel" in amostra and "Gabi" in amostra and "Outro" not in amostra    # um grupo só
+            assert t("dados.f.fica") in amostra and t("dados.f.sai") in amostra
+            # manter as N mais recentes por uma data
+            await _escolher(piloto, form.query_one("#manter", Select), "recente")
+            assert t("op.e.sem_ordem") in str(form.query_one("#erro").render()) and _botao(form).disabled
+            await _escolher(piloto, form.query_one("#ordem", Select), "t1.c5")
+            form.query_one("#n", Input).value = "2"
+            await contado(app, form)
+            assert "nascimento DESC NULLS LAST" in form.query_one("#form_sql").content.code
+            await piloto.click("#por_no_rascunho")
+            await pronto_dados(app)
+            op, = tela.sessao.rascunho.operacoes
+            assert isinstance(op, rascunho.ApagarDuplicatas) and op.vista == 1
+            assert (op.por, op.normalizar, op.manter, op.ordem, op.n) == (("t1.c4",), True, "recente", "t1.c5", 2)
+    asyncio.run(roteiro())

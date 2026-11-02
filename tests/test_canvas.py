@@ -870,6 +870,19 @@ async def pronto(app):
     await asyncio.sleep(0.05)
 
 
+async def contado(app, form, limite=5.0):
+    """Espera os avisos do estado ATUAL do formulário chegarem (o atraso de digitação mais a thread), sem um sleep
+    fixo: pergunta ao formulário se ainda está contando."""
+    import time
+    fim = time.monotonic() + limite
+    while True:
+        await app.workers.wait_for_complete()
+        await asyncio.sleep(0.02)
+        if not form.contando:
+            return
+        assert time.monotonic() < fim, "os avisos do formulário não chegaram"
+
+
 def test_canvas_abre_e_seleciona(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
 
@@ -1417,16 +1430,17 @@ def test_apagar_tabela_com_dependentes_oferece_cascade(monkeypatch, tmp_path):
             await pronto(app)
             await _selecionar(piloto, app, "roles")
             await piloto.press("x")
-            assert isinstance(app.screen, formularios.ConfirmarApagar)
-            await pronto(app)
-            casc = app.screen.query_one("#cascata")
-            assert casc.display
+            form = app.screen
+            assert isinstance(form, formularios.ConfirmarApagar)
+            await piloto.pause()
+            botao = form.query_one("#por_no_rascunho").region           # logo depois de abrir, "contando…"
+            await contado(app, form)
+            await piloto.pause()
+            assert form.query_one("#por_no_rascunho").region == botao   # os avisos chegaram: o botão não anda
+            casc = form.query_one("#cascata")
+            assert casc.display and casc.visible
             casc.value = True
-            # os avisos são recontados (0,25 s depois) e mudam a altura do formulário: o botão anda uma linha. Um
-            # clique no meio disso cai fora do botão (a falha intermitente deste teste). Espera os avisos chegarem.
-            await asyncio.sleep(0.4)
-            await pronto(app)
-            await piloto.click("#por_no_rascunho")
+            await piloto.click("#por_no_rascunho")                     # sem esperar: os avisos não mexem no botão
             await pronto(app)
             assert "DROP TABLE public.roles CASCADE;" in app.screen.rascunho.sql_texto()
     asyncio.run(roteiro())
@@ -2702,8 +2716,6 @@ def test_formtabela_clique_cancelar_e_por_rodam_uma_vez(monkeypatch, tmp_path):
             await piloto.pause()
             form = app.screen
             form.query_one("#nome", Input).value = "nova"
-            await asyncio.sleep(0.4)
-            await pronto(app)
             await piloto.click("#" + botao)
             await pronto(app)
             assert app.screen is tela, botao                          # o canvas continua lá

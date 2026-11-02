@@ -5,6 +5,7 @@ import pytest
 
 from ratt.db import catalogo, checagem, filtro, rascunho
 from ratt.db.idioma import t
+from test_canvas import contado
 from test_dados import modelo_pessoas
 
 
@@ -978,23 +979,22 @@ def test_inserir_pelo_formulario_e_aplicar(banco, tmp_path, monkeypatch):
             assert isinstance(form, formularios_dados.FormInserir)
             digitar(form, "nome", "Zé d'Ávila")
             digitar(form, "idade", "vinte")
-            await asyncio.sleep(0.4)
+            await contado(app, form)
             await _pronto(app)
             assert t("chk.valor_invalido", coluna="idade", valor="vinte", tipo="integer") in \
                 str(form.query_one("#form_avisos").render())
             digitar(form, "idade", "99999999999")                 # é número, mas não cabe num integer: o banco diz
-            await asyncio.sleep(0.4)
+            await contado(app, form)
             await _pronto(app)
             assert t("chk.valor_invalido", coluna="idade", valor="99999999999", tipo="integer") in \
                 str(form.query_one("#form_avisos").render())
             digitar(form, "idade", "33")
             digitar(form, "email", "ana@x.com")
-            await asyncio.sleep(0.4)
+            await contado(app, form)
             await _pronto(app)
             assert t("chk.ja_existe", coluna="email", valor="ana@x.com", n=1) in str(form.query_one("#form_avisos").render())
             digitar(form, "email", "ze@x.com")
             digitar(form, "nascimento", "2001-02-03")
-            await asyncio.sleep(0.4)                       # os avisos chegam antes do clique (o formulário cresce)
             await _pronto(app)
             await piloto.click("#por_no_rascunho")
             await _pronto(app)
@@ -1026,7 +1026,6 @@ def test_inserir_pelo_formulario_e_aplicar(banco, tmp_path, monkeypatch):
             await _pronto(app)
             assert app.screen is form and campo.valor() == "5"
             digitar(form, "total", "12.50")
-            await asyncio.sleep(0.4)                       # os avisos chegam antes do clique (o formulário cresce)
             await _pronto(app)
             await piloto.click("#por_no_rascunho")
             await _pronto(app)
@@ -1105,12 +1104,10 @@ def test_identidade_by_default_e_opcional_no_formulario(banco, tmp_path, monkeyp
             assert form.campo("dobro").query_one(Input).disabled and form.campo("s").query_one(Input).disabled
             form.campo("id").query_one(Input).value = "100"
             form.campo("texto").query_one(Input).value = "com id"
-            await asyncio.sleep(0.4)
             await _pronto(app)
             await piloto.click("#por_e_outra")
             await _pronto(app)
             form.campo("texto").query_one(Input).value = "sem id"
-            await asyncio.sleep(0.4)
             await _pronto(app)
             await piloto.click("#por_no_rascunho")
             await _pronto(app)
@@ -1122,3 +1119,120 @@ def test_identidade_by_default_e_opcional_no_formulario(banco, tmp_path, monkeyp
     asyncio.run(roteiro())
     assert banco.execute("SELECT id, texto, dobro, s FROM public.nota ORDER BY s").fetchall() == \
         [(100, "com id", 12, 1), (1, "sem id", 12, 2)]
+
+
+# ── Task 9: alterar, apagar e apagar duplicatas pela tela ──
+
+def _app_real(banco, tabela):
+    import getpass
+    from ratt.db import canvas
+    from test_dados import AppDados
+    oid = banco.execute("SELECT %s::regclass::oid", (tabela,)).fetchone()[0]
+    return AppDados(canvas.FonteBanco(None, banco.info.port, getpass.getuser(), banco.info.dbname), "t%d" % oid)
+
+
+def test_apagar_gabriel_pela_tela_cascateia_os_pedidos(banco, tmp_path, monkeypatch):
+    import asyncio
+    from ratt.db import formularios_dados
+    _apps_isolados(monkeypatch, tmp_path)
+    banco.execute(PESSOAS_SQL)
+
+    async def roteiro():
+        app = _app_real(banco, "public.pessoas")
+        async with app.run_test(size=(140, 50)) as piloto:
+            await _pronto(app)
+            tela = app.screen
+            nome = tela.rascunho.base.tabelas[tela.tabela_id].colunas[1].id
+            tela.acrescentar_condicao(filtro.Condicao(nome, "igual", ["Gabriel"]))
+            await _pronto(app)
+            await piloto.press("x")
+            await piloto.pause()
+            form = app.screen
+            assert isinstance(form, formularios_dados.ConfirmarApagarLinhas) and app.focused.id == "cancelar"
+            await contado(app, form)
+            avisos = str(form.query_one("#form_avisos").render())
+            assert t("chk.linhas_apagadas", n=1, tabela="pessoas") in avisos
+            assert t("chk.cascata_apaga", n=2, tabela="public.pedidos") in avisos
+            assert "Gabriel" in str(form.query_one("#form_amostra").render())
+            await piloto.click("#por_no_rascunho")
+            await _pronto(app)
+            op, = tela.sessao.rascunho.operacoes
+            assert op.vista == 1
+            con = psycopg.connect(banco.info.dsn)
+            try:
+                assert tela.sessao.aplicar(con, tmp_path / "a.sql", ensaio=False) == (0, None, None)
+            finally:
+                con.close()
+    asyncio.run(roteiro())
+    assert banco.execute("SELECT count(*) FROM public.pessoas").fetchone()[0] == 4          # a linha que se viu
+    assert banco.execute("SELECT count(*) FROM public.pedidos").fetchone()[0] == 1          # e a cascata mostrada
+
+
+def test_duplicatas_sem_chave_primaria_pela_tela(banco, tmp_path, monkeypatch):
+    import asyncio
+    from textual.widgets import Checkbox, SelectionList
+    _apps_isolados(monkeypatch, tmp_path)
+    banco.execute("CREATE TABLE public.contatos (nome text, email text); INSERT INTO public.contatos VALUES "
+                  "('a', 'a@x.com'), ('A', ' A@X.com'), ('b', 'b@x.com'), ('sem', NULL), ('sem2', NULL)")
+
+    async def roteiro():
+        app = _app_real(banco, "public.contatos")
+        async with app.run_test(size=(140, 50)) as piloto:
+            await _pronto(app)
+            tela = app.screen
+            email = tela.rascunho.base.tabelas[tela.tabela_id].colunas[1].id
+            await piloto.press("D")
+            await piloto.pause()
+            await piloto.click("#sim")                       # sem filtro: "todas as 5 linhas"
+            await piloto.pause()
+            form = app.screen
+            form.query_one("#por", SelectionList).select(email)
+            form.query_one("#normalizar", Checkbox).value = True
+            await contado(app, form)
+            avisos = str(form.query_one("#form_avisos").render())
+            assert t("chk.sem_pk_ctid", tabela="contatos") in avisos
+            assert t("chk.linhas_apagadas", n=1, tabela="contatos") in avisos
+            assert t("chk.duplicatas_vazias_fora", n=2) in avisos
+            assert "ctid" in form.query_one("#form_sql").content.code
+            amostra = str(form.query_one("#form_amostra").render())
+            assert "a@x.com" in amostra and "A@X.com" in amostra and "b@x.com" not in amostra
+            await piloto.click("#por_no_rascunho")
+            await _pronto(app)
+            assert tela.sessao.rascunho.operacoes[0].vista == 1
+            con = psycopg.connect(banco.info.dsn)
+            try:
+                assert tela.sessao.aplicar(con, tmp_path / "a.sql", ensaio=False) == (0, None, None)
+            finally:
+                con.close()
+    asyncio.run(roteiro())
+    assert banco.execute("SELECT nome FROM public.contatos ORDER BY nome").fetchall() == \
+        [("a",), ("b",), ("sem",), ("sem2",)]                # fica a primeira (menor ctid); vazio não é repetido
+
+
+def test_contagem_que_estoura_o_tempo_entra_sem_vista(banco, tmp_path, monkeypatch):
+    import asyncio
+    _apps_isolados(monkeypatch, tmp_path)
+    banco.execute("CREATE TABLE public.grande AS SELECT g AS x FROM generate_series(1, 2000000) g")
+
+    async def roteiro():
+        app = _app_real(banco, "public.grande")
+        fonte = app.fonte
+        fonte.consulta = lambda: checagem.Consulta(fonte._aberta(), limite_ms=1)
+        async with app.run_test(size=(140, 50)) as piloto:
+            await _pronto(app)
+            tela = app.screen
+            tela.filtro.texto = "x % 7 = 3"
+            tela._filtro_mudou()
+            await _pronto(app)
+            await piloto.press("x")
+            await piloto.pause()
+            form = app.screen
+            await contado(app, form)
+            texto = str(form.query_one("#form_avisos").render()) + str(form.query_one("#form_amostra").render())
+            assert t("chk.sem_tempo") in texto and t("dados.f.sem_contagem_vista") in texto
+            assert not form.query_one("#por_no_rascunho").disabled       # o formulário não trava
+            await piloto.click("#por_no_rascunho")
+            await _pronto(app)
+            op, = tela.sessao.rascunho.operacoes
+            assert op.vista is None
+    asyncio.run(roteiro())

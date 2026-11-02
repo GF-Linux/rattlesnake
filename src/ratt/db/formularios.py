@@ -2,7 +2,12 @@
 e o que o banco tem a dizer (avisos). Nada aqui executa DDL: "pôr no rascunho" só acrescenta a operação.
 
 Os avisos pedem contagens ao banco, por isso são calculados numa thread (com "contando…" enquanto isso) e
-nunca seguram o formulário. Mesmo um aviso "impede" deixa o botão ligado: a pessoa decide.
+nunca seguram o formulário. Mesmo um aviso "impede" deixa o botão ligado: a pessoa decide. A exceção são as
+operações de dados (`exige_contagem`): o botão espera a contagem do estado atual chegar — a pessoa vê quantas linhas
+a operação pega antes de ela poder entrar no rascunho.
+
+Os avisos ficam numa área de altura fixa (que rola), entre os campos e os botões: chegarem não muda a altura do
+formulário, e os botões não andam debaixo do mouse.
 """
 from __future__ import annotations
 
@@ -25,7 +30,8 @@ from ratt.db.tela import COR
 
 _ERROS_SQL = (KeyError, ValueError, TypeError, AttributeError)
 # só estas operações perguntam algo ao banco; as outras não mostram "contando…"
-_COM_CONTAGEM = (rs.Obrigatoria, rs.Unica, rs.AdicionarColuna, rs.Ligar, rs.ApagarColuna, rs.ApagarTabela, rs.Inserir)
+_COM_CONTAGEM = (rs.Obrigatoria, rs.Unica, rs.AdicionarColuna, rs.Ligar, rs.ApagarColuna, rs.ApagarTabela, rs.Inserir,
+                 rs.Alterar, rs.Apagar, rs.ApagarDuplicatas)
 _NIVEL = {"info": ("·", COR["cinza"]), "atencao": ("!", COR["amarelo"]), "impede": ("✖", COR["laranja"])}
 _ATRASO = 0.25                      # espera a pessoa parar de digitar antes de contar no banco
 
@@ -50,19 +56,33 @@ class FormBase(ModalScreen):
     FormBase #form_titulo { text-style: bold; padding: 0 0 1 0; }
     FormBase #form_corpo { height: auto; }
     FormBase Input { height: 3; }
-    FormBase #form_sql, FormBase #form_avisos, FormBase #erro { height: auto; margin-top: 1; }
+    FormBase #form_sql, FormBase #erro { height: auto; margin-top: 1; }
+    FormBase #form_avisos_area { height: 6; margin-top: 1; }
+    FormBase #form_avisos, FormBase #form_amostra { height: auto; }
     FormBase #form_botoes { height: 3; margin-top: 1; align-horizontal: right; }
     FormBase #form_botoes Button { margin-left: 1; }
     """
 
     titulo = ""
     avisa_sem_sql = False       # a operação se monta mas o SQL não (um valor que não serve): os avisos dizem o porquê
+    exige_contagem = False      # o botão só liga quando a contagem do estado atual chegou (operações de dados)
+    altura_avisos = 6           # linhas reservadas para os avisos (0: o formulário nunca conta nada)
 
     def __init__(self, rascunho: rs.Rascunho, fonte):
         super().__init__()
         self._rascunho, self.fonte = rascunho, fonte
         self._versao = 0
         self._timer = None
+        self._esperando = False     # os avisos do estado atual estão a caminho
+        self._liberado = False      # chegaram (ou o estado atual não conta nada): `exige_contagem` deixa pôr
+        self.avisos_chegados: Optional[list] = None    # os avisos do estado atual (None: ainda não, ou deu erro)
+        self._sql_pedido = self._sql_contado = None    # o SQL da operação cujos avisos foram pedidos / chegaram
+        self._com_avisos: Optional[bool] = None
+
+    @property
+    def contando(self) -> bool:
+        """Os avisos do estado atual dos campos ainda não chegaram."""
+        return self._esperando
 
     @property
     def rascunho(self) -> rs.Rascunho:
@@ -79,6 +99,14 @@ class FormBase(ModalScreen):
     def depois_dos_avisos(self, avisos) -> None:
         """Gancho: a subclasse reage aos avisos que chegaram."""
 
+    def do_banco(self, op: rs.Operacao, consulta, avisos):
+        """Gancho, na thread dos avisos: mais o que perguntar ao banco (uma amostra). Volta em `texto_extra`."""
+        return None
+
+    def texto_extra(self, extra) -> object:
+        """Gancho: o que mostrar abaixo dos avisos quando eles chegam (com o que `do_banco` trouxe)."""
+        return ""
+
     def botoes(self) -> ComposeResult:
         """Gancho: botões a mais, antes do "pôr no rascunho"."""
         return iter(())
@@ -94,8 +122,10 @@ class FormBase(ModalScreen):
             with Corpo(id="form_corpo"):
                 yield from self.campos()
                 yield Static(id="form_sql")
-                yield Static(id="form_avisos")
                 yield Static(id="erro")
+            with VerticalScroll(id="form_avisos_area"):
+                yield Static(id="form_avisos")
+                yield Static(id="form_amostra")
             with Horizontal(id="form_botoes"):
                 yield from self.botoes()
                 yield Button(t("canvas.f.pr"), id="por_no_rascunho", variant="primary")
@@ -109,8 +139,24 @@ class FormBase(ModalScreen):
         self._ajustar()
 
     def _ajustar(self) -> None:
-        """Os campos ocupam o que sobra da tela (menos título, bordas e botões) e rolam; os botões ficam à vista."""
-        self.query_one("#form_corpo").styles.max_height = max(4, self.size.height - 10)
+        """Os campos ocupam o que sobra da tela (menos título, bordas, avisos e botões) e rolam; os botões ficam à
+        vista. A área dos avisos tem altura fixa (depende só do tamanho da tela): chegarem não mexe em nada."""
+        area = self.query_one("#form_avisos_area")
+        altura = min(self.altura_avisos, max(2, self.size.height // 4)) if self._conta() else 0
+        area.display = altura > 0
+        area.styles.height = max(altura, 1)
+        self.query_one("#form_corpo").styles.max_height = max(4, self.size.height - 10 - (altura + 1 if altura else 0))
+
+    def _conta(self) -> bool:
+        """Este formulário mostra avisos? Decidido uma vez, pela operação da abertura: a área não aparece nem some
+        depois. Sem operação ainda (falta um campo), sim."""
+        if self._com_avisos is None:
+            try:
+                op = self.previa()
+            except Exception:
+                op = None
+            self._com_avisos = self.altura_avisos > 0 and (op is None or isinstance(op, _COM_CONTAGEM))
+        return self._com_avisos
 
     def previa(self) -> rs.Operacao:
         """A operação como seria agora, sem gastar ids do rascunho (a prévia roda a cada tecla)."""
@@ -125,7 +171,9 @@ class FormBase(ModalScreen):
         if self._timer is not None:
             self._timer.stop()
             self._timer = None
+        self._esperando, self.avisos_chegados, self._sql_pedido, self._sql_contado = False, None, None, None
         sql, avisos, erro = self.query_one("#form_sql", Static), self.query_one("#form_avisos", Static), self.query_one("#erro", Static)
+        self.query_one("#form_amostra", Static).update("")
         op = None
         try:
             op = self.previa()
@@ -135,43 +183,84 @@ class FormBase(ModalScreen):
             avisos.update("")
             erro.update(Text(str(e), style=COR["laranja"]))
             if op is None or not self.avisa_sem_sql:
-                return
+                return self._botao(False)
         except _ERROS_SQL as e:
             sql.update("")
             avisos.update("")
             erro.update(Text(t("canvas.e.operacao", erro=e), style=COR["laranja"]))
-            return
+            return self._botao(False)
         else:
             erro.update("")
             sql.update(sql_bonito(comandos))
+            self._sql_pedido = comandos
         if isinstance(op, _COM_CONTAGEM):
             avisos.update(Text(t("canvas.f.contando"), style=COR["cinza"]))
+            self._esperando = True
             self._timer = self.set_timer(_ATRASO, lambda v=self._versao, o=op: self._contar(o, v))
+            self._botao(False)
         else:
             avisos.update("")
+            self._botao(True)
+
+    def _botao(self, liberado: bool) -> None:
+        """Com `exige_contagem`, o "pôr no rascunho" só liga quando a contagem do estado atual chegou."""
+        self._liberado = liberado
+        if liberado:
+            self._sql_contado = self._sql_pedido
+        if self.exige_contagem:
+            self.query_one("#por_no_rascunho", Button).disabled = not liberado
+
+    def _contou_isto(self) -> bool:
+        """`exige_contagem`: a operação dos campos agora é a que foi contada — também o enter num campo espera a
+        contagem, e um clique que chega antes da mensagem da última tecla não põe uma operação com a contagem de
+        outra. Se não, diz o porquê em `#erro`."""
+        erro = self.query_one("#erro", Static)
+        try:
+            comandos = rs.comandos_de(self.previa(), self.rascunho.vista())
+        except ValueError as e:
+            erro.update(Text(str(e), style=COR["laranja"]))
+            return False
+        except _ERROS_SQL:
+            erro.update(Text(t("canvas.e.sumiu"), style=COR["laranja"]))
+            return False
+        if not self._liberado or comandos != self._sql_contado:
+            erro.update(Text(t("dados.f.esperar"), style=COR["laranja"]))
+            return False
+        return True
 
     def _contar(self, op: rs.Operacao, versao: int) -> None:
         self._timer = None
 
         def trabalho():
+            extra = None
             try:
-                avisos = checagem.avisos_da_operacao(op, self.rascunho, self.fonte.consulta())
+                consulta = self.fonte.consulta()
+                avisos = checagem.avisos_da_operacao(op, self.rascunho, consulta)
             except Exception as e:                     # o banco caiu, faltou permissão...: vira uma linha, não um erro
                 avisos = e
+            else:
+                try:
+                    extra = self.do_banco(op, consulta, avisos)
+                except Exception:                      # a amostra é um extra: sem ela, os avisos valem
+                    extra = None
             try:
-                self.app.call_from_thread(self._chegaram, versao, avisos)
+                self.app.call_from_thread(self._chegaram, versao, avisos, extra)
             except RuntimeError:                       # a app já fechou
                 pass
         self.run_worker(trabalho, thread=True, exclusive=True, group="avisos_form")
 
-    def _chegaram(self, versao: int, avisos) -> None:
+    def _chegaram(self, versao: int, avisos, extra=None) -> None:
         if not self.is_attached or versao != self._versao:
             return
+        self._esperando = False
         alvo = self.query_one("#form_avisos", Static)
         if isinstance(avisos, Exception):
             linhas = str(avisos).strip().splitlines()
             alvo.update(Text(t("canvas.erro_banco", erro=linhas[0] if linhas else type(avisos).__name__), style=COR["amarelo"]))
+            self.query_one("#form_amostra", Static).update(self.texto_extra(None))
+            self._botao(True)                          # não deu para contar: a pessoa vê isso e decide
             return
+        self.avisos_chegados = list(avisos)
         if not avisos:
             alvo.update(Text(t("canvas.f.sem_avisos"), style=COR["cinza"]))
         else:
@@ -180,7 +269,9 @@ class FormBase(ModalScreen):
                 marca, cor = _NIVEL[a.nivel]
                 partes += [(marca + " ", cor), (a.texto() + "\n", cor if a.nivel != "info" else "")]
             alvo.update(Text.assemble(*partes))
+        self.query_one("#form_amostra", Static).update(self.texto_extra(extra))
         self.depois_dos_avisos(avisos)
+        self._botao(True)
 
     # ── eventos ──
     def on_input_changed(self, evento) -> None:
@@ -196,6 +287,9 @@ class FormBase(ModalScreen):
         self.atualizar()
 
     def on_option_list_option_highlighted(self, evento) -> None:
+        self.atualizar()
+
+    def on_selection_list_selected_changed(self, evento) -> None:
         self.atualizar()
 
     def on_input_submitted(self, evento) -> None:
@@ -218,6 +312,8 @@ class FormBase(ModalScreen):
 
     def por_sem_fechar(self) -> Optional[rs.Operacao]:
         """Acrescenta a operação dos campos; None (com o motivo em `#erro`) se ela não entrou."""
+        if self.exige_contagem and not self._contou_isto():
+            return None
         guardado = self.rascunho.proximo
         try:
             op = self.operacao()
@@ -281,6 +377,7 @@ class FormTabela(FormBase):
     """Nome da tabela e colunas. Começa com `id bigint` identidade e chave primária; as outras entram uma a uma."""
 
     titulo = t("canvas.f.nova_tabela")
+    altura_avisos = 0           # criar uma tabela não pergunta nada ao banco
 
     def __init__(self, rascunho, fonte):
         super().__init__(rascunho, fonte)
@@ -534,7 +631,8 @@ class ConfirmarApagar(FormBase):
         else:
             self._local = False
 
-    DEFAULT_CSS = "ConfirmarApagar #cascata { display: none; }"
+    # o lugar do CASCADE fica reservado (invisível, fora do foco): aparecer com os avisos não empurra os botões
+    DEFAULT_CSS = "ConfirmarApagar #cascata { visibility: hidden; }"
 
     def campos(self) -> ComposeResult:
         yield Static(id="o_que")
@@ -542,14 +640,14 @@ class ConfirmarApagar(FormBase):
 
     def on_mount(self) -> None:
         if self._local:
-            self.query_one("#cascata").display = True
+            self.query_one("#cascata").visible = True
         # (o on_mount do FormBase o Textual chama em seguida: não chamar super aqui)
         # foco no cancelar: um `x` seguido de Enter nunca põe um DROP no rascunho antes de a pessoa ver a prévia
         self.query_one("#cancelar", Button).focus()
 
     def depois_dos_avisos(self, avisos) -> None:
         if any(a.chave in ("chk.dependentes", "chk.precisa_cascata") for a in avisos):
-            self.query_one("#cascata").display = True
+            self.query_one("#cascata").visible = True
         if self.selecao[0] == "tabela":
             # quantas linhas somem, para a confirmação do aplicar repetir; sem aviso e sem "não deu tempo" é zero
             n = next((a.valores["n"] for a in avisos if a.chave == "chk.linhas_somem"), None)

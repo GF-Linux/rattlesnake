@@ -236,6 +236,10 @@ class Consulta:
             sql.SQL(", ").join(map(sql.Identifier, colunas)), sql.Identifier(esquema, tabela),
             catalogo.onde_sql(onde), sql.Literal(int(limite))), engolir=True)
 
+    def selecionar(self, consulta: str) -> Optional[List[tuple]]:
+        """As linhas de um SELECT montado pelo ratt (a amostra das duplicatas: `ApagarDuplicatas.amostra_sql`)."""
+        return self._rodar(consulta, engolir=True)
+
     def antes_depois(self, esquema, tabela, onde: str, sets: Dict[str, str],
                      limite: int = 5) -> Optional[List[Tuple[tuple, tuple]]]:
         """Até `limite` linhas como estão e como ficariam. `sets`: coluna (já por `ident`, como `Alterar.sets`)

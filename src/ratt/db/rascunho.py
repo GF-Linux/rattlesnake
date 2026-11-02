@@ -782,6 +782,20 @@ class ApagarDuplicatas(Operacao):
     def comandos(self, m: Modelo) -> List[str]:
         return [f"DELETE FROM {nome_tabela(m.tabelas[self.tabela])} WHERE {self.onde(m)}"]
 
+    def amostra_sql(self, m: Modelo, colunas: List[str], limite: int = 5) -> str:
+        """Um SELECT (só leitura) das linhas dos grupos repetidos, grupo a grupo e na ordem do `manter`: as
+        `colunas` (nomes do banco), se a linha sai (`rn > n`) e as expressões do grupo — para cortar no primeiro."""
+        tab, grupo, _, _, ordem, _ = self._partes(m)
+        cols = ", ".join(ident(c) for c in colunas)
+        gs = ", ".join(f"d._ratt_g{i}" for i in range(len(grupo)))
+        part = ", ".join(grupo)
+        return (f"SELECT {cols}, d._ratt_rn > {self.n}, {gs} FROM (SELECT {cols}, "
+                + ", ".join(f"{g} AS _ratt_g{i}" for i, g in enumerate(grupo))
+                + f", row_number() OVER (PARTITION BY {part} ORDER BY {', '.join(ordem)}) AS _ratt_rn, "
+                f"count(*) OVER (PARTITION BY {part}) AS _ratt_n FROM {nome_tabela(tab)} "
+                f"WHERE {self.onde_comparadas(m)}) AS d WHERE d._ratt_n > {self.n} ORDER BY {gs}, d._ratt_rn "
+                f"LIMIT {int(limite)}")
+
     def descricao(self, m: Modelo) -> str:
         tab = m.tabelas[self.tabela]
         return t("op.apagar_duplicatas", tabela=tab.nome, colunas=", ".join(_nome_col(m, tab, i) for i in self.por),

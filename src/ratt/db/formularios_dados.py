@@ -1,6 +1,7 @@
 """Os formulários da tela Dados: `FormCondicao` (uma condição do filtro, montada sem digitar SQL), `CampoValor` (o
 campo de um valor, que entende o tipo da coluna), `EscolherLinha` (a lista das linhas do pai, para uma chave
-estrangeira) e `FormInserir` (uma linha nova, um campo por coluna).
+estrangeira), `FormInserir` (uma linha nova, um campo por coluna) e, sobre as linhas filtradas, `FormAlterar`,
+`ConfirmarApagarLinhas` e `FormDuplicatas`.
 
 O `FormCondicao` não fala com o banco: devolve uma `filtro.Condicao`; a tela é quem lê as linhas. O WHERE que a
 condição gera aparece enquanto ela é montada — com os nomes do BANCO (a base do rascunho), que é onde ele roda.
@@ -9,10 +10,15 @@ Coluna ou ligação que só existe no rascunho é recusada com o motivo: o banco
 O `FormInserir` é um formulário do canvas (`FormBase`): SQL à vista, avisos contados numa thread (só leitura) e o
 botão sempre ligado — a pessoa decide. Ele lê o banco pela fonte da tela com a trava dela (`FonteTravada`): uma
 conversa por vez na conexão da tela.
+
+Alterar, apagar e apagar duplicatas pegam linhas que a pessoa não digitou uma a uma: o botão só liga quando a
+contagem do estado atual do formulário chegou (`exige_contagem`), com a amostra (antes → depois, no alterar) e a
+cascata; a operação guarda a contagem mostrada (`vista`, None se não deu para contar) para o aplicar conferir.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+import copy
+from typing import Dict, List, Optional, Tuple
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -20,10 +26,11 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, Checkbox, Input, OptionList, Select, Static
+from textual.css.query import NoMatches
+from textual.widgets import Button, Checkbox, Input, OptionList, Select, SelectionList, Static
 from textual.widgets.option_list import Option
 
-from ratt.db import filtro
+from ratt.db import checagem, filtro
 from ratt.db import rascunho as rs
 from ratt.db.formularios import _ATRASO, Corpo, FormBase
 from ratt.db.idioma import t
@@ -750,7 +757,52 @@ class EscolherLinha(ModalScreen):
         self.dismiss(None)
 
 
-class FormInserir(FormBase):
+def referencia_de(vista: Modelo, tabela_id: str, c: Coluna) -> Optional[Ligacao]:
+    """A chave estrangeira de uma coluna só que sai desta coluna (a primeira, se houver mais de uma)."""
+    for lig in sorted(vista.ligacoes.values(), key=lambda k: k.id):
+        if lig.estado != "apagado" and lig.origem == tabela_id and tuple(lig.colunas) == (c.id,):
+            return lig
+    return None
+
+
+def pai_no_banco(base: Modelo, lig: Ligacao):
+    """(esquema, tabela, coluna) do pai como o banco os chama, ou None se o pai ainda não está lá."""
+    pai = base.tabelas.get(lig.destino)
+    col = pai.coluna(lig.colunas_destino[0]) if pai is not None else None
+    return (pai.esquema, pai.nome, col.nome) if col is not None else None
+
+
+def campo_da_coluna(vista: Modelo, base: Modelo, tabela_id: str, c: Coluna, id: str) -> CampoValor:
+    """O `CampoValor` de uma coluna, com a lista do pai quando ela é chave estrangeira (e o pai está no banco)."""
+    lig = referencia_de(vista, tabela_id, c)
+    destino, no_banco, motivo = "", True, ""
+    if lig is not None:
+        pai = vista.tabelas[lig.destino]
+        col_pai = pai.coluna(lig.colunas_destino[0])
+        destino = f"{pai.nome}.{col_pai.nome if col_pai else '?'}"
+        no_banco = pai_no_banco(base, lig) is not None
+        motivo = "" if no_banco else t("dados.f.pai_so_depois", tabela=pai.nome)
+    return CampoValor(c, lig, id=id, destino=destino, lista=no_banco, motivo=motivo)
+
+
+class _EscolheNoPai:
+    """Mixin de formulário: o botão "escolher…" de um `CampoValor` de chave estrangeira abre a lista do pai."""
+
+    def on_campo_valor_escolher(self, evento: CampoValor.Escolher) -> None:
+        evento.stop()
+        campo = evento.campo
+        nomes = pai_no_banco(self.rascunho.base, campo.referencia)
+        if nomes is None:
+            return
+        tela = EscolherLinha(self.fonte, *nomes)
+
+        def chegou(valor: Optional[str]) -> None:
+            if valor is not None and campo.is_attached:
+                campo.escolhido(valor, tela.rotulo_escolhido)
+        self.app.push_screen(tela, chegou)
+
+
+class FormInserir(_EscolheNoPai, FormBase):
     """Uma linha nova: um `CampoValor` por coluna, na ordem da tabela (a do rascunho: inserir numa tabela criada
     nele vale). Uma linha = uma operação `Inserir` = um INSERT. "pôr e inserir outra" acrescenta, limpa os campos e
     fica aberto. A operação entra pela sessão (grava e avisa as telas na hora, também com o formulário aberto)."""
@@ -769,34 +821,13 @@ class FormInserir(FormBase):
     def rascunho(self) -> rs.Rascunho:
         return self.sessao.rascunho         # o de agora: a sessão pode trocá-lo (releitura do disco, aplicar)
 
-    def _referencia(self, vista: Modelo, c: Coluna) -> Optional[Ligacao]:
-        """A chave estrangeira de uma coluna só que sai desta coluna (a primeira, se houver mais de uma)."""
-        for lig in sorted(vista.ligacoes.values(), key=lambda k: k.id):
-            if lig.estado != "apagado" and lig.origem == self.tabela_id and tuple(lig.colunas) == (c.id,):
-                return lig
-        return None
-
     def campos(self) -> ComposeResult:
         vista = self.rascunho.vista()
         tab = vista.tabelas[self.tabela_id]
         for i, c in enumerate(col for col in tab.colunas if col.estado != "apagado"):
-            lig = self._referencia(vista, c)
-            destino, no_banco, motivo = "", True, ""
-            if lig is not None:
-                pai = vista.tabelas[lig.destino]
-                col_pai = pai.coluna(lig.colunas_destino[0])
-                destino = f"{pai.nome}.{col_pai.nome if col_pai else '?'}"
-                no_banco = self._pai_no_banco(lig) is not None
-                motivo = "" if no_banco else t("dados.f.pai_so_depois", tabela=pai.nome)
-            campo = CampoValor(c, lig, id=f"campo_{i}", destino=destino, lista=no_banco, motivo=motivo)
+            campo = campo_da_coluna(vista, self.rascunho.base, self.tabela_id, c, f"campo_{i}")
             self._campos.append(campo)
             yield campo
-
-    def _pai_no_banco(self, lig: Ligacao):
-        """(esquema, tabela, coluna) do pai como o banco os chama, ou None se o pai ainda não está lá."""
-        pai = self.rascunho.base.tabelas.get(lig.destino)
-        col = pai.coluna(lig.colunas_destino[0]) if pai is not None else None
-        return (pai.esquema, pai.nome, col.nome) if col is not None else None
 
     def botoes(self) -> ComposeResult:
         yield Button(t("dados.f.por_e_outra"), id="por_e_outra")
@@ -834,15 +865,372 @@ class FormInserir(FormBase):
         self.notify(t("dados.f.posta", n=self._postas))
         self.atualizar()
 
-    def on_campo_valor_escolher(self, evento: CampoValor.Escolher) -> None:
-        evento.stop()
-        campo = evento.campo
-        nomes = self._pai_no_banco(campo.referencia)
-        if nomes is None:
-            return
-        tela = EscolherLinha(self.fonte, *nomes)
 
-        def chegou(valor: Optional[str]) -> None:
-            if valor is not None and campo.is_attached:
-                campo.escolhido(valor, tela.rotulo_escolhido)
-        self.app.push_screen(tela, chegou)
+# ── alterar, apagar e apagar duplicatas: as linhas filtradas ──
+
+_AMOSTRA = 5                        # linhas de amostra
+_LARGURA = 76                       # uma linha da amostra cabe no formulário
+_LIMPEZAS = ("trim", "minusculas", "maiusculas", "branco_vazio")
+
+
+def _mostra(v) -> str:
+    """Um valor como aparece na amostra: texto entre aspas (espaços nas pontas à vista), vazio como ∅."""
+    if v is None:
+        return "∅"
+    return f"'{v}'" if isinstance(v, str) else _como_texto(v)
+
+
+def _corta(texto: str) -> str:
+    return texto if len(texto) <= _LARGURA else texto[:_LARGURA - 1] + "…"
+
+
+def _rotulo_coluna(c: Coluna, no_banco: bool) -> Text:
+    rotulo = Text.assemble((c.nome, "bold"), (f"  {c.tipo}", COR["cinza"]))
+    if not no_banco:
+        rotulo.append(t("dados.f.so_depois"), style=COR["amarelo"])
+    return rotulo
+
+
+class _FormLinhas(_EscolheNoPai, FormBase):
+    """O que alterar, apagar e apagar duplicatas dividem: as linhas do filtro da tela (uma cópia: mudar o filtro
+    depois não muda a operação), o botão que espera a contagem, a amostra e a contagem guardada na operação."""
+
+    exige_contagem = True
+    altura_avisos = 14
+    chave_titulo = ""
+
+    def __init__(self, sessao, fonte, tabela_id: str, filtro_: filtro.Filtro):
+        self.sessao = sessao
+        super().__init__(sessao.rascunho, fonte)
+        self.tabela_id = tabela_id
+        self.filtro = copy.deepcopy(filtro_)
+        self.tab = self.rascunho.vista().tabelas[tabela_id]
+        self.titulo = t(self.chave_titulo, tabela=self.tab.nome)
+
+    @property
+    def rascunho(self) -> rs.Rascunho:
+        return self.sessao.rascunho
+
+    def acrescentar(self, op: rs.Operacao) -> None:
+        self.sessao.acrescentar(op)
+
+    @property
+    def vista_contada(self) -> Optional[int]:
+        """As linhas que a contagem do estado atual mostrou (None: ainda não, ou não deu para contar)."""
+        return checagem.contagem(self.avisos_chegados) if self.avisos_chegados else None
+
+    def _quais(self) -> Static:
+        descricao = rs._descricao_filtro(self.filtro, self.rascunho.vista(), self.tabela_id)
+        return Static(Text(t("dados.f.quais", filtro=descricao), style=COR["cinza"]))
+
+    def _na_base(self, id: str) -> bool:
+        return rs._nome_na_base(self.rascunho.base, id) is not None
+
+    def _vivas(self) -> List[Coluna]:
+        return [c for c in self.tab.colunas if c.estado != "apagado"]
+
+    def _exige_no_banco(self, ids) -> None:
+        for i in ids:
+            if not self._na_base(i):
+                raise ValueError(t("dados.e.so_depois_usar", nome=rs._nome_de(i, self.rascunho.vista(), self.rascunho.base)))
+
+    # a amostra: na thread dos avisos, com os nomes do banco
+    def do_banco(self, op, consulta, avisos):
+        base = self.rascunho.base
+        tab = base.tabelas.get(self.tabela_id)
+        if tab is None or any(rs._nome_na_base(base, i) is None for i in op.refere()):
+            return None                     # o banco ainda não tem: os avisos já dizem "só depois de aplicar"
+        return self.amostra(op, consulta, base, tab)
+
+    def amostra(self, op, consulta, base: Modelo, tab):
+        """(colunas, linhas) da amostra; None se não houver."""
+        cols = [c.nome for c in tab.colunas]
+        return cols, consulta.amostra(tab.esquema, tab.nome, op.onde(base), cols, _AMOSTRA)
+
+    def texto_extra(self, extra) -> Text:
+        texto = Text()
+        if self.vista_contada is None:
+            texto.append("! " + t("dados.f.sem_contagem_vista") + "\n", style=COR["amarelo"])
+        if extra and extra[1]:
+            texto.append_text(self.texto_amostra(*extra))
+        return texto
+
+    def texto_amostra(self, colunas: List[str], linhas) -> Text:
+        texto = Text(t("dados.f.amostra") + "\n", style="bold")
+        texto.append(_corta("  " + " · ".join(colunas)) + "\n", style=COR["cinza"])
+        for linha in list(linhas)[:_AMOSTRA]:
+            texto.append(_corta("  " + " · ".join(_mostra(v) for v in linha)) + "\n")
+        return texto
+
+
+class ConfirmarApagarLinhas(_FormLinhas):
+    """Apagar as linhas filtradas: quantas, uma amostra, a cascata (o que some junto, fica vazio ou impede) e a
+    sugestão de soft delete. O foco começa no cancelar: `x` e um enter distraído não põem um DELETE no rascunho."""
+
+    chave_titulo = "dados.f.apagar_linhas"
+
+    def campos(self) -> ComposeResult:
+        yield self._quais()
+
+    def on_mount(self) -> None:
+        # (o on_mount do FormBase o Textual chama em seguida)
+        self.query_one("#cancelar", Button).focus()
+
+    def operacao(self) -> rs.Operacao:
+        return rs.Apagar(self.tabela_id, copy.deepcopy(self.filtro), vista=self.vista_contada)
+
+
+class LinhaMudanca(Vertical):
+    """Uma linha do alterar: coluna ← o que ela recebe (um valor, vazio, uma limpeza, outra coluna) e o campo do
+    valor ou da outra coluna. Trocar a coluna ou a mudança remonta o campo antes de a mensagem subir ao formulário
+    (o Textual só a sobe quando este handler termina): a prévia já lê o campo novo."""
+
+    DEFAULT_CSS = """
+    LinhaMudanca { height: auto; margin-top: 1; }
+    LinhaMudanca .cabeca, LinhaMudanca .valor { height: auto; }
+    LinhaMudanca .cabeca Select { width: 1fr; }
+    LinhaMudanca .seta { width: auto; padding: 1 1 0 1; }
+    """
+
+    def __init__(self, form: "FormAlterar"):
+        super().__init__()
+        self.form = form
+        self._montado: Tuple[Optional[str], Optional[str]] = (None, None)
+        self._campo = None              # o CampoValor ou o Select da outra coluna, quando há
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(classes="cabeca"):
+            yield Select(self.form.opcoes_coluna(), classes="coluna", prompt=t("dados.f.coluna"))
+            yield Static(t("dados.f.recebe"), classes="seta")
+            yield Select([], classes="tipo", prompt=t("dados.f.mudanca"))
+        yield Vertical(classes="valor")
+
+    def _valor(self, classe: str) -> Optional[str]:
+        s = self.query_one("." + classe, Select)
+        return None if s.is_blank() else str(s.value)
+
+    def coluna(self) -> Optional[Coluna]:
+        i = self._valor("coluna")
+        return self.form.tab.coluna(i) if i else None
+
+    async def on_select_changed(self, evento: Select.Changed) -> None:
+        # não para o evento: o formulário refaz a prévia depois
+        if evento.select.has_class("coluna"):
+            c = self.coluna()
+            tipos = self.form.tipos(c) if c is not None else []
+            seletor = self.query_one(".tipo", Select)
+            antes = self._valor("tipo")
+            seletor.set_options([(t(f"dados.m.{x}"), x) for x in tipos])
+            if antes in tipos:
+                seletor.value = antes
+            await self._montar_campo()
+        elif evento.select.has_class("tipo"):
+            await self._montar_campo()
+
+    async def _montar_campo(self) -> None:
+        c, tipo = self.coluna(), self._valor("tipo")
+        chave = (c.id if c is not None else None, tipo)
+        if chave == self._montado:
+            return
+        self._montado, self._campo = chave, None
+        area = self.query_one(".valor", Vertical)
+        await area.remove_children()
+        if c is None or tipo not in ("valor", "coluna"):
+            return
+        if tipo == "valor":
+            campo = campo_da_coluna(self.form.rascunho.vista(), self.form.rascunho.base, self.form.tabela_id, c,
+                                    self.form.novo_id())
+        else:
+            campo = Select(self.form.opcoes_outra(c), classes="outra", prompt=t("dados.f.outra_coluna"))
+        self._campo = campo
+        await area.mount(campo)
+
+    def mudanca(self) -> Tuple[str, rs.Mudanca]:
+        """(id da coluna, Mudanca); ValueError diz o que falta."""
+        c = self.coluna()
+        if c is None:
+            raise ValueError(t("dados.e.coluna"))
+        self.form._exige_no_banco([c.id])
+        tipo = self._valor("tipo")
+        if tipo is None:
+            raise ValueError(t("dados.e.mudanca", coluna=c.nome))
+        if tipo == "valor":
+            try:
+                v = self._campo.valor() if isinstance(self._campo, CampoValor) else None
+            except NoMatches:           # ainda montando
+                v = None
+            return c.id, rs.Mudanca("valor", v)
+        if tipo == "coluna":
+            outra = None
+            if isinstance(self._campo, Select) and not self._campo.is_blank():
+                outra = str(self._campo.value)
+                self.form._exige_no_banco([outra])
+            return c.id, rs.Mudanca("coluna", coluna=outra)
+        return c.id, rs.Mudanca(tipo)
+
+
+class FormAlterar(_FormLinhas):
+    """As linhas filtradas recebem: uma ou mais linhas "coluna ← mudança" (+ coluna / − última). Mostra quantas
+    linhas mudam e até 5 como "antes → depois"."""
+
+    chave_titulo = "dados.f.alterar"
+    DEFAULT_CSS = """
+    FormAlterar #mudancas { height: auto; }
+    FormAlterar #botoes_mudancas { height: 3; margin-top: 1; }
+    FormAlterar #botoes_mudancas Button { margin-right: 1; }
+    """
+
+    def __init__(self, sessao, fonte, tabela_id: str, filtro_: filtro.Filtro):
+        super().__init__(sessao, fonte, tabela_id, filtro_)
+        self._ids = 0
+
+    def novo_id(self) -> str:
+        self._ids += 1
+        return f"valor_{self._ids}"
+
+    def campos(self) -> ComposeResult:
+        yield self._quais()
+        with Vertical(id="mudancas"):
+            yield LinhaMudanca(self)
+        with Horizontal(id="botoes_mudancas"):
+            yield Button(t("dados.f.mais_coluna"), id="mais_coluna")
+            yield Button(t("dados.f.menos_coluna"), id="menos_coluna")
+        yield Static(Text(t("dados.f.so_quem_muda"), style=COR["cinza"]))
+
+    def on_mount(self) -> None:
+        self.query_one(".coluna", Select).focus()
+
+    def linhas(self) -> List[LinhaMudanca]:
+        return list(self.query(LinhaMudanca))
+
+    # as listas
+    def opcoes_coluna(self):
+        """As colunas que recebem valor (identidade ALWAYS e gerada, não: o banco as preenche)."""
+        return [(_rotulo_coluna(c, self._na_base(c.id)), c.id) for c in self._vivas()
+                if not c.gerada and not (c.identidade and c.identidade_sempre)]
+
+    def tipos(self, c: Coluna) -> List[str]:
+        """As mudanças que servem para a coluna: as limpezas só para texto."""
+        return ["valor", "vazio", "coluna"] + (list(_LIMPEZAS) if filtro.familia(c.tipo) == "texto" else [])
+
+    def opcoes_outra(self, c: Coluna):
+        familia = filtro.familia(c.tipo)
+        return [(_rotulo_coluna(o, self._na_base(o.id)), o.id) for o in self._vivas()
+                if o.id != c.id and filtro.familia(o.tipo) == familia]
+
+    def operacao(self) -> rs.Operacao:
+        mudancas: Dict[str, rs.Mudanca] = {}
+        for linha in self.linhas():
+            i, mudanca = linha.mudanca()
+            if i in mudancas:
+                raise ValueError(t("dados.e.coluna_repetida", coluna=self.tab.coluna(i).nome))
+            mudancas[i] = mudanca
+        return rs.Alterar(self.tabela_id, copy.deepcopy(self.filtro), mudancas, vista=self.vista_contada)
+
+    def amostra(self, op, consulta, base: Modelo, tab):
+        sets = op.sets(base)
+        return list(sets), consulta.antes_depois(tab.esquema, tab.nome, op.onde(base), sets, _AMOSTRA)
+
+    def texto_amostra(self, colunas: List[str], pares) -> Text:
+        texto = Text(t("dados.f.antes_depois") + "\n", style="bold")
+        for antes, depois in list(pares)[:_AMOSTRA]:
+            partes = [f"{_mostra(a)} → {_mostra(d)}" for a, d in zip(antes, depois)]
+            if len(colunas) > 1:
+                partes = [f"{c}: {p}" for c, p in zip(colunas, partes)]
+            texto.append(_corta("  " + " · ".join(partes)) + "\n")
+        return texto
+
+    async def on_button_pressed(self, evento: Button.Pressed) -> None:
+        # os outros botões são do FormBase, cujo handler o Textual chama depois deste (não chamar super aqui)
+        if evento.button.id == "mais_coluna":
+            evento.stop()
+            linha = LinhaMudanca(self)
+            await self.query_one("#mudancas").mount(linha)
+            linha.query_one(".coluna", Select).focus()
+            self.atualizar()
+        elif evento.button.id == "menos_coluna":
+            evento.stop()
+            linhas = self.linhas()
+            if len(linhas) > 1:
+                await linhas[-1].remove()
+                self.atualizar()
+
+
+class FormDuplicatas(_FormLinhas):
+    """Apagar as repetidas entre as linhas filtradas: repetidas por quais colunas (ignorando maiúsculas e espaços
+    no texto, se quiser) e qual fica (menor ou maior chave, as N mais recentes por uma data). Mostra os grupos, as
+    linhas que saem, as que ficam fora por terem vazio, a cascata e um grupo de amostra (as que ficam e as que saem)."""
+
+    chave_titulo = "dados.f.duplicatas"
+    DEFAULT_CSS = """
+    FormDuplicatas #por { height: auto; max-height: 8; }
+    """
+
+    def campos(self) -> ComposeResult:
+        yield self._quais()
+        yield Static(t("dados.f.repetidas_por"))
+        yield SelectionList(*[(_rotulo_coluna(c, self._na_base(c.id)), c.id) for c in self._vivas()], id="por")
+        yield Checkbox(t("dados.f.normalizar"), id="normalizar", disabled=True)
+        yield Static(t("dados.f.manter"))
+        yield Select([(t(f"dados.f.manter_{m}"), m) for m in ("menor", "maior", "recente")], value="menor",
+                     allow_blank=False, id="manter")
+        yield Static(t("dados.f.ordem"))
+        yield Select([(_rotulo_coluna(c, self._na_base(c.id)), c.id) for c in self._vivas()
+                      if filtro.familia(c.tipo) == "data"], id="ordem", prompt=t("dados.f.ordem"), disabled=True)
+        yield Static(t("dados.f.n"))
+        yield Input("1", id="n")
+
+    def on_mount(self) -> None:
+        self.query_one("#por", SelectionList).focus()
+
+    def _por(self) -> Tuple[str, ...]:
+        escolhidas = set(self.query_one("#por", SelectionList).selected)
+        return tuple(c.id for c in self._vivas() if c.id in escolhidas)
+
+    def on_selection_list_selected_changed(self, evento) -> None:
+        # (o do FormBase, que refaz a prévia, o Textual chama em seguida)
+        texto = any(filtro.familia(self.tab.coluna(i).tipo) == "texto" for i in self._por())
+        self.query_one("#normalizar", Checkbox).disabled = not texto
+
+    def on_select_changed(self, evento: Select.Changed) -> None:
+        if evento.select.id == "manter":
+            self.query_one("#ordem", Select).disabled = evento.value != "recente"
+
+    def operacao(self) -> rs.Operacao:
+        por = self._por()
+        self._exige_no_banco(por)
+        manter = str(self.query_one("#manter", Select).value)
+        ordem = None
+        if manter == "recente":
+            seletor = self.query_one("#ordem", Select)
+            ordem = None if seletor.is_blank() else str(seletor.value)
+            if ordem is not None:
+                self._exige_no_banco([ordem])
+        texto = self.query_one("#n", Input).value.strip()
+        try:
+            n = int(texto)
+        except ValueError:
+            raise ValueError(t("op.e.n", valor=texto)) from None
+        return rs.ApagarDuplicatas(self.tabela_id, copy.deepcopy(self.filtro), por,
+                                   self.query_one("#normalizar", Checkbox).value, manter, ordem, n,
+                                   vista=self.vista_contada)
+
+    def amostra(self, op, consulta, base: Modelo, tab):
+        cols = [c.nome for c in tab.colunas]
+        return cols, consulta.selecionar(op.amostra_sql(base, cols, _AMOSTRA))
+
+    def texto_amostra(self, colunas: List[str], linhas) -> Text:
+        texto = Text(t("dados.f.grupo") + "\n", style="bold")
+        n = len(colunas)
+        primeiro = None
+        for linha in linhas:
+            grupo = tuple(linha[n + 1:])
+            if primeiro is None:
+                primeiro = grupo
+            elif grupo != primeiro:
+                break                       # um grupo só: as que ficam e as que saem dele
+            sai = bool(linha[n])
+            marca = t("dados.f.sai") if sai else t("dados.f.fica")
+            texto.append(f"  {marca:<6}", style=COR["laranja"] if sai else COR["verde"])
+            texto.append(_corta(" · ".join(_mostra(v) for v in linha[:n])) + "\n")
+        return texto
