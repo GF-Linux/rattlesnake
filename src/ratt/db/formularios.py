@@ -583,14 +583,14 @@ class Confirmar(ModalScreen):
     Confirmar { align: center middle; }
     Confirmar > Vertical { width: 84; max-width: 100%; height: auto; max-height: 100%; border: round $primary;
                            background: $surface; padding: 1 2; }
-    Confirmar #lista { height: auto; max-height: 14; }
+    Confirmar #lista, Confirmar #sql { height: auto; max-height: 16; margin-top: 1; }
     Confirmar #botoes { height: 3; margin-top: 1; align-horizontal: right; }
     Confirmar Button { margin-left: 1; }
     """
 
-    def __init__(self, pergunta: str, itens: List[str], rotulo: str, foco: str = "sim"):
+    def __init__(self, pergunta: str, itens: List[str], rotulo: str, foco: str = "sim", sql: str = ""):
         super().__init__()
-        self.pergunta, self.itens, self.rotulo, self.foco = pergunta, itens, rotulo, foco
+        self.pergunta, self.itens, self.rotulo, self.foco, self.sql = pergunta, itens, rotulo, foco, sql
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -598,6 +598,9 @@ class Confirmar(ModalScreen):
             if self.itens:
                 with VerticalScroll(id="lista"):
                     yield Static(Text("\n".join("  • " + i for i in self.itens)))
+            if self.sql:
+                with VerticalScroll(id="sql"):
+                    yield Static(Syntax(self.sql, "sql", theme="ansi_dark", background_color="default", word_wrap=True))
             with Horizontal(id="botoes"):
                 yield Button(self.rotulo, id="sim", variant="warning")
                 yield Button(t("canvas.f.cancelar"), id="nao")

@@ -1587,9 +1587,10 @@ def test_aplicar_recusa_com_invalidas(monkeypatch, tmp_path):
     async def roteiro():
         app = AppTeste(FonteFalsa(m))
         async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
             await piloto.press("enter")
             await piloto.pause()
-            assert app.screen.rascunho.operacoes and isinstance(app.screen, canvas.TelaCanvas)
+            assert app.screen.rascunho.operacoes and isinstance(app.screen, canvas.TelaCanvas)   # nenhum modal abriu
     asyncio.run(roteiro())
 
 
@@ -1649,9 +1650,103 @@ def test_depois_de_aplicar_remapeia_posicoes_e_esvazia(monkeypatch, tmp_path):
             antes = tela.posicoes[nova.id]
             fresco = modelo_png()
             fresco.tabelas["t9"] = modelo.Tabela("t9", "public", "pets", [modelo.Coluna("t9.c1", "id", "bigint", pk=True)])
-            tela._aplicado(fresco, "-- ok\n", {nova.id: "pets"})
+            tela._concluir(0, None, False, "-- ok\n")
+            assert tela.rascunho.operacoes == [] and tela._aplicando       # já esvaziado, antes da releitura
+            tela._aplicado("public", fresco, {nova.id: "pets"})
             assert tela.rascunho.operacoes == [] and tela.posicoes["t9"] == antes and nova.id not in tela.posicoes
             assert guardar.ler_rascunho(5432, "teste", "public") is None
             assert guardar.ler_posicoes(5432, "teste", "public")["t9"] == antes
             assert len(list((guardar.pasta(5432, "teste") / "aplicados").glob("*.sql"))) == 1
     asyncio.run(roteiro())
+
+
+def _com_rascunho(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path)); monkeypatch.chdir(tmp_path)
+    r = rascunho.Rascunho(modelo_png()); r.acrescentar(rascunho.Renomear("t1", None, "pessoas"))
+    guardar.gravar_rascunho(5432, "teste", "public", r.para_dict())
+
+
+def test_escape_no_caminho_nao_exporta(monkeypatch, tmp_path):
+    _com_rascunho(tmp_path, monkeypatch)
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            await piloto.press("w"); await piloto.pause()
+            await piloto.press("escape"); await piloto.pause()
+    asyncio.run(roteiro())
+    assert not (tmp_path / "rascunho-teste-public.sql").exists()
+
+
+def test_um_enter_nao_aplica_e_cancelar_nao_roda(monkeypatch, tmp_path):
+    _com_rascunho(tmp_path, monkeypatch)
+    chamado = []
+    monkeypatch.setattr(canvas.TelaCanvas, "_rodar", lambda self, ensaio: chamado.append(ensaio))
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            await piloto.press("enter"); await piloto.pause()
+            assert not isinstance(app.screen, canvas.TelaCanvas)          # a confirmação abriu
+            await piloto.press("enter"); await piloto.pause()             # o foco inicial é cancelar
+            await piloto.press("enter"); await piloto.pause()
+            await piloto.press("escape"); await piloto.pause()
+    asyncio.run(roteiro())
+    assert chamado == []
+
+
+def test_ensaio_na_tela_nao_mexe_no_rascunho(monkeypatch, tmp_path):
+    _com_rascunho(tmp_path, monkeypatch)
+    antes = guardar.ler_rascunho(5432, "teste", "public")
+    monkeypatch.setattr(canvas.TelaCanvas, "_sessao", lambda self, con, arq, ensaio, cab: (0, None))
+    class Con:
+        def close(self): pass
+    fonte = FonteFalsa(); fonte.conexao_para_aplicar = lambda: Con()
+    from contextlib import contextmanager
+    @contextmanager
+    def sem_suspender(self): yield
+    monkeypatch.setattr(App, "suspend", sem_suspender)
+    async def roteiro():
+        app = AppTeste(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            await piloto.press("e"); await piloto.pause()
+            assert len(app.screen.rascunho.operacoes) == 1 and not app.screen._aplicando
+    asyncio.run(roteiro())
+    assert guardar.ler_rascunho(5432, "teste", "public") == antes
+    assert not (guardar.pasta(5432, "teste") / "aplicados").exists()
+
+
+def test_sair_logo_depois_de_aplicar_nao_deixa_o_aplicado_pendente(monkeypatch, tmp_path):
+    _com_rascunho(tmp_path, monkeypatch)
+    monkeypatch.setattr(canvas.TelaCanvas, "_reler_aplicado", lambda self, *a: None)   # a releitura nunca chega
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            app.screen._concluir(0, None, False, "-- sql\n")
+            await piloto.press("escape"); await piloto.pause()
+    asyncio.run(roteiro())
+    assert guardar.ler_rascunho(5432, "teste", "public") is None
+    assert len(list((guardar.pasta(5432, "teste") / "aplicados").glob("*.sql"))) == 1
+
+
+def test_trocar_de_esquema_na_janela_nao_toca_o_outro(monkeypatch, tmp_path):
+    _com_rascunho(tmp_path, monkeypatch)
+    guardar.gravar_rascunho(5432, "teste", "outro", {"operacoes": [], "proximo": 1})
+    guardar.gravar_posicoes(5432, "teste", "outro", {"t1": (9, 9)})
+    monkeypatch.setattr(canvas.TelaCanvas, "_reler_aplicado", lambda self, *a: None)
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            tela._concluir(0, None, False, "-- sql\n")
+            await piloto.press("s"); await piloto.pause()
+            assert isinstance(app.screen, canvas.TelaCanvas)               # bloqueado: nenhum seletor abriu
+            tela.esquema = "outro"                                         # mesmo se trocasse à força
+            tela._aplicado("public", modelo_png(), {})
+    asyncio.run(roteiro())
+    assert guardar.ler_rascunho(5432, "teste", "outro") is not None
+    assert guardar.ler_posicoes(5432, "teste", "outro") == {"t1": (9, 9)}
+    assert guardar.ler_rascunho(5432, "teste", "public") is None

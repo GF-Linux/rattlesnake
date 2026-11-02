@@ -628,6 +628,7 @@ ratt db user passwd [name]            changes a password (no name: yours)
     "canvas.k.desfazer": {"pt": "desfazer", "en": "undo"},
     "canvas.k.rascunho": {"pt": "rascunho", "en": "draft"},
     "canvas.k.tirar": {"pt": "tirar do rascunho", "en": "remove from draft"},
+    "canvas.aplicando": {"pt": "Acabei de aplicar: espere a releitura do banco.", "en": "Just applied: wait for the database to be re-read."},
     "canvas.k.aplicar": {"pt": "aplicar", "en": "apply"},
     "canvas.k.ensaio": {"pt": "ensaio", "en": "dry run"},
     "canvas.k.exportar": {"pt": "exportar .sql", "en": "export .sql"},

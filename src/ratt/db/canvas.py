@@ -8,6 +8,7 @@ do rascunho moram em `formularios.py`. Nada aqui executa DDL: o rascunho só vai
 from __future__ import annotations
 
 import getpass
+import sys
 import threading
 import time
 from pathlib import Path
@@ -649,6 +650,8 @@ class TelaCanvas(Screen):
         self.app.pop_screen()
 
     def action_esquema(self) -> None:
+        if not self._livre():
+            return
         self.listar_esquemas()
 
     def action_vertical(self, passo: int) -> None:
@@ -687,7 +690,16 @@ class TelaCanvas(Screen):
 
     # ── editar ──────────────────────────────────────────────────────────────
 
+    def _livre(self) -> bool:
+        """Entre o commit e a releitura o rascunho já foi esvaziado e o modelo ainda é o velho: nada de editar,
+        aplicar de novo, exportar nem trocar de schema nesse intervalo."""
+        if self._aplicando:
+            self.notify(t("canvas.aplicando"), severity="warning")
+        return not self._aplicando
+
     def _pronto(self) -> bool:
+        if not self._livre():
+            return False
         if not self.carregado:
             self.notify(t("canvas.carregando"))
         return self.carregado
@@ -778,6 +790,8 @@ class TelaCanvas(Screen):
         self._abrir(form)
 
     def action_desfazer(self) -> None:
+        if not self._livre():
+            return
         if self.rascunho.desfazer() is None:
             self.notify(t("canvas.nada_desfazer"))
             return
@@ -787,6 +801,8 @@ class TelaCanvas(Screen):
         self.query_one(PainelSQL).focus()
 
     def on_painel_sql_tirar(self, evento: PainelSQL.Tirar) -> None:
+        if not self._livre():
+            return
         i = evento.indice
         if i >= len(self.rascunho.operacoes):
             return
@@ -826,9 +842,11 @@ class TelaCanvas(Screen):
         if not self._pode_enviar():
             return
         passos = self.rascunho.passos()
+        # foco em "cancelar": um Enter que sobrou no teclado nunca grava no banco
         self.app.push_screen(
             formularios.Confirmar(t("canvas.f.aplicar_pergunta", banco=self.fonte.banco, n=len(passos)),
-                                  [p[2] for p in passos], t("canvas.f.aplicar")),
+                                  [], t("canvas.f.aplicar"), foco="nao",
+                                  sql=self.rascunho.sql_texto(self._cabecalho())),
             lambda sim: self._rodar(False) if sim else None)
 
     def action_ensaio(self) -> None:
@@ -850,7 +868,7 @@ class TelaCanvas(Screen):
         try:
             with self.app.suspend():
                 resultado = self._sessao(conexao, arquivo, ensaio, cabecalho)
-        except OSError as erro:
+        except Exception as erro:             # o rascunho fica: nada foi decidido
             self.notify(t("canvas.erro_aplicar", erro=erro), severity="error")
             return
         finally:
@@ -869,6 +887,11 @@ class TelaCanvas(Screen):
             input("\n" + t("canvas.enter_volta"))
         except EOFError:
             pass
+        try:                    # o Textual não descarta o que foi digitado enquanto estava suspenso
+            import termios
+            termios.tcflush(sys.stdin, termios.TCIFLUSH)
+        except Exception:
+            pass
         return resultado
 
     def _concluir(self, codigo: int, indice: Optional[int], ensaio: bool, texto: str) -> None:
@@ -881,60 +904,69 @@ class TelaCanvas(Screen):
             self.query_one(PainelSQL).atualizar(self.rascunho.passos(), None)
             self.notify(t("canvas.ensaio_ok"))
             return
-        v = self.rascunho.vista()
-        nomes = {i: tab.nome for i, tab in v.tabelas.items() if i.startswith("novo-t") and tab.estado != "apagado"}
+        nomes = {i: tab.nome for i, tab in self.rascunho.vista().tabelas.items()
+                 if i.startswith("novo-t") and tab.estado != "apagado"}
+        # o banco já gravou: arquivar e esvaziar o rascunho AGORA, sem esperar a releitura. Se a pessoa sair ou
+        # trocar de schema nesse intervalo, nada aplicado fica no disco como se estivesse pendente.
+        try:
+            caminho = guardar.guardar_aplicado(self.fonte.porta, self.fonte.banco, texto)
+            self.notify(t("canvas.aplicado", caminho=caminho))
+        except OSError as e:
+            self.notify(t("canvas.erro_gravar", erro=e), severity="error")
+        self.rascunho = _rascunho.Rascunho(self.rascunho.modelo())
+        self.falha, self.selecao = None, None
+        self._persistir()
+        self._montar()
         self._aplicando = True
-        self._reler_aplicado(self.esquema, texto, nomes)
+        self._reler_aplicado(self.esquema, nomes)
 
     def _marcar_falha(self, indice: Optional[int]) -> None:
         self.falha = indice if indice is not None and indice >= 0 else None
         self.query_one(PainelSQL).atualizar(self.rascunho.passos(), self.falha)
 
     @work(thread=True, exclusive=True, group="aplicar_canvas")
-    def _reler_aplicado(self, esquema: str, texto: str, nomes: Dict[str, str]) -> None:
+    def _reler_aplicado(self, esquema: str, nomes: Dict[str, str]) -> None:
         try:
             m = self.fonte.modelo(esquema)
         except Exception as erro:
-            self.app.call_from_thread(self._aplicado, None, texto, nomes, erro)
+            self.app.call_from_thread(self._aplicado, esquema, None, nomes, erro)
             return
-        self.app.call_from_thread(self._aplicado, m, texto, nomes)
+        self.app.call_from_thread(self._aplicado, esquema, m, nomes)
 
-    def _aplicado(self, m: Optional[_modelo.Modelo], texto: str, nomes: Dict[str, str], erro=None) -> None:
-        """O banco já gravou: guarda o SQL, leva as posições das tabelas novas para os ids do catálogo (pelo nome),
-        esvazia o rascunho e passa a mostrar o banco como ele ficou."""
+    def _aplicado(self, esquema: str, m: Optional[_modelo.Modelo], nomes: Dict[str, str], erro=None) -> None:
+        """Chegou o catálogo depois do apply: leva as posições das tabelas novas para os ids dele (pelo nome) e
+        passa a mostrar o banco como ficou. Se a tela já saiu ou trocou de schema, só as posições do schema
+        aplicado são acertadas, no disco."""
         self._aplicando = False
-        if not self.is_attached:
-            return
-        try:
-            caminho = guardar.guardar_aplicado(self.fonte.porta, self.fonte.banco, texto)
-            self.notify(t("canvas.aplicado", caminho=caminho))
-        except OSError as e:
-            self.notify(t("canvas.erro_gravar", erro=e), severity="error")
+        mesma = self.is_attached and esquema == self.esquema
         if m is None:
-            self._falhou(self.esquema, erro)
-            m = self.rascunho.modelo()          # o vigia traz o catálogo de verdade na próxima volta
-            self.marca = None
-        else:
-            por_nome = {tab.nome: tab.id for tab in m.tabelas.values()}
-            for velho, nome in nomes.items():
-                if velho in self.posicoes and nome in por_nome:
-                    self.posicoes[por_nome[nome]] = self.posicoes.pop(velho)
-        self.posicoes = {i: xy for i, xy in self.posicoes.items() if not i.startswith("novo-")}
-        self.rascunho = _rascunho.Rascunho(m)
-        self.falha = None
-        self.selecao = None
+            if mesma:
+                self.marca = None               # o vigia traz o catálogo de verdade na próxima volta
+                self._falhou(esquema, erro)
+            return
+        por_nome = {tab.nome: tab.id for tab in m.tabelas.values()}
+        posicoes = self.posicoes if mesma else guardar.ler_posicoes(self.fonte.porta, self.fonte.banco, esquema)
+        for velho, nome in nomes.items():
+            if velho in posicoes and nome in por_nome:
+                posicoes[por_nome[nome]] = posicoes.pop(velho)
+        posicoes = {i: xy for i, xy in posicoes.items() if not i.startswith("novo-")}
         try:
-            self._guardar()
+            guardar.gravar_posicoes(self.fonte.porta, self.fonte.banco, esquema, posicoes)
         except OSError as e:
             self.notify(t("canvas.erro_gravar", erro=e), severity="error")
-        self._persistir()
+        if not mesma:
+            return
+        self.posicoes = posicoes
+        self.rascunho = _rascunho.Rascunho(m)
         self._montar()
 
     def action_exportar(self) -> None:
         if not self._pode_enviar():
             return
         padrao = f"rascunho-{self.fonte.banco}-{self.esquema}.sql"
-        self.app.push_screen(PerguntarNome(t("canvas.f.caminho"), padrao), lambda valor: self._exportar(valor or padrao))
+        # None é Escape (cancela); "" é Enter sem digitar (vale o caminho padrão)
+        self.app.push_screen(PerguntarNome(t("canvas.f.caminho"), padrao),
+                             lambda valor: None if valor is None else self._exportar(valor or padrao))
 
     def _exportar(self, valor: Optional[str]) -> None:
         if not valor:
