@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 import psycopg
 from psycopg import sql
 
+from . import filtro
 from . import rascunho as rs
 from .idioma import t
 from .modelo import Modelo, opcional
@@ -132,38 +133,9 @@ class Consulta:
 
 # ── avisos de uma operação ──
 
-_SINONIMOS = {"int8": "bigint", "int4": "integer", "int": "integer", "int2": "smallint",
-              "serial": "integer", "serial4": "integer", "bigserial": "bigint", "serial8": "bigint",
-              "smallserial": "smallint", "serial2": "smallint", "decimal": "numeric",
-              "float8": "double precision", "float": "double precision", "float4": "real",
-              "varchar": "character varying", "char": "character", "bpchar": "character",
-              "timestamptz": "timestamp with time zone", "timestamp": "timestamp without time zone",
-              "timetz": "time with time zone", "time": "time without time zone", "bool": "boolean"}
-
-# Famílias: tipos diferentes de uma mesma família o PostgreSQL costuma comparar (int → bigint, varchar → text);
-# de famílias diferentes, não. Um tipo fora da lista é uma família só dele.
-_FAMILIAS = {
-    "numero": {"smallint", "integer", "bigint", "numeric", "real", "double precision", "money"},
-    "texto": {"text", "character varying", "character", "name", "citext"},
-    "tempo": {"date", "timestamp without time zone", "timestamp with time zone", "time without time zone",
-              "time with time zone", "interval"},
-    "booleano": {"boolean"},
-    "uuid": {"uuid"},
-    "json": {"json", "jsonb"},
-}
-
-
-def _tipo_normal(tipo: str) -> str:
-    """O tipo sem modificador `(255)`, com os espaços normalizados e os apelidos do PostgreSQL unidos."""
-    base = " ".join(re.sub(r"\(.*?\)", "", tipo).lower().split())
-    return _SINONIMOS.get(base, base)
-
-
-def _familia(tipo: str) -> str:
-    normal = _tipo_normal(tipo)
-    if normal.endswith("[]"):
-        return "lista de " + _familia(normal[:-2])
-    return next((nome for nome, tipos in _FAMILIAS.items() if normal in tipos), normal)
+# Os apelidos, as famílias e a normalização de tipos moram em filtro.py (o filtro também precisa deles).
+_tipo_normal = filtro.tipo_normal
+_familia = filtro.familia_fina
 
 
 def _id_catalogo(id: str):
