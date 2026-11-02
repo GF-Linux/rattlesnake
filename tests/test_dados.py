@@ -350,3 +350,178 @@ def test_vazio_na_lista_e_avisos_revistos():
     assert filtro.deixa_vazios_de_fora(f, m, "t1") == ["t1.c4"]
     f = filtro.Filtro([filtro.Condicao("t1.c3", "menor", outra_coluna="t1.c1")])
     assert filtro.deixa_vazios_de_fora(f, m, "t1") == ["t1.c3"]
+
+
+# ── as operações de dados no rascunho ──
+
+def test_dolar_antes_de_dolar_tag_nao_abre_texto():
+    from ratt.db import rodar
+    assert [c.texto for c in rodar.dividir("SELECT a$$b$; SELECT 2")] == ["SELECT a$$b$", "SELECT 2"]
+    assert [c.texto for c in rodar.dividir("SELECT $b$;$b$; SELECT 2")] == ["SELECT $b$;$b$", "SELECT 2"]
+
+
+def test_inserir_sql():
+    r = rascunho.Rascunho(modelo_pessoas())
+    r.acrescentar(rascunho.Inserir("t1", {"t1.c2": "O'Brien", "t1.c3": "51", "t1.c4": None}))
+    assert "INSERT INTO public.pessoas (nome, idade, email) VALUES ('O''Brien', 51, NULL);" in r.sql_texto()
+
+
+def test_inserir_sem_valores_e_so_com_nome():
+    r = rascunho.Rascunho(modelo_pessoas())
+    r.acrescentar(rascunho.Inserir("t1", {}))
+    r.acrescentar(rascunho.Inserir("t1", {"t1.c2": "Zé"}))
+    sql = r.sql_texto()
+    assert "INSERT INTO public.pessoas DEFAULT VALUES;" in sql
+    assert "INSERT INTO public.pessoas (nome) VALUES ('Zé');" in sql
+
+
+def test_alterar_limpeza_pula_quem_nao_muda():
+    r = rascunho.Rascunho(modelo_pessoas())
+    f = filtro.Filtro([filtro.Condicao("t1.c4", "preenchido")])
+    r.acrescentar(rascunho.Alterar("t1", f, {"t1.c4": rascunho.Mudanca("minusculas"), "t1.c2": rascunho.Mudanca("trim")}))
+    assert ("UPDATE public.pessoas SET email = lower(email), nome = trim(nome) WHERE (email IS NOT NULL AND trim(email) <> '') "
+            "AND (email IS DISTINCT FROM lower(email) OR nome IS DISTINCT FROM trim(nome));") in r.sql_texto()
+
+
+def test_alterar_filtro_ou_vai_entre_parenteses_com_a_limpeza():
+    r = rascunho.Rascunho(modelo_pessoas())
+    f = filtro.Filtro([filtro.Condicao("t1.c2", "comeca", ["G"]), filtro.Condicao("t1.c3", "maior", ["40"])], conectivo="OU")
+    r.acrescentar(rascunho.Alterar("t1", f, {"t1.c2": rascunho.Mudanca("trim")}))
+    assert ("WHERE ((nome ILIKE 'G%') OR (idade > 40)) AND (nome IS DISTINCT FROM trim(nome));") in r.sql_texto()
+
+
+def test_alterar_outras_mudancas():
+    r = rascunho.Rascunho(modelo_pessoas())
+    r.acrescentar(rascunho.Alterar("t1", filtro.Filtro(), {
+        "t1.c3": rascunho.Mudanca("valor", "50"), "t1.c4": rascunho.Mudanca("vazio"),
+        "t1.c2": rascunho.Mudanca("coluna", coluna="t1.c4")}))
+    r.acrescentar(rascunho.Alterar("t1", filtro.Filtro(), {"t1.c4": rascunho.Mudanca("branco_vazio"),
+                                                            "t1.c2": rascunho.Mudanca("maiusculas")}))
+    sql = r.sql_texto()
+    assert "UPDATE public.pessoas SET idade = 50, email = NULL, nome = email;" in sql
+    assert ("UPDATE public.pessoas SET email = NULLIF(trim(email), ''), nome = upper(nome) WHERE "
+            "email IS DISTINCT FROM NULLIF(trim(email), '') OR nome IS DISTINCT FROM upper(nome);") in sql
+
+
+def test_alterar_sem_mudancas_ou_tipo_ruim_nao_entra():
+    r = rascunho.Rascunho(modelo_pessoas())
+    with pytest.raises(ValueError):
+        r.acrescentar(rascunho.Alterar("t1", filtro.Filtro(), {}))
+    with pytest.raises(ValueError):
+        r.acrescentar(rascunho.Alterar("t1", filtro.Filtro(), {"t1.c3": rascunho.Mudanca("valor", "vinte")}))
+    with pytest.raises(ValueError):
+        r.acrescentar(rascunho.Alterar("t1", filtro.Filtro(), {"t1.c3": rascunho.Mudanca("magia")}))
+    with pytest.raises(ValueError):
+        r.acrescentar(rascunho.Alterar("t1", filtro.Filtro(), {"t1.c3": rascunho.Mudanca("trim")}))   # trim em número
+    assert r.operacoes == []
+
+
+def test_apagar_e_duplicatas():
+    r = rascunho.Rascunho(modelo_pessoas())
+    r.acrescentar(rascunho.Apagar("t1", filtro.Filtro([filtro.Condicao("t1.c2", "comeca", ["G"])]), vista=3))
+    r.acrescentar(rascunho.ApagarDuplicatas("t1", filtro.Filtro(), ("t1.c4",), normalizar=True))
+    sql = r.sql_texto()
+    assert "DELETE FROM public.pessoas WHERE nome ILIKE 'G%';" in sql
+    assert ("DELETE FROM public.pessoas WHERE (id) IN (SELECT id FROM (SELECT id, row_number() OVER "
+            "(PARTITION BY lower(trim(email)) ORDER BY id) AS rn FROM public.pessoas) AS d WHERE rn > 1);") in sql
+
+
+def test_apagar_sem_filtro():
+    r = rascunho.Rascunho(modelo_pessoas())
+    r.acrescentar(rascunho.Apagar("t1", filtro.Filtro()))
+    assert "DELETE FROM public.pessoas;" in r.sql_texto()
+
+
+def test_duplicatas_maior_recente_n_e_ctid():
+    r = rascunho.Rascunho(modelo_pessoas())
+    f = filtro.Filtro([filtro.Condicao("t1.c6", "verdadeiro")])
+    r.acrescentar(rascunho.ApagarDuplicatas("t1", f, ("t1.c2", "t1.c3"), manter="maior"))
+    r.acrescentar(rascunho.ApagarDuplicatas("t1", filtro.Filtro(), ("t1.c2",), manter="recente", ordem="t1.c5", n=2))
+    m = modelo_pessoas()
+    m.tabelas["t1"].colunas[0].pk = False
+    r2 = rascunho.Rascunho(m)
+    r2.acrescentar(rascunho.ApagarDuplicatas("t1", filtro.Filtro(), ("t1.c2",)))
+    sql = r.sql_texto()
+    assert ("DELETE FROM public.pessoas WHERE (id) IN (SELECT id FROM (SELECT id, row_number() OVER "
+            "(PARTITION BY nome, idade ORDER BY id DESC) AS rn FROM public.pessoas WHERE ativo IS TRUE) AS d WHERE rn > 1);") in sql
+    assert "(PARTITION BY nome ORDER BY nascimento DESC NULLS LAST, id) AS rn" in sql and "WHERE rn > 2);" in sql
+    assert ("DELETE FROM public.pessoas WHERE (ctid) IN (SELECT ctid FROM (SELECT ctid, row_number() OVER "
+            "(PARTITION BY nome ORDER BY ctid) AS rn FROM public.pessoas) AS d WHERE rn > 1);") in r2.sql_texto()
+
+
+def test_duplicatas_argumentos_ruins():
+    r = rascunho.Rascunho(modelo_pessoas())
+    for kw in ({"manter": "menor", "n": 0}, {"manter": "recente"}, {"manter": "xis"}):
+        with pytest.raises(ValueError):
+            r.acrescentar(rascunho.ApagarDuplicatas("t1", filtro.Filtro(), ("t1.c4",), **kw))
+    with pytest.raises(ValueError):
+        r.acrescentar(rascunho.ApagarDuplicatas("t1", filtro.Filtro(), ()))
+    assert r.operacoes == []
+
+
+def test_dados_seguem_renomeacao_e_invalidam_coluna_apagada():
+    r = rascunho.Rascunho(modelo_pessoas())
+    r.acrescentar(rascunho.Renomear("t1", "t1.c4", "e_mail"))
+    r.acrescentar(rascunho.Apagar("t1", filtro.Filtro([filtro.Condicao("t1.c4", "vazio")])))
+    assert "DELETE FROM public.pessoas WHERE (e_mail IS NULL OR trim(e_mail) = '');" in r.sql_texto()
+    r2 = rascunho.Rascunho(modelo_pessoas())
+    r2.acrescentar(rascunho.ApagarColuna("t1", "t1.c4"))
+    with pytest.raises(ValueError):                                   # email já não existe na vista
+        r2.acrescentar(rascunho.Apagar("t1", filtro.Filtro([filtro.Condicao("t1.c4", "vazio")])))
+
+
+def test_refere_e_dependencias_das_operacoes_de_dados():
+    f = filtro.Filtro([filtro.Condicao("t1.c3", "maior", ["1"])])
+    assert rascunho.Inserir("t1", {"t1.c2": "x"}).refere() == {"t1", "t1.c2"}
+    assert rascunho.Alterar("t1", f, {"t1.c2": rascunho.Mudanca("coluna", coluna="t1.c4")}).refere() == \
+        {"t1", "t1.c2", "t1.c4", "t1.c3"}
+    assert rascunho.ApagarDuplicatas("t1", f, ("t1.c4",), manter="recente", ordem="t1.c5").refere() == \
+        {"t1", "t1.c4", "t1.c5", "t1.c3"}
+    r = rascunho.Rascunho(modelo_pessoas())
+    r.acrescentar(rascunho.AdicionarColuna("t1", Coluna("novo-c1", "apelido", "text")))
+    r.acrescentar(rascunho.Inserir("t1", {"novo-c1": "Gabi"}))
+    assert r.dependentes(0) == [1]
+    assert "INSERT INTO public.pessoas (apelido) VALUES ('Gabi');" in r.sql_texto()
+    r.tirar([0])                                    # sem a coluna, a inserção deixa de valer
+    assert r.invalidas == {0}
+
+
+def test_descricoes_de_uma_linha():
+    r = rascunho.Rascunho(modelo_pessoas())
+    r.acrescentar(rascunho.Inserir("t1", {"t1.c2": "x"}))
+    r.acrescentar(rascunho.Alterar("t1", filtro.Filtro(), {"t1.c2": rascunho.Mudanca("trim")}))
+    r.acrescentar(rascunho.Apagar("t1", filtro.Filtro()))
+    r.acrescentar(rascunho.ApagarDuplicatas("t1", filtro.Filtro(), ("t1.c4",)))
+    for _, valida, desc, _ in r.passos():
+        assert valida and desc and "\n" not in desc and "op." not in desc
+
+
+def test_json_das_operacoes_de_dados():
+    r = rascunho.Rascunho(modelo_pessoas())
+    f = filtro.Filtro([filtro.Condicao("t1.c2", "comeca", ["G"]), filtro.Condicao("t1.c3", "maior", ["1"])], conectivo="OU")
+    r.acrescentar(rascunho.Inserir("t1", {"t1.c2": "O'Brien", "t1.c4": None}))
+    r.acrescentar(rascunho.Alterar("t1", f, {"t1.c2": rascunho.Mudanca("trim"), "t1.c3": rascunho.Mudanca("valor", "5"),
+                                             "t1.c4": rascunho.Mudanca("coluna", coluna="t1.c2")}, vista=4))
+    r.acrescentar(rascunho.Apagar("t1", f, vista=2))
+    r.acrescentar(rascunho.ApagarDuplicatas("t1", f, ("t1.c4", "t1.c2"), True, "recente", "t1.c5", 2, vista=7))
+    antes = r.sql_texto()
+    lido = rascunho.Rascunho.de_dict(json.loads(json.dumps(r.para_dict())), modelo_pessoas())
+    assert lido.sql_texto() == antes and not lido.invalidas
+    assert [op.tipo for op in lido.operacoes] == ["inserir", "alterar", "apagar", "apagar_duplicatas"]
+    assert lido.operacoes[1].vista == 4 and lido.operacoes[3].por == ("t1.c4", "t1.c2")
+    assert lido.operacoes[1].mudancas["t1.c4"] == rascunho.Mudanca("coluna", coluna="t1.c2")
+    assert lido.operacoes[0].nomes == r.operacoes[0].nomes
+
+
+def test_json_de_dados_estragado_e_rascunho_antigo():
+    base = rascunho.Rascunho(modelo_pessoas())
+    base.acrescentar(rascunho.Renomear("t1", None, "gente"))
+    assert rascunho.Rascunho.de_dict(base.para_dict(), modelo_pessoas()).sql_texto() == base.sql_texto()
+    ruins = [{"tipo": "inserir", "tabela": "t1", "valores": [1]},
+             {"tipo": "alterar", "tabela": "t1", "filtro": {"coisa": 1}, "mudancas": {}},
+             {"tipo": "alterar", "tabela": "t1", "filtro": {}, "mudancas": {"t1.c2": 5}},
+             {"tipo": "apagar", "tabela": "t1", "filtro": 3},
+             {"tipo": "apagar_duplicatas", "tabela": "t1", "filtro": {}, "por": 7}]
+    for op in ruins:
+        with pytest.raises(rascunho.RascunhoCorrompido):
+            rascunho.Rascunho.de_dict({"operacoes": [op]}, modelo_pessoas())

@@ -1,6 +1,7 @@
 """O que os testes com PostgreSQL dividem: o banco descartável e as tabelas de exemplo."""
 import getpass
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -31,6 +32,31 @@ INSERT INTO public.pedidos (pessoa_id, total) VALUES (1, 10), (1, 20), (2, 5);
 """
 
 
+def _processo_vivo(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True         # existe, é de outro usuário
+    return True
+
+
+def _limpar_sobras(admin):
+    """Apaga os ratt_teste_<pid> de rodadas que morreram sem limpar (só o nome exato, só pid que não roda mais)."""
+    import psycopg
+    try:
+        nomes = [r[0] for r in admin.execute("SELECT datname FROM pg_database WHERE datname ~ '^ratt_teste_[0-9]+$'")]
+    except psycopg.Error:
+        return
+    for nome in nomes:
+        if re.fullmatch(r"ratt_teste_\d+", nome) and not _processo_vivo(int(nome.rsplit("_", 1)[1])):
+            try:
+                admin.execute('DROP DATABASE IF EXISTS "%s" WITH (FORCE)' % nome)
+            except psycopg.Error:
+                pass
+
+
 @pytest.fixture
 def banco():
     """Um banco descartável ratt_teste_<pid>; pula sem PostgreSQL ou sem permissão de criar banco."""
@@ -41,13 +67,15 @@ def banco():
     if admin is None:
         pytest.skip("sem PostgreSQL acessível")
     nome = "ratt_teste_%d" % os.getpid()
-    try:
-        admin.execute('CREATE DATABASE "%s"' % nome)
-    except psycopg.Error:
-        admin.close()
-        pytest.skip("sem permissão de criar banco")
     conexao = None
+    criado = False
     try:
+        _limpar_sobras(admin)
+        try:
+            admin.execute('CREATE DATABASE "%s"' % nome)
+            criado = True
+        except psycopg.Error:
+            pytest.skip("sem permissão de criar banco")
         conexao, _ = acesso.entrar(porta, usuario, nome)
         if conexao is None:
             pytest.skip("não entrou no banco de teste")
@@ -55,5 +83,6 @@ def banco():
     finally:
         if conexao is not None:
             conexao.close()
-        admin.execute('DROP DATABASE IF EXISTS "%s" WITH (FORCE)' % nome)
+        if criado:
+            admin.execute('DROP DATABASE IF EXISTS "%s" WITH (FORCE)' % nome)
         admin.close()

@@ -87,7 +87,7 @@ def dividir(sql):
             i = _fim_do_texto(sql, i, "'", escapa)
         elif ch == '"':
             i = _fim_do_texto(sql, i, '"', False)
-        elif ch == "$" and (i == 0 or not (sql[i - 1].isalnum() or sql[i - 1] == "_")) and _DOLAR.match(sql, i):
+        elif ch == "$" and (i == 0 or not caractere_de_nome(sql[i - 1])) and _DOLAR.match(sql, i):
             marca = _DOLAR.match(sql, i).group(0)
             fim = sql.find(marca, i + len(marca))
             i = n if fim < 0 else fim + len(marca)

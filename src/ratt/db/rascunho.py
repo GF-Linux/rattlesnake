@@ -540,6 +540,218 @@ class ApagarTabela(Operacao):
         return {self.tabela}
 
 
+# ── operações de dados ──
+# O filtro vem de `filtro.py`, que importa este módulo: por isso o import é feito dentro das funções.
+
+_LIMPEZAS = {"trim": "trim({})", "minusculas": "lower({})", "maiusculas": "upper({})",
+             "branco_vazio": "NULLIF(trim({}), '')"}
+_MUDANCAS = ("valor", "vazio", "coluna") + tuple(_LIMPEZAS)
+_MANTER = ("menor", "maior", "recente")
+
+
+def _coluna_de(tab: Tabela, id: str) -> Coluna:
+    c = tab.coluna(id)
+    if c is None:
+        raise KeyError(id)
+    return c
+
+
+def _onde(f, m: Modelo, tabela_id: str) -> str:
+    from . import filtro
+    return filtro.where(f, m, tabela_id)
+
+
+def _refere_filtro(f, tabela_id: str) -> Set[str]:
+    from . import filtro
+    return filtro.refere(f, tabela_id)
+
+
+def _descricao_filtro(f, m: Modelo, tabela_id: str) -> str:
+    from . import filtro
+    return filtro.descricao(f, m, tabela_id) if not f.vazio() else t("op.todas_as_linhas")
+
+
+def _chaves(tab: Tabela) -> List[str]:
+    """As colunas que identificam a linha: a PK, ou `ctid` (o último recurso) numa tabela sem ela."""
+    pk = tab.pk()
+    return [ident(c.nome) for c in pk] if pk else ["ctid"]
+
+
+@dataclass
+class Inserir(Operacao):
+    tabela: str
+    valores: Dict[str, Optional[str]]         # id da coluna → texto digitado; None = NULL; ausente = o banco preenche
+    nomes: Dict[str, str] = field(default_factory=dict)
+    tipo: ClassVar[str] = "inserir"
+
+    def aplicar(self, m: Modelo) -> None:
+        pass
+
+    def comandos(self, m: Modelo) -> List[str]:
+        from . import filtro
+        tab = m.tabelas[self.tabela]
+        if not self.valores:
+            return [f"INSERT INTO {nome_tabela(tab)} DEFAULT VALUES"]
+        cols, vals = [], []
+        for i, v in self.valores.items():
+            c = _coluna_de(tab, i)
+            cols.append(ident(c.nome))
+            vals.append("NULL" if v is None else filtro.literal(v, c.tipo))
+        return [f"INSERT INTO {nome_tabela(tab)} ({', '.join(cols)}) VALUES ({', '.join(vals)})"]
+
+    def descricao(self, m: Modelo) -> str:
+        return t("op.inserir", tabela=m.tabelas[self.tabela].nome, n=len(self.valores))
+
+    def refere(self) -> Set[str]:
+        return {self.tabela} | set(self.valores)
+
+
+@dataclass
+class Mudanca:
+    tipo: str                                 # valor, vazio, trim, minusculas, maiusculas, branco_vazio, coluna
+    valor: Optional[str] = None
+    coluna: Optional[str] = None
+
+
+@dataclass
+class Alterar(Operacao):
+    tabela: str
+    filtro: "Filtro"
+    mudancas: Dict[str, Mudanca]
+    vista: Optional[int] = None               # quantas linhas a pessoa viu que seriam pegas
+    nomes: Dict[str, str] = field(default_factory=dict)
+    tipo: ClassVar[str] = "alterar"
+
+    def aplicar(self, m: Modelo) -> None:
+        pass
+
+    def _expressao(self, tab: Tabela, c: Coluna, mud: Mudanca) -> str:
+        from . import filtro
+        if mud.tipo == "valor":
+            if mud.valor is None:
+                raise ValueError(t("op.e.sem_valor", coluna=c.nome))
+            return filtro.literal(mud.valor, c.tipo)
+        if mud.tipo == "vazio":
+            return "NULL"
+        if mud.tipo == "coluna":
+            if not mud.coluna:
+                raise ValueError(t("op.e.sem_coluna", coluna=c.nome))
+            return ident(_coluna_de(tab, mud.coluna).nome)
+        if mud.tipo in _LIMPEZAS:
+            if filtro.familia(c.tipo) != "texto":
+                raise ValueError(t("op.e.so_texto", coluna=c.nome))
+            return _LIMPEZAS[mud.tipo].format(ident(c.nome))
+        raise ValueError(t("op.e.mudanca", mudanca=str(mud.tipo)))
+
+    def comandos(self, m: Modelo) -> List[str]:
+        tab = m.tabelas[self.tabela]
+        if not self.mudancas:
+            raise ValueError(t("op.e.sem_mudancas"))
+        sets, mudam = [], []
+        for i, mud in self.mudancas.items():
+            c = _coluna_de(tab, i)
+            expr = self._expressao(tab, c, mud)
+            sets.append(f"{ident(c.nome)} = {expr}")
+            if mud.tipo in _LIMPEZAS:
+                mudam.append(f"{ident(c.nome)} IS DISTINCT FROM {expr}")
+        onde = _onde(self.filtro, m, self.tabela)
+        if mudam:
+            if onde and len(self.filtro.condicoes) > 1 and not (self.filtro.texto or "").strip():
+                onde = f"({onde})"
+            quem = " OR ".join(mudam)
+            onde = f"{onde} AND ({quem})" if onde else quem
+        sql = f"UPDATE {nome_tabela(tab)} SET {', '.join(sets)}"
+        return [sql + (f" WHERE {onde}" if onde else "")]
+
+    def descricao(self, m: Modelo) -> str:
+        tab = m.tabelas[self.tabela]
+        return t("op.alterar", tabela=tab.nome, colunas=", ".join(_nome_col(m, tab, i) for i in self.mudancas),
+                 filtro=_descricao_filtro(self.filtro, m, self.tabela))
+
+    def refere(self) -> Set[str]:
+        ids = {self.tabela} | set(self.mudancas) | _refere_filtro(self.filtro, self.tabela)
+        return ids | {x.coluna for x in self.mudancas.values() if x.coluna}
+
+
+@dataclass
+class Apagar(Operacao):
+    tabela: str
+    filtro: "Filtro"
+    vista: Optional[int] = None
+    nomes: Dict[str, str] = field(default_factory=dict)
+    tipo: ClassVar[str] = "apagar"
+
+    def aplicar(self, m: Modelo) -> None:
+        pass
+
+    def comandos(self, m: Modelo) -> List[str]:
+        onde = _onde(self.filtro, m, self.tabela)
+        return [f"DELETE FROM {nome_tabela(m.tabelas[self.tabela])}" + (f" WHERE {onde}" if onde else "")]
+
+    def descricao(self, m: Modelo) -> str:
+        return t("op.apagar_linhas", tabela=m.tabelas[self.tabela].nome,
+                 filtro=_descricao_filtro(self.filtro, m, self.tabela))
+
+    def refere(self) -> Set[str]:
+        return _refere_filtro(self.filtro, self.tabela)
+
+
+@dataclass
+class ApagarDuplicatas(Operacao):
+    tabela: str
+    filtro: "Filtro"
+    por: Tuple[str, ...]
+    normalizar: bool = False                  # ignora maiúsculas e espaços nas colunas de texto
+    manter: str = "menor"                     # menor | maior (chave) | recente (pela coluna `ordem`)
+    ordem: Optional[str] = None
+    n: int = 1                                # quantas ficam por grupo
+    vista: Optional[int] = None
+    nomes: Dict[str, str] = field(default_factory=dict)
+    tipo: ClassVar[str] = "apagar_duplicatas"
+
+    def aplicar(self, m: Modelo) -> None:
+        pass
+
+    def comandos(self, m: Modelo) -> List[str]:
+        from . import filtro
+        tab = m.tabelas[self.tabela]
+        if not self.por:
+            raise ValueError(t("op.e.sem_por"))
+        if self.manter not in _MANTER:
+            raise ValueError(t("op.e.manter", valor=str(self.manter)))
+        if isinstance(self.n, bool) or not isinstance(self.n, int) or self.n < 1:
+            raise ValueError(t("op.e.n", valor=str(self.n)))
+        grupo = []
+        for i in self.por:
+            c = _coluna_de(tab, i)
+            nome = ident(c.nome)
+            grupo.append(f"lower(trim({nome}))" if self.normalizar and filtro.familia(c.tipo) == "texto" else nome)
+        chaves = _chaves(tab)
+        if self.manter == "recente":
+            if not self.ordem:
+                raise ValueError(t("op.e.sem_ordem"))
+            ordem = [ident(_coluna_de(tab, self.ordem).nome) + " DESC NULLS LAST"] + chaves
+        elif self.manter == "maior":
+            ordem = [k + " DESC" for k in chaves]
+        else:
+            ordem = chaves
+        lista = ", ".join(chaves)
+        onde = _onde(self.filtro, m, self.tabela)
+        de = nome_tabela(tab) + (f" WHERE {onde}" if onde else "")
+        return [f"DELETE FROM {nome_tabela(tab)} WHERE ({lista}) IN (SELECT {lista} FROM (SELECT {lista}, "
+                f"row_number() OVER (PARTITION BY {', '.join(grupo)} ORDER BY {', '.join(ordem)}) AS rn "
+                f"FROM {de}) AS d WHERE rn > {self.n})"]
+
+    def descricao(self, m: Modelo) -> str:
+        tab = m.tabelas[self.tabela]
+        return t("op.apagar_duplicatas", tabela=tab.nome, colunas=", ".join(_nome_col(m, tab, i) for i in self.por),
+                 filtro=_descricao_filtro(self.filtro, m, self.tabela))
+
+    def refere(self) -> Set[str]:
+        return {self.tabela} | set(self.por) | ({self.ordem} if self.ordem else set()) \
+            | _refere_filtro(self.filtro, self.tabela)
+
+
 # ── o rascunho ──
 
 def _existe(m: Modelo, id: str) -> bool:
@@ -610,14 +822,21 @@ _CAMPOS = {
     AdicionarColuna: {"coluna": "Coluna"},
     Ligar: {"ligacao": "Ligacao", "nova_coluna": "Coluna?"},
     LigarNN: {"colunas_ids": "tupla", "ligacoes_ids": "tupla"},
+    Alterar: {"filtro": "Filtro", "mudancas": "Mudancas"},
+    Apagar: {"filtro": "Filtro"},
+    ApagarDuplicatas: {"filtro": "Filtro", "por": "tupla"},
 }
 _TIPOS_OP = {cls.tipo: cls for cls in (CriarTabela, AdicionarColuna, Renomear, Obrigatoria, Unica, Ligar,
-                                       LigarNN, ApagarLigacao, ApagarColuna, ApagarTabela)}
+                                       LigarNN, ApagarLigacao, ApagarColuna, ApagarTabela, Inserir, Alterar,
+                                       Apagar, ApagarDuplicatas)}
 
 
 def _op_para_dict(op: Operacao) -> dict:
+    from . import filtro
     d = {"tipo": op.tipo}
     d.update(asdict(op))
+    if hasattr(op, "filtro"):             # o filtro tem a forma própria do JSON dele
+        d["filtro"] = filtro.para_dict(op.filtro)
     return d
 
 
@@ -632,6 +851,13 @@ def _op_de_dict(d: dict) -> Operacao:
             v = dict(v)
             v["colunas"] = [Coluna(**c) for c in v["colunas"]]
             campos[nome] = Tabela(**v)
+        elif como == "Filtro":
+            from . import filtro
+            campos[nome] = filtro.de_dict(v)
+        elif como == "Mudancas":
+            if not isinstance(v, dict) or not all(isinstance(x, dict) for x in v.values()):
+                raise TypeError("mudanças inválidas")
+            campos[nome] = {k: Mudanca(**x) for k, x in v.items()}
         elif como.startswith("Coluna"):
             campos[nome] = Coluna(**v)
         elif como == "Ligacao":
@@ -657,6 +883,12 @@ def _conferir(op: Operacao) -> None:
     for i in op.refere() | op.cria():
         if not isinstance(i, str):
             raise TypeError(f"id inválido: {i!r}")
+    if isinstance(op, Inserir) and (not isinstance(op.valores, dict) or not all(
+            v is None or isinstance(v, str) for v in op.valores.values())):
+        raise TypeError(f"valores inválidos: {op.valores!r}")
+    if isinstance(op, Alterar) and not all(isinstance(x.tipo, str) and (x.valor is None or isinstance(x.valor, str))
+                                           for x in op.mudancas.values()):
+        raise TypeError("mudanças inválidas")
     if not isinstance(op.nomes, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in op.nomes.items()):
         raise TypeError(f"nomes inválidos: {op.nomes!r}")
 
