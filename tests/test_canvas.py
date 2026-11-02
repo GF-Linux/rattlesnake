@@ -633,3 +633,91 @@ def test_corte_no_nome_e_tipo_inteiro_e_cliques_na_tabela_larga():
 def test_vazio_tem_tamanho_zero():
     d = desenho.desenhar(modelo.Modelo("public", {}, {}), {})
     assert d.largura == 0 and d.altura == 0 and d.trechos(0) == []
+
+
+# ---- Task 7: setas e pé de galinha -------------------------------------------------------------------------
+
+def _posicoes_png():
+    return {"t1": (0, 0), "t3": (34, 0), "t2": (68, 0), "t4": (34, 8)}
+
+
+def test_pe_de_galinha_users_para_users_roles():
+    m = modelo_png()
+    linhas = desenho.desenhar(m, _posicoes_png()).texto().splitlines()
+    assert "├┼" in linhas[1] and "<┤" in linhas[1]          # users.id ──< users_roles.user_id
+
+
+def test_ligacao_opcional_tem_o():
+    texto = desenho.desenhar(modelo_png(), _posicoes_png()).texto()
+    assert "├┼o" in texto or "o┼┤" in texto                 # profiles.user_id aceita NULL
+
+
+def test_um_para_um():
+    m = modelo_png(); m.tabelas["t4"].coluna("t4.c4").unica = True
+    texto = desenho.desenhar(m, _posicoes_png()).texto()
+    assert "<┤" in texto.splitlines()[1]                    # a ligação 1:N continua
+    assert texto.count("┼") >= 4                            # as duas pontas da 1:1 são "um"
+
+
+def test_seta_nao_atravessa_caixa():
+    m = modelo_png()
+    d = desenho.desenhar(m, _posicoes_png())
+    for tid, (x, y, w, h) in d.caixas.items():
+        for yy in range(y + 1, y + h - 1):
+            for xx in range(x + 1, x + w - 1):
+                assert d.papel_em(xx, yy) not in ("seta", "marca")
+
+
+def test_auto_referencia():
+    t = modelo.Tabela("t1", "public", "employees", [
+        modelo.Coluna("t1.c1", "id", "int8", True, pk=True), modelo.Coluna("t1.c2", "reports_to", "int8")])
+    m = modelo.Modelo("public", {"t1": t}, {"k1": modelo.Ligacao("k1", "t1", ("t1.c2",), "t1", ("t1.c1",), "f")})
+    d = desenho.desenhar(m, {"t1": (0, 0)})
+    assert d.onde(d.caixas["t1"][2] + 1, 1) == ("ligacao", "k1")
+
+
+def test_recolhe_tabela_centro():
+    m = modelo_png()
+    texto = desenho.desenhar(m, _posicoes_png(), limite_chegando=1).texto()
+    assert "←2" in texto and "<┤" not in texto
+    assert "<┤" in desenho.desenhar(m, _posicoes_png(), limite_chegando=1, expandidas={"t1"}).texto()
+
+
+def test_fk_composta_uma_seta():
+    pai = modelo.Tabela("t1", "public", "pai", [modelo.Coluna("t1.c1", "a", "int8", True, pk=True),
+                                                 modelo.Coluna("t1.c2", "b", "int8", True, pk=True)])
+    filho = modelo.Tabela("t2", "public", "filho", [modelo.Coluna("t2.c1", "a", "int8", True),
+                                                     modelo.Coluna("t2.c2", "b", "int8", True)])
+    m = modelo.Modelo("public", {"t1": pai, "t2": filho},
+                      {"k1": modelo.Ligacao("k1", "t2", ("t2.c1", "t2.c2"), "t1", ("t1.c1", "t1.c2"), "f")})
+    texto = desenho.desenhar(m, {"t1": (0, 0), "t2": (30, 0)}).texto()
+    assert texto.count("<┤") == 1 and "⋯┤" in texto
+
+
+def test_rotear_desvia():
+    bloqueadas = {(5, y) for y in range(0, 9)}
+    caminho = desenho.rotear((0, 4), (10, 4), bloqueadas, (0, 0, 20, 12))
+    assert caminho[0] == (0, 4) and caminho[-1] == (10, 4) and not (set(caminho) & bloqueadas)
+
+
+def test_rotear_sem_caminho_nao_falha():
+    parede = {(5, y) for y in range(0, 13)}
+    caminho = desenho.rotear((0, 4), (10, 4), parede, (0, 0, 20, 12))
+    assert caminho[0] == (0, 4) and caminho[-1] == (10, 4)
+
+
+def test_ligacao_com_tabela_ausente_e_ignorada_e_estado_vira_papel():
+    m = modelo_png()
+    m.ligacoes["k9"] = modelo.Ligacao("k9", "t3", ("t3.c1",), "t99", ("t99.c1",), "x")
+    desenho.desenhar(m, _posicoes_png())  # não levanta KeyError
+    m.ligacoes["k3"].estado = "novo"
+    d = desenho.desenhar(m, _posicoes_png())
+    papeis = {d.papel_em(x, y) for (x, y), a in d._alvos.items() if a == ("ligacao", "k3")}
+    assert "novo" in papeis and "seta" not in {d.papel_em(x, y) for (x, y), a in d._alvos.items()
+                                               if a == ("ligacao", "k3")}
+
+
+def test_largura_e_altura_incluem_setas():
+    d = desenho.desenhar(modelo_png(), _posicoes_png())
+    for (x, y) in d._celulas:
+        assert x < d.largura and y < d.altura

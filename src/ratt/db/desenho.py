@@ -5,10 +5,11 @@ a exibe, trocando cada papel por uma cor. Assim o desenho inteiro se testa compa
 """
 from __future__ import annotations
 
+import heapq
 from dataclasses import dataclass, field
-from typing import AbstractSet, Dict, List, Optional, Tuple
+from typing import AbstractSet, Dict, List, Optional, Set, Tuple
 
-from .modelo import Modelo, Tabela
+from .modelo import Modelo, Tabela, cardinalidade, chegando, opcional
 
 LARGURA_MAX = 40
 ESPACO_X = 8
@@ -119,6 +120,93 @@ def posicionar(m: Modelo, guardadas: Dict[str, Tuple[int, int]]) -> Dict[str, Tu
     return pos
 
 
+# ---- roteamento -------------------------------------------------------------------------------------------
+
+_VIZINHOS = ((1, 0), (0, 1), (-1, 0), (0, -1))  # direita, baixo, esquerda, cima: a ordem fixa que desempata
+
+
+def _reta(inicio: Tuple[int, int], fim: Tuple[int, int]) -> List[Tuple[int, int]]:
+    """Caminho em L (primeiro na horizontal, depois na vertical) ignorando tudo: o último recurso."""
+    caminho = [inicio]
+    x, y = inicio
+    while x != fim[0]:
+        x += 1 if fim[0] > x else -1
+        caminho.append((x, y))
+    while y != fim[1]:
+        y += 1 if fim[1] > y else -1
+        caminho.append((x, y))
+    return caminho
+
+
+def rotear(inicio: Tuple[int, int], fim: Tuple[int, int], bloqueadas: Set[Tuple[int, int]],
+           limites: Tuple[int, int, int, int], ocupadas: AbstractSet[Tuple[int, int]] = frozenset(),
+           dir_inicio: Optional[Tuple[int, int]] = None,
+           dir_fim: Optional[Tuple[int, int]] = None) -> List[Tuple[int, int]]:
+    """Caminho ortogonal de `inicio` a `fim` (A* na grade de células); `limites` = (x0, y0, x1, y1), inclusive.
+
+    Custo: 1 por passo, +4 por curva, +2 por célula em `ocupadas` (de outra ligação), para as setas
+    preferirem trechos retos e livres. `dir_inicio`/`dir_fim` dizem para onde a linha sai e por onde chega
+    (a curva logo na saída ou na chegada também paga). Início e fim valem mesmo se estiverem em `bloqueadas`.
+    Sem caminho, devolve a reta em L ignorando os bloqueios: desenhar nunca falha."""
+    if inicio == fim:
+        return [inicio]
+    x0, y0, x1, y1 = limites
+
+    def h(c: Tuple[int, int]) -> int:
+        return abs(c[0] - fim[0]) + abs(c[1] - fim[1])
+
+    ordem = 0
+    aberta = [(h(inicio), ordem, 0, inicio, dir_inicio)]
+    melhor: Dict[tuple, int] = {(inicio, dir_inicio): 0}
+    pai: Dict[tuple, tuple] = {}
+    while aberta:
+        _, _, g, cel, d = heapq.heappop(aberta)
+        if cel == fim:
+            caminho = [cel]
+            estado = (cel, d)
+            while estado in pai:
+                estado = pai[estado]
+                caminho.append(estado[0])
+            return caminho[::-1]
+        if g > melhor.get((cel, d), g):
+            continue
+        for nd in _VIZINHOS:
+            n = (cel[0] + nd[0], cel[1] + nd[1])
+            if not (x0 <= n[0] <= x1 and y0 <= n[1] <= y1):
+                continue
+            if n in bloqueadas and n != fim:
+                continue
+            custo = g + 1
+            if d is not None and nd != d:
+                custo += 4
+            if n == fim and dir_fim is not None and nd != dir_fim:
+                custo += 4
+            if n in ocupadas:
+                custo += 2
+            if custo < melhor.get((n, nd), 1 << 30):
+                melhor[(n, nd)] = custo
+                pai[(n, nd)] = (cel, d)
+                ordem += 1
+                heapq.heappush(aberta, (custo + h(n), ordem, custo, n, nd))
+    return _reta(inicio, fim)
+
+
+_CANTOS = {
+    frozenset([(1, 0), (-1, 0)]): "─", frozenset([(0, 1), (0, -1)]): "│",
+    frozenset([(1, 0), (0, 1)]): "┌", frozenset([(-1, 0), (0, 1)]): "┐",
+    frozenset([(1, 0), (0, -1)]): "└", frozenset([(-1, 0), (0, -1)]): "┘",
+}
+
+
+def _caracter(antes: Tuple[int, int], c: Tuple[int, int], depois: Tuple[int, int]) -> str:
+    """O traço da célula `c` conforme de onde a linha vem e para onde vai (nunca `┼`: esse é a marca "um")."""
+    dirs = frozenset([(antes[0] - c[0], antes[1] - c[1]), (depois[0] - c[0], depois[1] - c[1])])
+    if dirs in _CANTOS:
+        return _CANTOS[dirs]
+    horizontal = any(d[1] == 0 and d[0] != 0 for d in dirs)
+    return "─" if horizontal else "│"
+
+
 # ---- a grade ----------------------------------------------------------------------------------------------
 
 @dataclass
@@ -154,14 +242,132 @@ class Desenho:
         return self._alvos.get((x, y))
 
 
+def _ligacoes(vista: Modelo, caixas: Dict[str, Tuple[int, int, int, int]], recolhidas: AbstractSet[str],
+              cel: Dict[Tuple[int, int], Celula], alvos: Dict[Tuple[int, int], tuple]) -> None:
+    """Roteia e pinta as setas em `cel`/`alvos`. Primeiro todas as linhas (quem vem depois vence num
+    cruzamento), depois bordas e marcas por cima, para uma linha nunca apagar um `o` ou um `<`."""
+    proprias = []  # (ligação, lado_o, lado_d, y_o, y_d, opcional, 1:1, extras)
+    reservadas: Set[Tuple[int, int]] = set()
+    # pontas que dividem a mesma célula da borda: as marcas se empilham para fora, e as opcionais (com `o`)
+    # ficam por dentro, para o `├┼o` continuar legível
+    usos: Dict[Tuple[int, int], list] = {}
+
+    for lid in sorted(vista.ligacoes):
+        lig = vista.ligacoes[lid]
+        if lig.origem not in caixas or lig.destino not in caixas or lig.destino in recolhidas:
+            continue
+        to, td = vista.tabelas[lig.origem], vista.tabelas[lig.destino]
+        linhas_o = [i for i, c in enumerate(to.colunas) if c.id in lig.colunas]
+        ordem_o = [next((i for i, c in enumerate(to.colunas) if c.id == cid), None) for cid in lig.colunas]
+        ordem_d = [next((i for i, c in enumerate(td.colunas) if c.id == cid), None) for cid in lig.colunas_destino]
+        if not lig.colunas or not lig.colunas_destino or None in ordem_o or None in ordem_d or not linhas_o:
+            continue
+        xo, yo, wo, _ = caixas[lig.origem]
+        xd, yd, wd, _ = caixas[lig.destino]
+        dif = (2 * xd + wd) - (2 * xo + wo)
+        lado_o = 1 if dif > 0 else -1 if dif < 0 else 1
+        lado_d = -lado_o if dif != 0 else 1
+        if lig.origem == lig.destino:
+            lado_o = lado_d = 1
+        bo = xo + wo - 1 if lado_o > 0 else xo
+        bd = xd + wd - 1 if lado_d > 0 else xd
+        opc = opcional(vista, lig)
+        um = cardinalidade(vista, lig) == "1:1"
+        extras = [(bo, yo + 1 + i) for i in ordem_o[1:]]
+        info = dict(lig=lig, so=lado_o, sd=lado_d, bo=bo, bd=bd, yo=yo + 1 + ordem_o[0], yd=yd + 1 + ordem_d[0],
+                    opc=opc, um=um, extras=extras)
+        proprias.append(info)
+        usos.setdefault((bo, info["yo"]), []).append(((1, lid), info, "ko"))
+        usos.setdefault((bd, info["yd"]), []).append(((0 if opc else 1, lid), info, "kd"))
+        for bx, y in extras:
+            reservadas.add((bx + lado_o, y))
+    if not proprias:
+        return
+    for fila in usos.values():
+        gasto = 0  # células já gastas por quem está mais por dentro
+        for _, info, campo in sorted(fila, key=lambda u: u[0]):
+            info[campo] = gasto
+            gasto += 2 if campo == "kd" and info["opc"] else 1
+    for info in proprias:
+        reservadas.add((info["bo"] + info["so"] * (1 + info["ko"]), info["yo"]))
+        reservadas.add((info["bd"] + info["sd"] * (1 + info["kd"]), info["yd"]))
+        if info["opc"]:
+            reservadas.add((info["bd"] + info["sd"] * (2 + info["kd"]), info["yd"]))
+
+    interditas: Set[Tuple[int, int]] = set(reservadas)
+    dentro: Set[Tuple[int, int]] = set()
+    for x, y, w, h in caixas.values():
+        for yy in range(y - 1, y + h + 1):
+            for xx in range(x - 1, x + w + 1):
+                interditas.add((xx, yy))
+                if x <= xx < x + w and y <= yy < y + h:
+                    dentro.add((xx, yy))
+    lx0 = max(0, min(x for x, _, _, _ in caixas.values()) - 4)
+    ly0 = max(0, min(y for _, y, _, _ in caixas.values()) - 4)
+    lx1 = max(x + w for x, _, w, _ in caixas.values()) + 4
+    ly1 = max(y + h for _, y, _, h in caixas.values()) + 4
+
+    ocupadas: Set[Tuple[int, int]] = set()
+    for i in proprias:
+        lig = i["lig"]
+        so, sd = i["so"], i["sd"]
+        inicio = (i["bo"] + (2 + i["ko"]) * so, i["yo"])
+        fim = (i["bd"] + (3 + i["kd"] if i["opc"] else 2 + i["kd"]) * sd, i["yd"])
+        limites = (min(lx0, inicio[0], fim[0]), min(ly0, inicio[1], fim[1]),
+                   max(lx1, inicio[0], fim[0]), max(ly1, inicio[1], fim[1]))
+        caminho = rotear(inicio, fim, interditas, limites, ocupadas, (so, 0), (-sd, 0))
+        i["inicio"], i["fim"] = inicio, fim
+        papel = lig.estado if lig.estado in _ESTADOS else "seta"
+        alvo = ("ligacao", lig.id)
+        for n, c in enumerate(caminho):
+            antes = caminho[n - 1] if n > 0 else (c[0] - so, c[1])
+            depois = caminho[n + 1] if n + 1 < len(caminho) else (c[0] - sd, c[1])
+            ocupadas.add(c)
+            if c in dentro or c[0] < 0 or c[1] < 0:
+                continue
+            cel[c] = (_caracter(antes, c, depois), papel)
+            alvos[c] = alvo
+
+    for i in proprias:
+        lig = i["lig"]
+        papel = lig.estado if lig.estado in _ESTADOS else "marca"
+        alvo = ("ligacao", lig.id)
+        so, sd = i["so"], i["sd"]
+
+        def marca(x: int, y: int, ch: str) -> None:
+            if x >= 0:
+                cel[(x, y)] = (ch, papel)
+                alvos[(x, y)] = alvo
+
+        def borda(x: int, y: int, lado: int) -> None:
+            if (x, y) in cel:  # a borda da coluna: só o caractere muda, o papel e o alvo (a coluna) ficam
+                cel[(x, y)] = ("├" if lado > 0 else "┤", cel[(x, y)][1])
+
+        borda(i["bo"], i["yo"], so)
+        marca(i["bo"] + so * (1 + i["ko"]), i["yo"], "┼" if i["um"] else (">" if so > 0 else "<"))
+        for bx, y in i["extras"]:
+            borda(bx, y, so)
+            marca(bx + so, y, "⋯")
+        borda(i["bd"], i["yd"], sd)
+        marca(i["bd"] + sd * (1 + i["kd"]), i["yd"], "┼")
+        if i["opc"]:
+            marca(i["bd"] + sd * (2 + i["kd"]), i["yd"], "o")
+
+
 def desenhar(vista: Modelo, posicoes: Dict[str, Tuple[int, int]], avisos: Optional[Dict[str, str]] = None,
              selecao: Optional[tuple] = None, expandidas: AbstractSet[str] = frozenset(),
              limite_chegando: int = 8) -> Desenho:
-    """Desenha as tabelas que têm posição. `expandidas` e `limite_chegando` são das setas (Task 7)."""
+    """Desenha as tabelas que têm posição e as ligações entre elas.
+
+    Uma tabela com mais de `limite_chegando` ligações chegando, e fora de `expandidas`, fica recolhida: não
+    recebe as setas e o título mostra `←N`. Alargar o título por causa disso é aceitável porque a posição vem
+    de quem chama; `caixas` guarda a largura realmente desenhada."""
     avisos = avisos or {}
+    cheg = chegando(vista)
     cel: Dict[Tuple[int, int], Celula] = {}
     alvos: Dict[Tuple[int, int], tuple] = {}
     caixas: Dict[str, Tuple[int, int, int, int]] = {}
+    recolhidas: Set[str] = set()
 
     def pôr(x: int, y: int, texto: str, papel: str, alvo: Optional[tuple] = None) -> None:
         for k, ch in enumerate(texto):
@@ -175,9 +381,13 @@ def desenhar(vista: Modelo, posicoes: Dict[str, Tuple[int, int]], avisos: Option
         t = vista.tabelas[tid]
         x0, y0 = posicoes[tid]
         w, h = tamanho_caixa(t)
+        nome, emblema = _titulo(t)
+        if cheg.get(tid, 0) > limite_chegando and tid not in expandidas:
+            recolhidas.add(tid)
+            emblema += " ←%d" % cheg[tid]
+            w = max(w, min(3 + len(nome) + len(emblema) + 3, LARGURA_MAX))
         caixas[tid] = (x0, y0, w, h)
         alvo_t = ("tabela", tid)
-        nome, emblema = _titulo(t)
         papel_nome = t.estado if t.estado in _ESTADOS else "titulo"
         nome = _cortar(nome, w - 6 - len(emblema))
         topo = "┌─ "
@@ -202,7 +412,7 @@ def desenhar(vista: Modelo, posicoes: Dict[str, Tuple[int, int]], avisos: Option
                     nome_c = _cortar(c.nome, interior - 1 - len(tipo))
             pad = " " * (interior - len(nome_c) - len(tipo))
             pôr(x0, y, "│", "borda", alvo_c)
-            pôr(x0 + 1, y, _SINAIS.get(est, " "), est or "marca", alvo_c)
+            pôr(x0 + 1, y, _SINAIS.get(est, " "), est or "nome", alvo_c)
             pôr(x0 + 2, y, "PK" if c.pk else "  ", est or "pk", alvo_c)
             pôr(x0 + 4, y, " ", est or "nome", alvo_c)
             pôr(x0 + 5, y, nome_c, est or "nome", alvo_c)
@@ -215,9 +425,12 @@ def desenhar(vista: Modelo, posicoes: Dict[str, Tuple[int, int]], avisos: Option
         yb = y0 + h - 1
         pôr(x0, yb, "└" + "─" * (w - 2) + "┘", "borda", alvo_t)
 
+    _ligacoes(vista, caixas, recolhidas, cel, alvos)
+
     if selecao is not None:
         for pos, alvo in alvos.items():
-            if alvo == selecao or (selecao[0] == "tabela" and alvo[1] == selecao[1] and cel[pos][1] == "borda"):
+            if alvo == selecao or (selecao[0] == "tabela" and alvo[0] != "ligacao" and alvo[1] == selecao[1]
+                                   and cel[pos][1] == "borda"):
                 cel[pos] = (cel[pos][0], "selecao")
 
     largura = max((x for x, _ in cel), default=-1) + 1
