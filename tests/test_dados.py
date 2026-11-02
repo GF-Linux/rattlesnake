@@ -143,7 +143,7 @@ def test_comeca_com_e_mes():
 def test_literal_e_like_com_caracteres_dificeis():
     assert filtro.literal("O'Brien", "text") == "'O''Brien'"
     assert filtro.literal("29", "integer") == "29" and filtro.literal("sim", "boolean") == "TRUE"
-    assert filtro.padrao_like("50%_a\\b", "contem") == "'%50\\%\\_a\\\\b%'"
+    assert filtro.padrao_like("50%_a\\b", "contem") == "E'%50\\\\%\\\\_a\\\\\\\\b%'"
     with pytest.raises(ValueError):
         filtro.literal("vinte", "integer")
 
@@ -201,9 +201,9 @@ def _w(*conds, **kw):
 
 def test_operadores_de_texto_com_valores_dificeis():
     assert _w(filtro.Condicao("t1.c2", "contem", ["O'Brien"])) == "nome ILIKE '%O''Brien%'"
-    assert _w(filtro.Condicao("t1.c2", "comeca", ["100%"])) == "nome ILIKE '100\\%%'"
-    assert _w(filtro.Condicao("t1.c2", "termina", ["a_b"])) == "nome ILIKE '%a\\_b'"
-    assert _w(filtro.Condicao("t1.c2", "contem", ["a\\b"])) == "nome ILIKE '%a\\\\b%'"
+    assert _w(filtro.Condicao("t1.c2", "comeca", ["100%"])) == "nome ILIKE E'100\\\\%%'"
+    assert _w(filtro.Condicao("t1.c2", "termina", ["a_b"])) == "nome ILIKE E'%a\\\\_b'"
+    assert _w(filtro.Condicao("t1.c2", "contem", ["a\\b"])) == "nome ILIKE E'%a\\\\\\\\b%'"
     assert _w(filtro.Condicao("t1.c2", "contem", ["João"], diferenciar=True)) == "nome LIKE '%João%'"
     assert _w(filtro.Condicao("t1.c2", "igual_sem_caixa", ["ÁGUA'"])) == "lower(nome) = lower('ÁGUA''')"
     assert _w(filtro.Condicao("t1.c2", "igual", ["a'; DROP TABLE x; --"])) == "nome = 'a''; DROP TABLE x; --'"
@@ -213,7 +213,7 @@ def test_operadores_de_texto_com_valores_dificeis():
 def test_entre_lista_e_transformacoes():
     assert _w(filtro.Condicao("t1.c3", "entre", ["18", "65"])) == "idade BETWEEN 18 AND 65"
     assert _w(filtro.Condicao("t1.c2", "na_lista", ["a'b", "c"])) == "nome IN ('a''b', 'c')"
-    assert _w(filtro.Condicao("t1.c4", "fora_lista", ["x@y", ""])) == "email NOT IN ('x@y', '')"
+    assert _w(filtro.Condicao("t1.c4", "fora_lista", ["x@y", ""])) == "email NOT IN ('x@y', NULL)"
     assert _w(filtro.Condicao("t1.c2", "maior", ["5"], transformacao="tamanho")) == "length(nome) > 5"
     assert _w(filtro.Condicao("t1.c2", "contem", ["a"], transformacao="trim")) == "trim(nome) ILIKE '%a%'"
     assert _w(filtro.Condicao("t1.c2", "igual", ["ana"], transformacao="minusculas")) == "lower(nome) = 'ana'"
@@ -306,3 +306,47 @@ def test_descricao_refere_e_vazio():
     assert filtro.deixa_vazios_de_fora(filtro.Filtro(texto="x"), m, "t1") == []
     ex = filtro.Condicao("", "existe", existe=filtro.Existe("k1", nao=True))
     assert "pedidos" in filtro.descricao_condicao(ex, m, "t1")
+
+
+def test_barra_invertida_sai_em_string_e():
+    assert filtro.literal("C:\\x", "text") == "E'C:\\\\x'" and filtro.literal("a'b\\", "text") == "E'a''b\\\\'"
+    assert filtro.literal("sem barra", "text") == "'sem barra'"
+    assert _w(filtro.Condicao("t1.c2", "igual", ["C:\\x"])) == "nome = E'C:\\\\x'"
+    for op, esperado in (("contem", "E'%50\\\\%%'"), ("comeca", "E'50\\\\%%'"), ("termina", "E'%50\\\\%'")):
+        assert _w(filtro.Condicao("t1.c2", op, ["50%"])) == f"nome ILIKE {esperado}"
+    assert filtro.padrao_like("C:\\x", "termina") == "E'%C:\\\\\\\\x'"
+    assert _w(filtro.Condicao("t1.c2", "na_lista", ["a\\", "b"])) == "nome IN (E'a\\\\', 'b')"
+
+
+def test_e_string_depois_de_nome_com_dolar_ou_acento():
+    from ratt.db import rodar
+    for nome in ("a$", "café", "x$y"):
+        sql = f"SELECT {nome}E'\\'; SELECT 2"       # identificador + string comum: a barra não escapa a aspa
+        assert [c.texto for c in rodar.dividir(sql)] == [f"SELECT {nome}E'\\'", "SELECT 2"], nome
+        filtro.validar_texto(f"{nome}E'\\' = 'x'")
+    assert [c.texto for c in rodar.dividir("SELECT E'\\'; SELECT 2")] == ["SELECT E'\\'; SELECT 2"]   # E de verdade
+    with pytest.raises(ValueError):
+        filtro.validar_texto("E'\\'; DROP TABLE x")
+
+
+def test_so_digitos_ascii():
+    for ruim in ("٣", "１２"):
+        with pytest.raises(ValueError):
+            filtro.literal(ruim, "integer")
+        with pytest.raises(ValueError):
+            _w(filtro.Condicao("t1.c5", "igual", [ruim], transformacao="mes"))
+        with pytest.raises(ValueError):
+            _w(filtro.Condicao("t1.c5", "ha_mais_de", [ruim, "dias"]))
+
+
+def test_vazio_na_lista_e_avisos_revistos():
+    assert _w(filtro.Condicao("t1.c3", "na_lista", ["30", ""])) == "idade IN (30, NULL)"
+    assert _w(filtro.Condicao("t1.c3", "fora_lista", ["", "7"])) == "idade NOT IN (NULL, 7)"
+    m = modelo_pessoas()
+    for op in ("vazio", "preenchido"):
+        assert filtro.deixa_vazios_de_fora(filtro.Filtro([filtro.Condicao("t1.c3", op, negar=True)]), m, "t1") == []
+    assert filtro.deixa_vazios_de_fora(filtro.Filtro([filtro.Condicao("t1.c6", "verdadeiro", negar=True)]), m, "t1") == []
+    f = filtro.Filtro([filtro.Condicao("t1.c2", "igual", outra_coluna="t1.c4")])      # email pode ser NULL
+    assert filtro.deixa_vazios_de_fora(f, m, "t1") == ["t1.c4"]
+    f = filtro.Filtro([filtro.Condicao("t1.c3", "menor", outra_coluna="t1.c1")])
+    assert filtro.deixa_vazios_de_fora(f, m, "t1") == ["t1.c3"]

@@ -143,7 +143,7 @@ def _tipo_efetivo(tipo: str, transformacao: str) -> str:
 
 # ── valores ──
 
-_NUMERO = re.compile(r"-?\d+(\.\d+)?")
+_NUMERO = re.compile(r"-?[0-9]+(\.[0-9]+)?")
 _SIM = {"sim", "true", "t", "1", "s", "yes", "y"}
 _NAO = {"não", "nao", "false", "f", "0", "n", "no"}
 
@@ -151,7 +151,10 @@ _NAO = {"não", "nao", "false", "f", "0", "n", "no"}
 def _citar(texto: str) -> str:
     if "\x00" in texto:
         raise ValueError(t("filtro.e.nul"))
-    return "'" + texto.replace("'", "''") + "'"
+    corpo = texto.replace("'", "''")
+    if "\\" in texto:                  # E'…' lê a barra igual com standard_conforming_strings ligado ou não
+        return "E'" + corpo.replace("\\", "\\\\") + "'"
+    return "'" + corpo + "'"
 
 
 def literal(texto: str, tipo: str) -> str:
@@ -182,7 +185,7 @@ def padrao_like(texto: str, onde: str) -> str:
 
 def _inteiro_em(valor: str, minimo: int, maximo: int, chave: str) -> None:
     limpo = valor.strip()
-    if not re.fullmatch(r"\d+", limpo) or not minimo <= int(limpo) <= maximo:
+    if not re.fullmatch(r"[0-9]+", limpo) or not minimo <= int(limpo) <= maximo:
         raise ValueError(t(chave, valor=valor))
 
 
@@ -254,7 +257,7 @@ def _comum(c: Condicao, tab: Tabela, qual: Optional[str]) -> Tuple[str, bool]:
     if op in ("verdadeiro", "falso"):
         return f"{expr} IS {'TRUE' if op == 'verdadeiro' else 'FALSE'}", False
     if op in ("na_lista", "fora_lista"):
-        itens = ", ".join(lit(v) for v in _valores(c))
+        itens = ", ".join("NULL" if v == "" else lit(v) for v in _valores(c))      # "" na lista é o vazio (NULL)
         return f"{expr} {'IN' if op == 'na_lista' else 'NOT IN'} ({itens})", False
     if op in ("contem", "comeca", "termina"):
         _valores(c, 1)
@@ -267,7 +270,7 @@ def _comum(c: Condicao, tab: Tabela, qual: Optional[str]) -> Tuple[str, bool]:
         return f"{expr} BETWEEN {lit(a)} AND {lit(b)}", False
     if op in ("ha_mais_de", "nos_ultimos"):
         n, unidade = _valores(c, 2)
-        if not re.fullmatch(r"\d+", n.strip()) or int(n) <= 0:
+        if not re.fullmatch(r"[0-9]+", n.strip()) or int(n) <= 0:
             raise ValueError(t("filtro.e.intervalo", valor=n))
         if unidade not in _UNIDADES:
             raise ValueError(t("filtro.e.unidade", unidade=unidade))
@@ -335,7 +338,7 @@ def validar_texto(texto: str) -> None:
         if texto.startswith("--", i) or texto.startswith("/*", i):
             raise ValueError(t("filtro.e.texto_comentario"))
         if ch in "'\"":
-            escapa = ch == "'" and i > 0 and texto[i - 1] in "eE" and (i < 2 or not (texto[i - 2].isalnum() or texto[i - 2] == "_"))
+            escapa = ch == "'" and i > 0 and texto[i - 1] in "eE" and (i < 2 or not rodar.caractere_de_nome(texto[i - 2]))
             i += 1
             while True:
                 if i >= n:
@@ -351,7 +354,7 @@ def validar_texto(texto: str) -> None:
                 else:
                     i += 1
             continue
-        if ch == "$" and (i == 0 or not (texto[i - 1].isalnum() or texto[i - 1] == "_")):
+        if ch == "$" and (i == 0 or not rodar.caractere_de_nome(texto[i - 1])):
             marca = _DOLAR.match(texto, i)
             if marca is not None:
                 fim = texto.find(marca.group(0), i + len(marca.group(0)))
@@ -389,11 +392,15 @@ def deixa_vazios_de_fora(f: Filtro, m: Modelo, tabela_id: str) -> List[str]:
     tab = m.tabelas[tabela_id]
     achados: List[str] = []
     for c in f.condicoes:
-        if c.existe is not None or c.operador in ("vazio", "preenchido", "verdadeiro", "falso") and not c.negar:
+        if c.existe is not None:
             continue
-        col = tab.coluna(c.coluna)
-        if col is not None and not col.obrigatoria and col.id not in achados:
-            achados.append(col.id)
+        ids = [] if c.operador in ("vazio", "preenchido", "verdadeiro", "falso") else [c.coluna]
+        if c.outra_coluna is not None:
+            ids.append(c.outra_coluna)
+        for id in ids:
+            col = tab.coluna(id)
+            if col is not None and not col.obrigatoria and col.id not in achados:
+                achados.append(col.id)
     return achados
 
 
@@ -418,9 +425,9 @@ def refere(f: Filtro, tabela_id: str) -> Set[str]:
 # ── descrição ──
 
 def _valor_legivel(c: Condicao, v: str) -> str:
-    if c.transformacao == "mes" and re.fullmatch(r"\d+", v.strip()) and 1 <= int(v) <= 12:
+    if c.transformacao == "mes" and re.fullmatch(r"[0-9]+", v.strip()) and 1 <= int(v) <= 12:
         return t(f"filtro.mes.{int(v)}")
-    if c.transformacao == "dia_semana" and re.fullmatch(r"\d+", v.strip()) and 1 <= int(v) <= 7:
+    if c.transformacao == "dia_semana" and re.fullmatch(r"[0-9]+", v.strip()) and 1 <= int(v) <= 7:
         return t(f"filtro.dsem.{int(v)}")
     return v
 

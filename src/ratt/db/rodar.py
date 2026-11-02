@@ -52,6 +52,11 @@ class Comando:
 _DOLAR = re.compile(r"\$([A-Za-z_][A-Za-z_0-9]*)?\$")
 
 
+def caractere_de_nome(ch):
+    """Pode fazer parte de um nome sem aspas no PostgreSQL: letra ou dígito ASCII, _, $ ou qualquer caractere não ASCII."""
+    return ch in "_$" or ("a" <= ch <= "z") or ("A" <= ch <= "Z") or ("0" <= ch <= "9") or ord(ch) >= 0x80
+
+
 def dividir(sql):
     """Os comandos do arquivo, na ordem. O ; só separa fora de texto, comentário e $$ … $$."""
     comandos, i, n, inicio = [], 0, len(sql), 0
@@ -78,7 +83,7 @@ def dividir(sql):
         elif ch == "/" and sql.startswith("/*", i):
             i = _fim_do_bloco(sql, i)
         elif ch == "'":
-            escapa = i > 0 and sql[i - 1] in "eE" and (i < 2 or not (sql[i - 2].isalnum() or sql[i - 2] == "_"))
+            escapa = i > 0 and sql[i - 1] in "eE" and (i < 2 or not caractere_de_nome(sql[i - 2]))
             i = _fim_do_texto(sql, i, "'", escapa)
         elif ch == '"':
             i = _fim_do_texto(sql, i, '"', False)
