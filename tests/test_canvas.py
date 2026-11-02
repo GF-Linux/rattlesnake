@@ -777,3 +777,47 @@ def test_nenhuma_marca_seguida_de_linha_de_outra_seta():
 
 def test_png_desenhado_golden():
     assert desenho.desenhar(modelo_png(), _posicoes_png()).texto() == PNG_DESENHADO.rstrip("\n")
+
+
+def _hub(n, nulos=True):
+    """users.id referenciada por `n` tabelas postas abaixo da caixa dela, cada uma com uma FK anulável."""
+    ts = {"t0": modelo.Tabela("t0", "public", "users", [modelo.Coluna("t0.c1", "id", "int8", True, pk=True)])}
+    ligs = {}
+    pos = {"t0": (0, 0)}
+    for k in range(1, n + 1):
+        ts["t%d" % k] = modelo.Tabela("t%d" % k, "public", "r%d" % k, [
+            modelo.Coluna("t%d.c1" % k, "id", "int8", True, pk=True),
+            modelo.Coluna("t%d.c2" % k, "user_id", "int8", not nulos)])
+        ligs["k%d" % k] = modelo.Ligacao("k%d" % k, "t%d" % k, ("t%d.c2" % k,), "t0", ("t0.c1",), "f")
+        pos["t%d" % k] = (30, 5 + (k - 1) * 6)
+    return modelo.Modelo("public", ts, ligs), pos
+
+
+def _os_do_hub(n):
+    m, pos = _hub(n)
+    d = desenho.desenhar(m, pos)
+    linhas = d.texto().splitlines()
+    achados = {}
+    for y, linha in enumerate(linhas):
+        for x, ch in enumerate(linha):
+            alvo = d.onde(x, y)
+            if ch == "o" and alvo and alvo[0] == "ligacao":
+                achados[alvo[1]] = (x, y)
+    return d, linhas, achados
+
+
+def _confere_os(n):
+    d, linhas, achados = _os_do_hub(n)
+    assert sorted(achados) == ["k%d" % k for k in range(1, n + 1)], "\n".join(linhas)
+    for lid, (x, y) in achados.items():
+        vizinhas = [(x + dx, y + dy) for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))]
+        assert any(d.onde(*v) == ("ligacao", lid) and linhas[v[1]][v[0]] in "─│┌┐└┘" for v in vizinhas), \
+            "\n".join(linhas)
+
+
+def test_duas_opcionais_na_mesma_coluna_ficam_opcionais():
+    _confere_os(2)
+
+
+def test_tres_opcionais_na_mesma_coluna_ficam_opcionais():
+    _confere_os(3)

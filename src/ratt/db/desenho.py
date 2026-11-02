@@ -321,9 +321,9 @@ def _ligacoes(vista: Modelo, caixas: Dict[str, Tuple[int, int, int, int]], recol
             p["cel"] = (junção[0] + p["dir"][0], junção[1] + p["dir"][1])
             reservadas.add(p["cel"])
         dono = sorted(g, key=lambda p: (p["info"]["lig"].id, p["tipo"]))[0]
-        for p in g:
-            usada = sum(1 for q in g if q["cel"] == p["cel"]) > 1
-            p["ocel"] = p["cel"] if p["tipo"] == "d" and p["info"]["opc"] and not usada else None
+        for p in g:  # o `o` vai para um trecho só da seta, escolhido depois de roteada (nunca se perde)
+            p["ocel"] = None
+            p["depois"] = p["tipo"] == "d" and p["info"]["opc"]
         if any(p["tipo"] == "d" for p in g):
             marca = "┼"
         else:
@@ -350,6 +350,7 @@ def _ligacoes(vista: Modelo, caixas: Dict[str, Tuple[int, int, int, int]], recol
     ly1 = max(y + h for _, y, _, h in caixas.values()) + 4
 
     ocupadas: Set[Tuple[int, int]] = set()
+    tracos: Dict[str, List[Tuple[Tuple[int, int], str]]] = {}
     for i in proprias:
         lig = i["lig"]
         do, dd = i["o"]["dir"], i["d"]["dir"]
@@ -367,6 +368,22 @@ def _ligacoes(vista: Modelo, caixas: Dict[str, Tuple[int, int, int, int]], recol
                 continue
             cel[c] = (_caracter(antes, c, depois), papel)
             alvos[c] = alvo
+        tracos[lig.id] = [(c, _caracter(caminho[n - 1] if n > 0 else (c[0] - do[0], c[1] - do[1]), c,
+                                        caminho[n + 1] if n + 1 < len(caminho) else (c[0] - dd[0], c[1] - dd[1])))
+                          for n, c in enumerate(caminho)]
+
+    # o `o` das opcionais que dividem a borda: a primeira célula reta do caminho que nenhuma outra seta do
+    # grupo ocupa, andando da junção para fora; sem ela, a célula junto da origem (que só esta seta usa)
+    for g in grupos.values():
+        for p in g:
+            if not p.get("depois"):
+                continue
+            lid = p["info"]["lig"].id
+            alheias = {c for q in g if q is not p for c, _ in tracos[q["info"]["lig"].id]}
+            alheias |= {q["ocel"] for q in g if q["ocel"] is not None}
+            ida = tracos[lid][::-1]
+            p["ocel"] = next((c for c, ch in ida if ch in "─│" and c not in alheias and (c not in reservadas or c == p["cel"])
+                              and c not in dentro), ida[-1][0])
 
     def pôr_marca(x: int, y: int, ch: str, lig) -> None:
         if x >= 0:
