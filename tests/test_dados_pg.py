@@ -1187,7 +1187,10 @@ def test_duplicatas_sem_chave_primaria_pela_tela(banco, tmp_path, monkeypatch):
             await piloto.pause()
             form = app.screen
             form.query_one("#por", SelectionList).select(email)
-            form.query_one("#normalizar", Checkbox).value = True
+            await piloto.pause()                             # a mensagem da lista chega e liga o "normalizar"
+            await piloto.click("#normalizar")
+            await piloto.pause()
+            assert form.query_one("#normalizar", Checkbox).value
             await contado(app, form)
             avisos = str(form.query_one("#form_avisos").render())
             assert t("chk.sem_pk_ctid", tabela="contatos") in avisos

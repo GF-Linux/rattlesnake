@@ -2764,6 +2764,7 @@ def test_on_mount_do_formbase_roda_uma_vez(monkeypatch, tmp_path):
                          formularios.ConfirmarApagar(r, tela.fonte, ("tabela", "t4"))):
                 tela._abrir(form)
                 await pronto(app)
+                await piloto.pause()                # sob carga, 0,05 s podia não bastar para o on_mount rodar
                 assert app.screen is form
                 if isinstance(form, formularios.ConfirmarApagar):
                     assert form.focused is form.query_one("#cancelar")      # o foco continua no cancelar
@@ -2771,3 +2772,46 @@ def test_on_mount_do_formbase_roda_uma_vez(monkeypatch, tmp_path):
                 await pronto(app)
     asyncio.run(roteiro())
     assert vezes == ["FormTabela", "FormLigar", "ConfirmarApagar"]
+
+
+def test_botoes_da_nova_coluna_e_do_ligar_nao_andam_quando_os_avisos_chegam(monkeypatch, tmp_path):
+    """Regra dos formulários da fase 1: a região do "pôr no rascunho" logo depois de abrir e depois dos avisos é a
+    mesma (a área dos avisos tem altura fixa)."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Checkbox, Input, OptionList, RadioButton
+
+    class Fonte(FonteFalsa):
+        def consulta(self):
+            return ConsultaFalsa(linhas=10, orfaos=3, nulos=10)
+
+    async def roteiro():
+        app = AppTeste(Fonte())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            form = formularios.FormColuna(tela.rascunho, tela.fonte, "t1")
+            tela._abrir(form)
+            await piloto.pause()
+            regiao = form.query_one("#por_no_rascunho").region
+            form.query_one("#nome", Input).value = "apelido"
+            form.query_one("#obrigatoria", Checkbox).value = True
+            await contado(app, form)
+            await piloto.pause()
+            assert t("chk.obrigatoria_sem_padrao", n=10, coluna="users.apelido") in str(form.query_one("#form_avisos").render())
+            assert form.query_one("#por_no_rascunho").region == regiao
+            await piloto.press("escape")
+            await pronto(app)
+            form = formularios.FormLigar(tela.rascunho, tela.fonte, "t4", "t4.c2")      # bio (texto) → users.id
+            tela._abrir(form)
+            await piloto.pause()
+            regiao = form.query_one("#por_no_rascunho").region
+            destino = form.query_one("#destino", OptionList)
+            destino.highlighted = [tb.id for tb in form.opcoes].index("t1")
+            await piloto.pause()
+            form.query_one("#um", RadioButton).value = True
+            await contado(app, form)
+            await piloto.pause()
+            avisos = str(form.query_one("#form_avisos").render())
+            assert len(avisos.splitlines()) >= 2, avisos
+            assert form.query_one("#por_no_rascunho").region == regiao
+    asyncio.run(roteiro())

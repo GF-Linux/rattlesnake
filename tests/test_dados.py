@@ -1870,6 +1870,7 @@ def test_alterar_minusculas_espera_a_contagem_e_guarda_a_vista(monkeypatch, tmp_
             await contado(app, form)
             await piloto.pause()
             assert not _botao(form).disabled and _botao(form).region == regiao
+            assert str(form.query_one("#erro").render()) == ""          # o "espere" sai quando a contagem chega
             assert t("chk.linhas_alteradas", n=2, tabela="pessoas") in str(form.query_one("#form_avisos").render())
             amostra = str(form.query_one("#form_amostra").render())
             assert t("dados.f.antes_depois") in amostra
@@ -2059,16 +2060,18 @@ def test_duplicatas_por_email_normalizado(monkeypatch, tmp_path):
             form = app.screen
             assert isinstance(form, formularios_dados.FormDuplicatas)
             assert _botao(form).disabled
+            regiao = _botao(form).region
             form.query_one("#por", SelectionList).select("t1.c4")
             await piloto.pause()
-            form.query_one("#normalizar", Checkbox).value = True
+            await piloto.click("#normalizar")                # pela tela: só liga depois de escolher uma coluna de texto
             await piloto.pause()
-            assert _botao(form).disabled
+            assert form.query_one("#normalizar", Checkbox).value and _botao(form).disabled
             m = tela.sessao.rascunho.vista()
             esperado = rascunho.ApagarDuplicatas("t1", tela.filtro, ("t1.c4",), normalizar=True)
             assert esperado.comandos(m)[0] in form.query_one("#form_sql").content.code
             await contado(app, form)
-            assert not _botao(form).disabled
+            await piloto.pause()
+            assert not _botao(form).disabled and _botao(form).region == regiao     # os botões não andaram
             avisos = str(form.query_one("#form_avisos").render())
             assert t("chk.grupos_repetidos", grupos=1) in avisos and t("chk.linhas_apagadas", n=1, tabela="pessoas") in avisos
             amostra = str(form.query_one("#form_amostra").render())
@@ -2086,4 +2089,116 @@ def test_duplicatas_por_email_normalizado(monkeypatch, tmp_path):
             op, = tela.sessao.rascunho.operacoes
             assert isinstance(op, rascunho.ApagarDuplicatas) and op.vista == 1
             assert (op.por, op.normalizar, op.manter, op.ordem, op.n) == (("t1.c4",), True, "recente", "t1.c5", 2)
+    asyncio.run(roteiro())
+
+
+def test_contagens_abandonadas_param_e_nao_atrasam_a_nova(monkeypatch, tmp_path):
+    """Várias mudanças enquanto uma contagem lenta roda: as contagens dos estados que passaram desistem antes de
+    perguntar qualquer coisa ao banco (também as que esperavam a trava da tela); só a do estado atual roda."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Input, Select
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        consulta = ConsultaPresa(2)
+        fonte.consulta = lambda: consulta
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 50)) as piloto:
+            tela = await _com_filtro_g(app)
+            await piloto.press("m")
+            await piloto.pause()
+            form = app.screen
+            linha = form.linhas()[0]
+            await _escolher(piloto, linha.query_one(".coluna", Select), "t1.c3")
+            await _escolher(piloto, linha.query_one(".tipo", Select), "valor")
+            consulta.chamadas.clear()
+            consulta.presa = True
+            campo = linha.query_one(Input)
+            for valor in ("11", "22", "33", "44"):
+                campo.value = valor
+                await asyncio.sleep(0.35)                 # passa o atraso de digitação: cada estado pede a sua
+            consulta.solta.set()
+            await contado(app, form)
+            assert not _botao(form).disabled
+            primeira, *resto = consulta.chamadas
+            assert "11" in str(primeira)                  # a que já estava no banco termina
+            assert resto and all("44" in str(c) for c in resto), consulta.chamadas
+            await piloto.click("#por_no_rascunho")
+            await pronto_dados(app)
+            op, = tela.sessao.rascunho.operacoes
+            assert op.mudancas["t1.c3"].valor == "44" and op.vista == 2
+    asyncio.run(roteiro())
+
+
+def test_banco_muda_por_baixo_do_formulario_reconta(monkeypatch, tmp_path):
+    """A vigia releu o banco com o formulário aberto (a coluna do filtro foi renomeada): o SQL dos campos não é mais
+    o contado. O "pôr" não entra com a contagem velha: reconta, diz isso e, quando a contagem nova chega, entra."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Select
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        consulta = ConsultaPresa(2)
+        fonte.consulta = lambda: consulta
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 50)) as piloto:
+            tela = await _com_filtro_g(app)
+            await piloto.press("m")
+            await piloto.pause()
+            form = app.screen
+            linha = form.linhas()[0]
+            await _escolher(piloto, linha.query_one(".coluna", Select), "t1.c4")
+            await _escolher(piloto, linha.query_one(".tipo", Select), "minusculas")
+            await contado(app, form)
+            assert not _botao(form).disabled
+            tela.sessao.rascunho.base.tabelas["t1"].colunas[1].nome = "nome2"     # renomeada por fora
+            consulta.n = 3
+            await piloto.click("#por_no_rascunho")
+            await piloto.pause()
+            assert app.screen is form and tela.sessao.rascunho.operacoes == []
+            assert t("dados.f.recontando") in str(form.query_one("#erro").render())
+            assert form.contando and _botao(form).disabled
+            await contado(app, form)
+            assert str(form.query_one("#erro").render()) == "" and not _botao(form).disabled
+            await piloto.click("#por_no_rascunho")
+            await pronto_dados(app)
+            op, = tela.sessao.rascunho.operacoes
+            assert op.vista == 3
+            assert "nome2 ILIKE 'G%'" in op.comandos(tela.sessao.rascunho.vista())[0]
+    asyncio.run(roteiro())
+
+
+def test_duplicatas_sem_data_nao_oferece_recente_e_normalizar_so_com_texto(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Checkbox, Select, SelectionList
+    from ratt.db.formularios_dados import FonteTravada, FormDuplicatas
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 50)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            app.push_screen(FormDuplicatas(tela.sessao, FonteTravada(fonte, tela._trava), "t2", filtro.Filtro()))
+            await piloto.pause()
+            form = app.screen
+            manter = [v for _, v in form.query_one("#manter", Select)._options if isinstance(v, str)]
+            assert manter == ["menor", "maior"] and not form.query_one("#grupo_ordem").display   # pedidos não tem data
+            await piloto.press("escape")
+            await piloto.pause()
+            app.push_screen(FormDuplicatas(tela.sessao, FonteTravada(fonte, tela._trava), "t1", filtro.Filtro()))
+            await piloto.pause()
+            form = app.screen
+            assert "recente" in [v for _, v in form.query_one("#manter", Select)._options if isinstance(v, str)]
+            por, normalizar = form.query_one("#por", SelectionList), form.query_one("#normalizar", Checkbox)
+            assert normalizar.disabled
+            por.select("t1.c4")
+            await piloto.pause()
+            await piloto.click("#normalizar")
+            await piloto.pause()
+            assert normalizar.value and not normalizar.disabled
+            por.deselect("t1.c4")
+            por.select("t1.c3")                               # idade: não é texto
+            await piloto.pause()
+            assert normalizar.disabled and not normalizar.value
     asyncio.run(roteiro())

@@ -955,6 +955,8 @@ ratt db user passwd [name]            changes a password (no name: yours)
                                    "en": "could not count: the operation goes in without a seen count and applying will have nothing to check against"},
     "dados.f.esperar": {"pt": "espere a contagem chegar: ela mostra quantas linhas a operação pega",
                         "en": "wait for the count: it shows how many rows the operation catches"},
+    "dados.f.recontando": {"pt": "o banco mudou desde a contagem: recontando…",
+                           "en": "the database changed since the count: counting again…"},
     "dados.f.repetidas_por": {"pt": "repetidas por (uma ou mais colunas)", "en": "repeated by (one or more columns)"},
     "dados.f.normalizar": {"pt": "ignorar maiúsculas e espaços nas pontas (texto)", "en": "ignore case and surrounding spaces (text)"},
     "dados.f.manter": {"pt": "manter", "en": "keep"},

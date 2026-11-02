@@ -32,7 +32,7 @@ from textual.widgets.option_list import Option
 
 from ratt.db import checagem, filtro
 from ratt.db import rascunho as rs
-from ratt.db.formularios import _ATRASO, Corpo, FormBase
+from ratt.db.formularios import _ATRASO, Abandonada, Corpo, FormBase
 from ratt.db.idioma import t
 from ratt.db.modelo import Coluna, Ligacao, Modelo
 from ratt.db.tela import COR
@@ -625,6 +625,12 @@ class FonteTravada:
 class _ConsultaTravada:
     def __init__(self, consulta, trava):
         self._consulta, self._trava = consulta, trava
+        self._vale = None
+
+    def vigiar(self, vale) -> None:
+        """Uma contagem de formulário: depois de esperar a trava, confere se ela ainda vale (os campos não mudaram)
+        — senão desiste sem perguntar nada ao banco (`formularios.Abandonada`)."""
+        self._vale = vale
 
     def __getattr__(self, nome):
         alvo = getattr(self._consulta, nome)
@@ -633,6 +639,8 @@ class _ConsultaTravada:
 
         def travado(*args, **kw):
             with self._trava:
+                if self._vale is not None and not self._vale():
+                    raise Abandonada()
                 return alvo(*args, **kw)
         return travado
 
@@ -1164,6 +1172,7 @@ class FormDuplicatas(_FormLinhas):
     chave_titulo = "dados.f.duplicatas"
     DEFAULT_CSS = """
     FormDuplicatas #por { height: auto; max-height: 8; }
+    FormDuplicatas #grupo_ordem { height: auto; }
     """
 
     def campos(self) -> ComposeResult:
@@ -1172,15 +1181,18 @@ class FormDuplicatas(_FormLinhas):
         yield SelectionList(*[(_rotulo_coluna(c, self._na_base(c.id)), c.id) for c in self._vivas()], id="por")
         yield Checkbox(t("dados.f.normalizar"), id="normalizar", disabled=True)
         yield Static(t("dados.f.manter"))
-        yield Select([(t(f"dados.f.manter_{m}"), m) for m in ("menor", "maior", "recente")], value="menor",
-                     allow_blank=False, id="manter")
-        yield Static(t("dados.f.ordem"))
-        yield Select([(_rotulo_coluna(c, self._na_base(c.id)), c.id) for c in self._vivas()
-                      if filtro.familia(c.tipo) == "data"], id="ordem", prompt=t("dados.f.ordem"), disabled=True)
+        datas = [c for c in self._vivas() if filtro.familia(c.tipo) == "data"]
+        manter = ("menor", "maior", "recente") if datas else ("menor", "maior")    # sem data, sem "mais recente"
+        yield Select([(t(f"dados.f.manter_{m}"), m) for m in manter], value="menor", allow_blank=False, id="manter")
+        with Vertical(id="grupo_ordem"):
+            yield Static(t("dados.f.ordem"))
+            yield Select([(_rotulo_coluna(c, self._na_base(c.id)), c.id) for c in datas], id="ordem",
+                         prompt=t("dados.f.ordem"), disabled=True)
         yield Static(t("dados.f.n"))
         yield Input("1", id="n")
 
     def on_mount(self) -> None:
+        self.query_one("#grupo_ordem").display = any(filtro.familia(c.tipo) == "data" for c in self._vivas())
         self.query_one("#por", SelectionList).focus()
 
     def _por(self) -> Tuple[str, ...]:
@@ -1190,7 +1202,10 @@ class FormDuplicatas(_FormLinhas):
     def on_selection_list_selected_changed(self, evento) -> None:
         # (o do FormBase, que refaz a prévia, o Textual chama em seguida)
         texto = any(filtro.familia(self.tab.coluna(i).tipo) == "texto" for i in self._por())
-        self.query_one("#normalizar", Checkbox).disabled = not texto
+        normalizar = self.query_one("#normalizar", Checkbox)
+        normalizar.disabled = not texto
+        if not texto:
+            normalizar.value = False        # desligado e desmarcado: não diz uma coisa que não vale
 
     def on_select_changed(self, evento: Select.Changed) -> None:
         if evento.select.id == "manter":

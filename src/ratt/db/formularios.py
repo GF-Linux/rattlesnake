@@ -36,6 +36,31 @@ _NIVEL = {"info": ("·", COR["cinza"]), "atencao": ("!", COR["amarelo"]), "imped
 _ATRASO = 0.25                      # espera a pessoa parar de digitar antes de contar no banco
 
 
+class Abandonada(Exception):
+    """Os campos mudaram enquanto os avisos eram contados: a contagem velha para na próxima pergunta ao banco."""
+
+
+class _DestaVersao:
+    """A consulta de uma contagem de avisos: antes de cada pergunta, confere se ela ainda vale (`vale()`); senão
+    levanta `Abandonada`. Uma consulta que sabe esperar a vez (`vigiar`) confere também depois de pegar a trava."""
+
+    def __init__(self, consulta, vale: Callable[[], bool]):
+        self._consulta, self._vale = consulta, vale
+        if hasattr(type(consulta), "vigiar"):
+            consulta.vigiar(vale)
+
+    def __getattr__(self, nome):
+        alvo = getattr(self._consulta, nome)
+        if not callable(alvo):
+            return alvo
+
+        def conferido(*args, **kw):
+            if not self._vale():
+                raise Abandonada()
+            return alvo(*args, **kw)
+        return conferido
+
+
 def sql_bonito(comandos: List[str]) -> Syntax:
     return Syntax("\n".join(c + ";" for c in comandos), "sql", theme="ansi_dark", background_color="default", word_wrap=True)
 
@@ -77,6 +102,7 @@ class FormBase(ModalScreen):
         self._liberado = False      # chegaram (ou o estado atual não conta nada): `exige_contagem` deixa pôr
         self.avisos_chegados: Optional[list] = None    # os avisos do estado atual (None: ainda não, ou deu erro)
         self._sql_pedido = self._sql_contado = None    # o SQL da operação cujos avisos foram pedidos / chegaram
+        self._erro_de_espera = False                   # o `#erro` diz "espere a contagem": some quando ela chega
         self._com_avisos: Optional[bool] = None
 
     @property
@@ -209,6 +235,9 @@ class FormBase(ModalScreen):
             self._sql_contado = self._sql_pedido
         if self.exige_contagem:
             self.query_one("#por_no_rascunho", Button).disabled = not liberado
+        if liberado and self._erro_de_espera:
+            self._erro_de_espera = False
+            self.query_one("#erro", Static).update("")
 
     def _contou_isto(self) -> bool:
         """`exige_contagem`: a operação dos campos agora é a que foi contada — também o enter num campo espera a
@@ -223,8 +252,15 @@ class FormBase(ModalScreen):
         except _ERROS_SQL:
             erro.update(Text(t("canvas.e.sumiu"), style=COR["laranja"]))
             return False
-        if not self._liberado or comandos != self._sql_contado:
+        if self._liberado and comandos != self._sql_contado:
+            # os campos são os mesmos, mas o SQL não: o banco mudou por baixo (a vigia releu). Conta de novo.
+            self.atualizar()
+            erro.update(Text(t("dados.f.recontando"), style=COR["laranja"]))
+            self._erro_de_espera = True
+            return False
+        if not self._liberado:
             erro.update(Text(t("dados.f.esperar"), style=COR["laranja"]))
+            self._erro_de_espera = True
             return False
         return True
 
@@ -234,13 +270,17 @@ class FormBase(ModalScreen):
         def trabalho():
             extra = None
             try:
-                consulta = self.fonte.consulta()
+                consulta = _DestaVersao(self.fonte.consulta(), lambda: versao == self._versao)
                 avisos = checagem.avisos_da_operacao(op, self.rascunho, consulta)
+            except Abandonada:                         # os campos mudaram: a contagem nova é que importa
+                return
             except Exception as e:                     # o banco caiu, faltou permissão...: vira uma linha, não um erro
                 avisos = e
             else:
                 try:
                     extra = self.do_banco(op, consulta, avisos)
+                except Abandonada:
+                    return
                 except Exception:                      # a amostra é um extra: sem ela, os avisos valem
                     extra = None
             try:
