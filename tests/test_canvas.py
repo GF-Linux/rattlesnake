@@ -4,7 +4,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from ratt.db import modelo
+import pytest
+
+from ratt.db import modelo, rascunho
 from ratt.db.modelo import Coluna, Ligacao, Modelo, Tabela
 
 
@@ -89,3 +91,104 @@ def test_coluna_pk_e_por_nome():
     assert [x.nome for x in m.tabelas["t3"].pk()] == ["user_id", "role_id"]
     assert m.por_nome("roles").id == "t2" and m.por_nome("nada") is None
     assert m.tabelas["t1"].coluna("t1.c9") is None
+
+
+# ── o rascunho: operações e SQL ──
+
+def test_ident():
+    assert rascunho.ident("users") == "users"
+    assert rascunho.ident("user") == '"user"'          # reservada
+    assert rascunho.ident("order") == '"order"'
+    assert rascunho.ident("Nome") == '"Nome"'
+    assert rascunho.ident("minha tabela") == '"minha tabela"'
+    assert rascunho.ident('a"b') == '"a""b"'
+    assert rascunho.ident("1abc") == '"1abc"'
+    assert rascunho.ident("ação") == '"ação"'
+
+
+def test_nome_tabela_fora_do_public():
+    t = modelo.Tabela("t9", "vendas", "Pedidos", [])
+    assert rascunho.nome_tabela(t) == 'vendas."Pedidos"'
+
+
+def test_adicionar_coluna_sql_e_vista():
+    r = rascunho.Rascunho(modelo_png())
+    c = modelo.Coluna(r.novo_id("c"), "birth", "date")
+    r.acrescentar(rascunho.AdicionarColuna("t1", c))
+    assert r.sql_texto().splitlines()[:2] == ["-- 1. " + r.operacoes[0].descricao(modelo_png()),
+                                             "ALTER TABLE users ADD COLUMN birth date;"]
+    assert r.vista().tabelas["t1"].coluna(c.id).estado == "novo"
+
+
+def test_ligar_com_unica_e_indice():
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.ApagarLigacao("k3"))
+    lig = modelo.Ligacao(r.novo_id("k"), "t4", ("t4.c4",), "t1", ("t1.c1",), "profiles_user_id_fkey", "CASCADE")
+    r.acrescentar(rascunho.Ligar(lig, unica=True, indice=True))
+    sql = r.sql_texto()
+    assert "ALTER TABLE profiles DROP CONSTRAINT profiles_user_id_fkey;" in sql
+    assert ("ALTER TABLE profiles ADD CONSTRAINT profiles_user_id_fkey FOREIGN KEY (user_id) "
+            "REFERENCES users (id) ON DELETE CASCADE;") in sql
+    assert "ALTER TABLE profiles ADD CONSTRAINT profiles_user_id_key UNIQUE (user_id);" in sql
+    assert "CREATE INDEX profiles_user_id_idx ON profiles (user_id);" in sql
+    assert modelo.cardinalidade(r.modelo(), r.modelo().ligacoes[lig.id]) == "1:1"
+
+
+def test_criar_tabela_com_identidade():
+    r = rascunho.Rascunho(modelo_png())
+    tid = r.novo_id("t")
+    t = modelo.Tabela(tid, "public", "pedidos", [
+        modelo.Coluna(f"{tid}.c1", "id", "bigint", obrigatoria=True, identidade=True, pk=True),
+        modelo.Coluna(f"{tid}.c2", "total", "numeric", obrigatoria=True, padrao="0")])
+    r.acrescentar(rascunho.CriarTabela(t))
+    assert ("CREATE TABLE pedidos (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, "
+            "total numeric NOT NULL DEFAULT 0);") in r.sql_texto()
+
+
+def test_ligar_nn():
+    r = rascunho.Rascunho(modelo_png())
+    op = rascunho.LigarNN(r.novo_id("t"), "users_tags", "t1", "t2",
+                          (r.novo_id("c"), r.novo_id("c")), (r.novo_id("k"), r.novo_id("k")))
+    r.acrescentar(op)
+    sql = r.sql_texto()
+    assert "CREATE TABLE users_tags (user_id bigint NOT NULL, role_id bigint NOT NULL, PRIMARY KEY (user_id, role_id));" in sql
+    assert modelo.juncao(r.modelo(), op.tabela_id)
+
+
+def test_renomear_vale_para_as_seguintes():
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.Renomear("t1", None, "pessoas"))
+    r.acrescentar(rascunho.Obrigatoria("t1", "t1.c2", True))
+    assert "ALTER TABLE users RENAME TO pessoas;" in r.sql_texto()
+    assert "ALTER TABLE pessoas ALTER COLUMN first_name SET NOT NULL;" in r.sql_texto()
+
+
+def test_apagar_tabela_marca_ligacoes():
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.ApagarTabela("t1", cascata=True))
+    v = r.vista()
+    assert v.tabelas["t1"].estado == "apagado" and v.ligacoes["k3"].estado == "apagado"
+    assert "t1" not in r.modelo().tabelas
+    assert "DROP TABLE users CASCADE;" in r.sql_texto()
+
+
+def test_nao_aceita_operacao_sobre_apagado():
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.ApagarTabela("t2"))
+    with pytest.raises(ValueError):
+        r.acrescentar(rascunho.Renomear("t2", None, "papeis"))
+
+
+def test_operacao_da_linha():
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.Renomear("t1", None, "pessoas"))
+    r.acrescentar(rascunho.Obrigatoria("t1", "t1.c2", True))
+    linhas = r.linhas_das_operacoes()
+    assert r.operacao_da_linha(linhas[1] + 1) == 1
+
+
+def test_nomes_hostis_no_sql():
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.Renomear("t1", None, "user"))
+    r.acrescentar(rascunho.AdicionarColuna("t1", modelo.Coluna(r.novo_id("c"), "Data Nasc", "date")))
+    assert 'ALTER TABLE "user" ADD COLUMN "Data Nasc" date;' in r.sql_texto()
