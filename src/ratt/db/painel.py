@@ -61,6 +61,7 @@ class PainelSQL(VerticalScroll):
         self.mensagem: Optional[str] = None # o porquê, quando foi a contagem (aparece junto da marca)
         self._linhas: List[int] = []        # linha em que cada operação começa no texto desenhado
         self._plano = ""
+        self.topo: Optional[str] = None     # o SELECT do filtro (tela Dados), acima do rascunho
 
     def compose(self) -> ComposeResult:
         yield Static(id="sql_conteudo")
@@ -68,24 +69,34 @@ class PainelSQL(VerticalScroll):
     def texto_plano(self) -> str:
         return self._plano
 
-    def atualizar(self, passos, falhou: Optional[int] = None, mensagem: Optional[str] = None) -> None:
+    def atualizar(self, passos, falhou: Optional[int] = None, mensagem: Optional[str] = None,
+                  topo: Optional[str] = None) -> None:
         self.passos = passos
         self.falhou = falhou
         self.mensagem = mensagem
+        self.topo = topo
         self.indice = max(0, min(self.indice, len(passos) - 1))
         self._desenhar()
 
     def _desenhar(self) -> None:
         alvo = self.query_one("#sql_conteudo", Static)
-        if not self.passos:
+        if not self.passos and not self.topo:
             self._linhas, self._plano = [], t("canvas.sem_rascunho")
             alvo.update(Text(self._plano, style=COR["cinza"]))
             return
         partes, plano, y, self._linhas = [], [], 0, []
+        if self.topo:
+            codigo = f"-- {t('dados.o_filtro')}\n{self.topo}"
+            partes.append(Syntax(codigo, "sql", theme="ansi_dark", background_color="default", word_wrap=True))
+            plano.append(codigo)
+            y = len(codigo.splitlines())
+            if not self.passos:
+                partes += [Text(""), Text(t("canvas.sem_rascunho"), style=COR["cinza"])]
+                plano += ["", t("canvas.sem_rascunho")]
         for n, (op, valida, desc, comandos) in enumerate(self.passos):
             escolhida = self.has_focus and n == self.indice
             fundo = "#1f3550" if escolhida else None
-            if n:
+            if n or self.topo:
                 partes.append(Text(""))
                 plano.append("")
                 y += 1

@@ -732,3 +732,105 @@ def test_executar_sem_conferir_igual(banco, tmp_path, capsys):
     assert rodar.executar(arq, con, ensaio=True, conferir=lambda c, n, e: chamadas.append(n)) == 0
     assert sem_ms(capsys.readouterr().out) == antes and chamadas == [2]
     con.close()
+
+
+# ── a tela Dados (Task 7) ──
+
+def _apps_isolados(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "dados"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+
+async def _pronto(app, voltas=6):
+    import asyncio
+    for _ in range(voltas):
+        await app.workers.wait_for_complete()
+        await asyncio.sleep(0.1)
+
+
+def test_e_na_tela_do_banco_abre_a_tela_dados(banco, tmp_path, monkeypatch):
+    import asyncio
+    import getpass
+    from textual.widgets import Tree
+    from ratt.db import tela_dados
+    from ratt.db.tela import TelaBanco
+    _apps_isolados(monkeypatch, tmp_path)
+    banco.execute(PESSOAS_SQL)
+
+    async def roteiro():
+        app = TelaBanco(banco.info.port, getpass.getuser(), banco.info.dbname)
+        async with app.run_test(size=(140, 44)) as piloto:
+            await _pronto(app)
+            arvore = app.query_one("#arvore", Tree)
+            no = next(n for n in app._nos(arvore.root) if isinstance(n.data, catalogo.Objeto) and n.data.nome == "pessoas")
+            arvore.move_cursor(no)
+            await _pronto(app)
+            assert app.atual.nome == "pessoas"
+            await piloto.press("e")
+            await _pronto(app)
+            tela = app.screen
+            assert isinstance(tela, tela_dados.TelaDados) and not tela.so_ver
+            assert len(tela.linhas) == 5 and tela.total == 5
+            tela.acrescentar_condicao(filtro.Condicao(tela.tabela_id + ".c2", "comeca", ["G"]))
+            await _pronto(app)
+            assert sorted(l[1] for l in tela.linhas) == ["Gabriel", "Giovana"]
+            assert [a.chave for a in tela.avisos] == ["chk.espacos_nas_pontas"]      # o " Gustavo"
+            await piloto.press("escape")
+            await _pronto(app)
+            assert app.screen is app.screen_stack[0]
+    asyncio.run(roteiro())
+
+
+def test_e_numa_view_abre_so_para_ver(banco, tmp_path, monkeypatch):
+    import asyncio
+    import getpass
+    from textual.widgets import Tree
+    from ratt.db import tela_dados
+    from ratt.db.tela import TelaBanco
+    _apps_isolados(monkeypatch, tmp_path)
+    banco.execute(PESSOAS_SQL + "CREATE VIEW public.maiores AS SELECT nome, idade FROM public.pessoas WHERE idade > 30;")
+
+    async def roteiro():
+        app = TelaBanco(banco.info.port, getpass.getuser(), banco.info.dbname)
+        async with app.run_test(size=(140, 44)) as piloto:
+            await _pronto(app)
+            arvore = app.query_one("#arvore", Tree)
+            for n in app._nos(arvore.root):
+                n.expand()
+            await _pronto(app)
+            no = next(n for n in app._nos(arvore.root) if isinstance(n.data, catalogo.Objeto) and n.data.nome == "maiores")
+            arvore.move_cursor(no)
+            await _pronto(app)
+            await piloto.press("e")
+            await _pronto(app)
+            tela = app.screen
+            assert isinstance(tela, tela_dados.TelaDados) and tela.so_ver and len(tela.linhas) == 3
+    asyncio.run(roteiro())
+
+
+def test_v_no_canvas_abre_a_tela_dados(banco, tmp_path, monkeypatch):
+    import asyncio
+    import getpass
+    from ratt.db import canvas, tela_dados
+    from test_canvas import AppTeste
+    _apps_isolados(monkeypatch, tmp_path)
+    banco.execute(PESSOAS_SQL)
+
+    async def roteiro():
+        app = AppTeste(canvas.FonteBanco(None, banco.info.port, getpass.getuser(), banco.info.dbname))
+        async with app.run_test(size=(140, 44)) as piloto:
+            await _pronto(app)
+            cv = app.screen
+            pessoas = cv.todo.por_nome("pessoas").id
+            while not cv.selecao or cv.selecao[1] != pessoas:
+                await piloto.press("tab")
+            await piloto.press("v")
+            await _pronto(app)
+            tela = app.screen
+            assert isinstance(tela, tela_dados.TelaDados) and tela.tabela_id == pessoas
+            assert len(tela.linhas) == 5 and tela.total == 5
+            assert tela.sessao is cv.sessao                    # o mesmo rascunho do canvas
+            await piloto.press("q")
+            await _pronto(app)
+            assert app.screen is cv
+    asyncio.run(roteiro())

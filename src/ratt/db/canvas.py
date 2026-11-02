@@ -89,6 +89,30 @@ class FonteBanco:
     def consulta(self) -> checagem.Consulta:
         return checagem.Consulta(self._aberta())
 
+    # ── o que a tela Dados lê ──
+
+    def assinaturas(self) -> Tuple[tuple, object]:
+        """(a parte da estrutura, a das escritas) numa consulta só: a tela Dados relê a grade quando alguém
+        escreve, e o modelo só quando a estrutura muda."""
+        s = tuple(catalogo.assinatura(self._aberta(), escritas=True))
+        return s[:-1], s[-1]
+
+    def pagina(self, esquema: str, tabela: str, onde: str, ordem: List[str], deslocamento: int, limite: int):
+        return catalogo.pagina(self._aberta(), esquema, tabela, onde, ordem, deslocamento, limite)
+
+    def contar(self, esquema: str, tabela: str, onde: str) -> Optional[int]:
+        return catalogo.contar_filtrado(self._aberta(), esquema, tabela, onde)
+
+    def classe(self, oid: int) -> Optional[str]:
+        """O relkind (r, p, f, v, m...) da relação; None se ela não existe mais."""
+        linha = self._aberta().execute("SELECT relkind FROM pg_class WHERE oid = %s", (oid,)).fetchone()
+        return str(linha[0]) if linha else None
+
+    def outra(self) -> "FonteBanco":
+        """Uma fonte igual, com a sua própria conexão (a injetada é dividida): a tela Dados aberta do canvas
+        conversa com o banco sem disputar a conexão da vigia do canvas."""
+        return FonteBanco(self._conexao if self._injetada else None, self.porta, self.usuario, self.banco)
+
     def conexao_para_aplicar(self):
         """Uma conexão só para aplicar o rascunho: a da tela segue livre para olhar o banco."""
         conexao, _ = acesso.entrar(self.porta, self.usuario, self.banco)
@@ -282,6 +306,7 @@ class TelaCanvas(AcoesRascunho, Screen):
         Binding("f", "foco", t("canvas.k.foco")),
         Binding("F,shift+f", "tudo", t("canvas.k.tudo")),
         Binding("plus", "expandir", t("canvas.k.expandir")),
+        Binding("v", "dados", t("dados.abrir")),
         Binding("escape,q", "voltar", t("canvas.k.voltar")),
     ]
     LIMITE_TUDO = 150               # `F` em schema com mais tabelas que isso pergunta antes e desenha fora da thread da tela
@@ -786,6 +811,22 @@ class TelaCanvas(AcoesRascunho, Screen):
             return
         self.expandidas ^= {self.selecao[1]}
         self.redesenhar()
+
+    def action_dados(self) -> None:
+        """`v`: a tela Dados da tabela selecionada (a criada no rascunho também abre: a grade espera o aplicar)."""
+        if not self.carregado:
+            self.notify(t("canvas.carregando"))
+            return
+        if not self.selecao or self.selecao[0] not in ("tabela", "coluna"):
+            self.notify(t("canvas.sel_tabela_ou_coluna"), severity="warning")
+            return
+        if self.selecao[1] not in self.todo.tabelas:
+            self.notify(t("canvas.e.sumiu"), severity="warning")
+            return
+        from ratt.db import tela_dados
+        outra = getattr(self.fonte, "outra", None)
+        self.app.push_screen(tela_dados.TelaDados(outra() if callable(outra) else self.fonte, self.esquema,
+                                                  self.selecao[1]))
 
     # ── editar ──────────────────────────────────────────────────────────────
 

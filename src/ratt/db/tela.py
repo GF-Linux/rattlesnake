@@ -102,6 +102,7 @@ class TelaBanco(App):
         Binding("r", "recarregar", t("tui.recarregar")),
         Binding("p", "psql", "psql"),
         Binding("d", "diagrama", t("canvas.diagrama")),
+        Binding("e", "dados", t("dados.abrir")),
         Binding("b", "trocar_banco", t("tui.banco")),
         Binding("n", "pagina(1)", t("tui.proxima")),
         Binding("N,shift+n", "pagina(-1)", t("tui.anterior")),
@@ -113,7 +114,7 @@ class TelaBanco(App):
 
     # teclas que só valem na tela do banco: com o canvas ou uma pergunta por cima, `d` abriria outro canvas,
     # `q` fecharia o ratt no meio de um formulário, `b` trocaria o banco debaixo do rascunho
-    SO_NA_BASE = frozenset({"sair", "recarregar", "psql", "diagrama", "trocar_banco", "pagina", "aba"})
+    SO_NA_BASE = frozenset({"sair", "recarregar", "psql", "diagrama", "dados", "trocar_banco", "pagina", "aba"})
 
     def __init__(self, porta, usuario, banco):
         super().__init__()
@@ -421,6 +422,28 @@ class TelaBanco(App):
         from ratt.db import canvas
         esquema = self.atual.esquema if self.atual else "public"
         self.push_screen(canvas.TelaCanvas(canvas.FonteBanco(None, self.porta, self.usuario, self.banco), esquema))
+
+    def action_dados(self):
+        """A tela Dados do objeto em foco: tabela para ver, filtrar e editar; view só para ver e filtrar. A tela
+        tem a sua própria conexão (a desta tela segue com a vigia) e o mesmo rascunho do canvas."""
+        objeto = self.atual
+        if not self.conexao or objeto is None or objeto.tipo not in ("tabela", "view"):
+            self.notify(t("dados.e.so_tabela"), severity="warning")
+            return
+        from ratt.db import canvas, tela_dados
+        fonte = canvas.FonteBanco(None, self.porta, self.usuario, self.banco)
+        if objeto.tipo == "view":
+            try:
+                colunas = catalogo.colunas(self.conexao, objeto.oid)
+            except Exception as erro:
+                self.notify(str(erro).strip().splitlines()[0] if str(erro).strip() else type(erro).__name__,
+                            severity="error")
+                return
+            tela = tela_dados.TelaDados(fonte, objeto.esquema, f"t{objeto.oid}", so_ver=True,
+                                        colunas_view=colunas, nome=objeto.nome)
+        else:
+            tela = tela_dados.TelaDados(fonte, objeto.esquema, f"t{objeto.oid}")
+        self.push_screen(tela)
 
     def action_trocar_banco(self):
         conexao, _ = acesso.entrar(self.porta, self.usuario)

@@ -806,3 +806,383 @@ def test_tipo_seguro_para_o_cast():
         assert checagem.tipo_seguro(bom), bom
     for ruim in ("date); DROP TABLE x; --", "int'", '"a" b', "text, now()", "", "date -- x", "Date"):
         assert not checagem.tipo_seguro(ruim), ruim
+
+
+# ── a tela Dados (Task 7) ──
+
+import datetime
+
+import psycopg
+from textual.app import App
+
+from ratt.db import catalogo
+
+
+class FonteDadosFalsa(FonteFalsa):
+    """A fonte do canvas mais o que a grade lê: página e contagem fixas (as linhas de PESSOAS_SQL)."""
+    NOMES = ["id", "nome", "idade", "email", "nascimento", "ativo"]
+    TIPOS = ["int8", "text", "int4", "text", "date", "bool"]
+    LINHAS = [(1, "Gabriel", 34, "gab@x.com", datetime.date(1990, 7, 14), True),
+              (2, "Ana", 29, "ana@x.com", datetime.date(1996, 3, 2), True),
+              (3, "Giovana", None, None, None, True),
+              (4, " Gustavo", 40, "gus@x.com", datetime.date(1985, 11, 20), True),
+              (5, "O'Brien", 51, "ob@x.com", datetime.date(1974, 6, 1), True)]
+    FILTRADAS = {"nome ILIKE 'G%'": [0, 2], "(idade > 30)": [0, 3, 4], "idade = 34": [0]}
+
+    def __init__(self, m=None):
+        super().__init__(m or modelo_pessoas())
+        self.escritas = 0
+        self.chamadas = []
+        self.tempo_esgotado = False
+        self.sem_contagem = False
+
+    def assinaturas(self):
+        return self.sig, self.escritas
+
+    def _linhas(self, onde):
+        indices = self.FILTRADAS.get(onde)
+        return list(self.LINHAS) if indices is None else [self.LINHAS[i] for i in indices]
+
+    def pagina(self, esquema, tabela, onde, ordem, deslocamento, limite):
+        self.chamadas.append(("pagina", tabela, onde, tuple(ordem), deslocamento))
+        if self.tempo_esgotado:
+            raise psycopg.errors.QueryCanceled("canceling statement due to statement timeout")
+        return list(self.NOMES), list(self.TIPOS), self._linhas(onde)[deslocamento:deslocamento + limite]
+
+    def contar(self, esquema, tabela, onde):
+        self.chamadas.append(("contar", tabela, onde))
+        return None if self.sem_contagem else len(self._linhas(onde))
+
+
+class AppDados(App):
+    def __init__(self, fonte, tabela_id="t1", **kw):
+        super().__init__()
+        self.fonte, self.tabela_id, self.kw = fonte, tabela_id, kw
+
+    def on_mount(self):
+        from ratt.db import tela_dados
+        self.push_screen(tela_dados.TelaDados(self.fonte, "public", self.tabela_id, **self.kw))
+
+
+async def pronto_dados(app, voltas=4):
+    """As leituras da tela Dados vêm em duas etapas (o modelo, depois a grade): espera as duas."""
+    for _ in range(voltas):
+        await app.workers.wait_for_complete()
+        await asyncio.sleep(0.05)
+
+
+def _texto(tela, seletor):
+    return str(tela.query_one(seletor).render())
+
+
+def test_tela_dados_abre_e_filtra_comeca_com(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Input, Select
+    from ratt.db import formularios_dados
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 44)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            assert tela.total == 5 and len(tela.linhas) == 5
+            assert t("dados.n_de_m", n=5, m=5) in _texto(tela, "#dados_contagem")
+            assert ("pagina", "pessoas", "", ("id",), 0) in fonte.chamadas
+            await piloto.press("f")
+            await piloto.pause()
+            form = app.screen
+            assert isinstance(form, formularios_dados.FormCondicao)
+            form.query_one("#coluna", Select).value = "t1.c2"
+            await piloto.pause()
+            form.query_one("#operador", Select).value = "comeca"
+            await piloto.pause()
+            form.query_one("#valor", Input).focus()
+            await piloto.press("G")
+            await piloto.pause()
+            assert "nome ILIKE 'G%'" in _texto(form, "#previa")
+            await piloto.click("#ok")
+            await pronto_dados(app)
+            assert app.screen is tela
+            assert tela.filtro.condicoes == [filtro.Condicao("t1.c2", "comeca", ["G"])]
+            assert filtro.where(tela.filtro, modelo_pessoas(), "t1") == "nome ILIKE 'G%'"
+            assert filtro.descricao(tela.filtro, modelo_pessoas(), "t1") in _texto(tela, "#dados_filtro")
+            assert "SELECT * FROM public.pessoas WHERE nome ILIKE 'G%'" in tela.query_one("#dados_sql").texto_plano()
+            assert ("pagina", "pessoas", "nome ILIKE 'G%'", ("id",), 0) in fonte.chamadas
+            assert [l[1] for l in tela.linhas] == ["Gabriel", "Giovana"] and tela.total == 2
+            assert t("dados.n_de_m", n=2, m=5) in _texto(tela, "#dados_contagem")
+            await piloto.press("o")                     # E/OU
+            assert tela.filtro.conectivo == "OU"
+            await piloto.press("backspace")             # tira a última condição
+            await pronto_dados(app)
+            assert tela.filtro.condicoes == [] and tela.total == 5
+    asyncio.run(roteiro())
+
+
+def test_where_em_texto_recusado_e_aceito(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Input
+    from ratt.db import tela_dados
+    from ratt.db.painel import PerguntarNome
+    avisos = []
+    monkeypatch.setattr(tela_dados.TelaDados, "notify", lambda self, msg, **kw: avisos.append(msg))
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 44)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            await piloto.press("t")
+            await piloto.pause()
+            assert isinstance(app.screen, PerguntarNome)
+            app.screen.query_one(Input).value = "1=1; DROP TABLE x"
+            await piloto.press("enter")
+            await pronto_dados(app)
+            assert tela.filtro.texto is None and tela.filtro.condicoes == []
+            assert avisos and t("filtro.e.texto_ponto_virgula") in avisos[-1]
+            assert isinstance(app.screen, PerguntarNome)                # pergunta de novo, com o texto para corrigir
+            assert app.screen.query_one(Input).value == "1=1; DROP TABLE x"
+            assert not any(c[0] == "pagina" and "DROP" in c[2] for c in fonte.chamadas)
+            app.screen.query_one(Input).value = "idade > 30"
+            await piloto.press("enter")
+            await pronto_dados(app)
+            assert app.screen is tela and tela.filtro.texto == "idade > 30"
+            assert ("pagina", "pessoas", "(idade > 30)", ("id",), 0) in fonte.chamadas
+            assert tela.total == 3 and "idade > 30" in _texto(tela, "#dados_filtro")
+            assert "WHERE (idade > 30)" in tela.query_one("#dados_sql").texto_plano()
+    asyncio.run(roteiro())
+
+
+def _clicar_celula(tela, linha, coluna):
+    grade = tela.query_one("#dados_grade")
+    x = sum(c.get_render_width(grade) for c in grade.ordered_columns[:coluna]) + 1
+    return grade, (x, grade.header_height + linha)
+
+
+def test_clicar_numa_celula_abre_igual_a_este_valor(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Input, Select
+    from ratt.db import formularios_dados
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 44)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            _, onde = _clicar_celula(tela, 0, 2)                    # idade do Gabriel
+            await piloto.click("#dados_grade", offset=onde)
+            await piloto.pause()
+            form = app.screen
+            assert isinstance(form, formularios_dados.FormCondicao)
+            assert form.query_one("#coluna", Select).value == "t1.c3"
+            assert form.query_one("#operador", Select).value == "igual"
+            assert form.query_one("#valor", Input).value == "34"
+            await piloto.click("#ok")
+            await pronto_dados(app)
+            assert tela.filtro.condicoes == [filtro.Condicao("t1.c3", "igual", ["34"])]
+            assert [l[0] for l in tela.linhas] == [1]
+    asyncio.run(roteiro())
+
+
+def test_so_ver_nao_tem_teclas_de_alterar(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    colunas = [catalogo.Coluna(1, "nome", "text", False, None, False, None),
+               catalogo.Coluna(2, "idade", "integer", False, None, False, None)]
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        app = AppDados(fonte, "t99", so_ver=True, colunas_view=colunas, nome="maiores")
+        async with app.run_test(size=(140, 44)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            assert t("dados.so_ver") in _texto(tela, "#dados_filtro")
+            assert ("pagina", "maiores", "", (), 0) in fonte.chamadas
+            for tecla in ("i", "m", "x", "D", "u", "e", "w", "enter"):
+                await piloto.press(tecla)
+                await piloto.pause()
+                assert app.screen is tela, tecla
+            assert not tela.sessao.rascunho.operacoes
+            for acao in ("aplicar", "ensaio", "exportar", "desfazer"):
+                assert not tela.check_action(acao, ())
+            tela.acrescentar_condicao(filtro.Condicao("t99.c2", "maior", ["30"]))
+            await pronto_dados(app)
+            assert ("pagina", "maiores", "idade > 30", (), 0) in fonte.chamadas
+    asyncio.run(roteiro())
+
+
+def test_coluna_e_tabela_do_rascunho_so_depois_de_aplicar(monkeypatch, tmp_path):
+    """Review Focus 3: a grade não dá erro, diz "só depois de aplicar", e filtrar pela coluna nova é recusado."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Select
+    from ratt.db import formularios_dados
+    r = rascunho.Rascunho(modelo_pessoas())
+    r.acrescentar(rascunho.AdicionarColuna("t1", Coluna(r.novo_id("c"), "apelido", "text")))
+    r.acrescentar(rascunho.CriarTabela(Tabela(r.novo_id("t"), "public", "notas", [
+        Coluna(r.novo_id("c"), "id", "bigint", obrigatoria=True, identidade=True, pk=True)])))
+    guardar.gravar_rascunho(5432, "teste", "public", json.loads(json.dumps(r.para_dict())))
+    nova = r.operacoes[0].coluna.id
+    nova_tabela = r.operacoes[1].tabela.id
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 44)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            grade = tela.query_one("#dados_grade")
+            rotulos = [str(c.label) for c in grade.ordered_columns]
+            assert any("apelido" in x and t("dados.so_depois") in x for x in rotulos)
+            assert t("dados.pendentes", n=1) in _texto(tela, "#dados_pendentes")
+            await piloto.press("f")
+            await piloto.pause()
+            form = app.screen
+            form.query_one("#coluna", Select).value = nova
+            await piloto.pause()
+            await piloto.click("#ok")
+            await piloto.pause()
+            assert app.screen is form
+            assert t("dados.e.so_depois", nome="apelido") in _texto(form, "#erro")
+            await piloto.press("escape")
+            await piloto.pause()
+            assert tela.filtro.condicoes == []
+            tela.acrescentar_condicao(filtro.Condicao(nova, "comeca", ["G"]))       # por fora do formulário: também recusa
+            await pronto_dados(app)
+            assert tela.filtro.condicoes == []
+
+        fonte2 = FonteDadosFalsa()
+        app2 = AppDados(fonte2, nova_tabela)
+        async with app2.run_test(size=(140, 44)) as piloto:
+            await pronto_dados(app2)
+            tela = app2.screen
+            assert t("dados.so_depois_tabela", tabela="notas") in _texto(tela, "#dados_contagem")
+            assert not any(c[0] in ("pagina", "contar") for c in fonte2.chamadas)
+            assert tela.linhas == []
+    asyncio.run(roteiro())
+
+
+def test_sem_tempo_mantem_as_linhas_e_sem_contagem(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from ratt.db import tela_dados
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 44)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            fonte.tempo_esgotado = True
+            tela.acrescentar_condicao(filtro.Condicao("t1.c2", "comeca", ["G"]))
+            await pronto_dados(app)
+            assert t("dados.sem_tempo") in _texto(tela, "#dados_contagem")
+            assert len(tela.linhas) == 5                          # a página anterior fica
+            fonte.tempo_esgotado, fonte.sem_contagem = False, True
+            await piloto.press("F")
+            await pronto_dados(app)
+            assert tela.total is None
+            assert t("dados.n_linhas", n=5) in _texto(tela, "#dados_contagem")      # página incompleta: são 5
+            monkeypatch.setattr(tela_dados, "POR_PAGINA", 2)
+            await piloto.press("F")
+            await pronto_dados(app)
+            assert t("dados.n_mais", n=2) in _texto(tela, "#dados_contagem")
+            assert t("dados.sem_contagem") in _texto(tela, "#dados_contagem")
+            await piloto.press("n")
+            await pronto_dados(app)
+            assert tela.pagina == 1 and [l[0] for l in tela.linhas] == [3, 4] and fonte.chamadas[-2][-1] == 2
+            await piloto.press("N")
+            await pronto_dados(app)
+            assert tela.pagina == 0
+            monkeypatch.setattr(tela_dados, "POR_PAGINA", 200)
+            fonte.sem_contagem = False
+            fonte.escritas += 1                                   # alguém escreveu na tabela: a vigia relê
+            antes = len([c for c in fonte.chamadas if c[0] == "pagina"])
+            tela.vigiar()
+            await pronto_dados(app)
+            assert len([c for c in fonte.chamadas if c[0] == "pagina"]) == antes + 1 and tela.total == 5
+            tela.vigiar()                                          # nada mudou: não relê
+            await pronto_dados(app)
+            assert len([c for c in fonte.chamadas if c[0] == "pagina"]) == antes + 1
+    asyncio.run(roteiro())
+
+
+def test_form_condicao_existe_mes_lista_e_valor_ruim(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Checkbox, Input, Select
+    from ratt.db import formularios_dados
+    E = formularios_dados.EXISTE
+
+    async def escolher(piloto, form, **valores):
+        for chave, valor in valores.items():
+            form.query_one("#" + chave, Select).value = valor
+            await piloto.pause()
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 50)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            # valor que não serve: o motivo aparece e o formulário fica aberto
+            await piloto.press("f"); await piloto.pause()
+            form = app.screen
+            await escolher(piloto, form, coluna="t1.c3", operador="igual")
+            form.query_one("#valor", Input).value = "vinte"
+            await piloto.pause()
+            await piloto.click("#ok"); await piloto.pause()
+            assert app.screen is form and t("filtro.e.numero", valor="vinte") in _texto(form, "#erro")
+            # mês escolhido pelo nome, guardado como número
+            await escolher(piloto, form, coluna="t1.c5", transformacao="mes", operador="maior_igual", valor_escolha="6")
+            assert "extract(month FROM nascimento) >= 6" in _texto(form, "#previa")
+            assert t("filtro.mes.6") in _texto(form, "#previa")
+            await piloto.click("#ok"); await pronto_dados(app)
+            assert tela.filtro.condicoes == [filtro.Condicao("t1.c5", "maior_igual", ["6"], "mes")]
+            # lista com o vazio e NÃO
+            await piloto.press("f"); await piloto.pause()
+            form = app.screen
+            await escolher(piloto, form, coluna="t1.c4", operador="fora_lista")
+            form.query_one("#valor", Input).value = "a@x.com, b@x.com"
+            form.query_one("#vazio_lista", Checkbox).value = True
+            await piloto.pause()
+            assert "email NOT IN ('a@x.com', 'b@x.com', NULL)" in _texto(form, "#previa")
+            await piloto.click("#ok"); await pronto_dados(app)
+            assert tela.filtro.condicoes[-1].valores == ["a@x.com", "b@x.com", ""]
+            assert any(a.chave == "chk.fora_lista_vazio" for a in tela.avisos)
+            assert t("chk.fora_lista_vazio") in _texto(tela, "#dados_avisos")
+            # existe em outra tabela, com uma condição lá dentro (outro formulário)
+            await piloto.press("f"); await piloto.pause()
+            form = app.screen
+            await escolher(piloto, form, coluna=E, ligacao="k1")
+            await piloto.click("#mais_interna"); await piloto.pause()
+            dentro = app.screen
+            assert isinstance(dentro, formularios_dados.FormCondicao) and dentro is not form
+            assert not any(v == E for _, v in dentro.query_one("#coluna", Select)._options)     # um nível só
+            await escolher(piloto, dentro, coluna="t2.c3", operador="maior")
+            dentro.query_one("#valor", Input).value = "15"
+            await piloto.pause()
+            await piloto.click("#ok"); await piloto.pause()
+            assert app.screen is form
+            form.query_one("#negar", Checkbox).value = True
+            await piloto.pause()
+            assert ("NOT EXISTS (SELECT 1 FROM public.pedidos WHERE public.pedidos.pessoa_id = public.pessoas.id "
+                    "AND public.pedidos.total > 15)") in _texto(form, "#previa").replace("\n", " ")
+            await piloto.click("#ok"); await pronto_dados(app)
+            assert tela.filtro.condicoes[-1].existe == filtro.Existe("k1", [filtro.Condicao("t2.c3", "maior", ["15"])], True)
+    asyncio.run(roteiro())
+
+
+def test_tabela_estrangeira_abre_so_para_ver(monkeypatch, tmp_path):
+    """Quem abre não sabe o relkind (o modelo põe estrangeiras junto das tabelas): a tela pergunta à fonte."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        perguntas = []
+        fonte.classe = lambda oid: perguntas.append(oid) or "f"
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 44)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            assert perguntas == [1] and tela.so_ver and t("dados.so_ver") in _texto(tela, "#dados_filtro")
+            assert not tela.check_action("aplicar", ()) and len(tela.linhas) == 5
+    asyncio.run(roteiro())
