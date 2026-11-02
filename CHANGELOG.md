@@ -3,6 +3,63 @@
 O `ratt check-update` e o `ratt upgrade` leem este arquivo: cada `## versão` é o que você
 vê antes de responder `[s/N]`.
 
+## 0.10.0
+
+- **os dados pela tela**: `e` no `ratt db` (com a tabela escolhida na árvore) e `v` no canvas
+  abrem a tela Dados da tabela: a grade em largura toda, a barra do filtro em cima e o painel do
+  SQL embaixo. Inserir, alterar e apagar linhas sem escrever o SQL — e vendo o SQL que sai. A
+  grade mostra o banco como está; o que está no rascunho aparece depois de aplicar, e uma linha
+  diz quando há mudança pendente nesta tabela. Views e tabelas estrangeiras abrem só para ver e
+  filtrar.
+  - **Filtro**: `f` monta uma condição (coluna, operação, valor), `o` troca entre E e OU,
+    `backspace` tira a última e `F` limpa. Os operadores são em palavras e mudam com o tipo:
+    é igual a, é diferente de, está vazio, está preenchido, está na lista, contém, começa com,
+    termina com, é maior que, está entre, é antes de, é verdadeiro… Em data, vale o mês, o ano,
+    o dia da semana ou o dia (com o mês escolhido pelo nome, `junho`), e também "há mais de N
+    dias" e "nos últimos N meses". "Vazio" é o NULL — e, em texto, também o texto em branco.
+    Dá para filtrar pelo que **existe (ou não existe) em outra tabela**, seguindo uma chave
+    estrangeira: os órfãos, os clientes sem pedidos.
+  - **WHERE em texto**: `t` abre o `WHERE` para você escrever, começando pelo que o filtro
+    montado já gera. Ele precisa ser uma expressão só: é recusado se tiver `;`, comentário ou
+    uma barra invertida dentro de `'…'`. Enquanto o filtro está em texto, as condições montadas
+    ficam de lado; voltar a elas pergunta antes.
+  - **Avisos do filtro**: o vazio não é "igual" nem "diferente" de nada, então quem tem vazio
+    fica de fora de `=`, `<` e companhia — a tela conta quantas linhas e avisa; "não está na
+    lista" com vazio na lista não pega nada; "contém" em texto com espaço sobrando nas pontas
+    diz quantas linhas não casam por isso.
+  - **Inserir**: `i` abre um formulário com um campo por coluna. A chave estrangeira é
+    escolhida numa lista das linhas da tabela pai (com busca), sem digitar o número. Coluna
+    com valor padrão ou identidade `BY DEFAULT` é opcional: vazio deixa o banco preencher.
+    O que não serve para o tipo, o obrigatório vazio e o valor repetido numa coluna única
+    impedem antes de ir para o rascunho. Cada linha inserida é um `INSERT`.
+  - **Alterar**: `m` muda as linhas filtradas — para um valor, para vazio, por uma limpeza da
+    própria coluna (sem espaços nas pontas, minúsculas, maiúsculas, texto em branco vira vazio)
+    ou para o valor de outra coluna. Antes de entrar no rascunho, mostra quantas linhas mudam e
+    uma amostra do antes e do depois.
+  - **Apagar**: `x` apaga as linhas filtradas e mostra antes quantas são e o que cai junto, em
+    qualquer schema e em cadeia: as filhas apagadas, as que ficam vazias e as que impedem o
+    apagar. Quando a conta não fecha, diz "pelo menos N". Sem filtro, pede uma confirmação a
+    mais.
+  - **Duplicatas**: `D` apaga as repetidas de uma ou mais colunas e mantém uma por grupo — a de
+    menor chave, a de maior, ou as mais recentes por uma coluna de data. Linhas com a coluna
+    vazia não contam como repetidas. Respeita o filtro atual.
+  - **A contagem vem antes**: alterar, apagar e duplicatas só entram no rascunho depois que a
+    contagem chegou, e o botão espera por ela. Se o banco mudar enquanto o formulário está
+    aberto, a contagem é refeita.
+  - **Um rascunho só**: o canvas e a tela Dados dividem o mesmo rascunho. Criar a tabela no
+    canvas e inserir linhas nela pela tela Dados vai tudo numa transação, na ordem em que foi
+    feito. `enter` aplica, `e` ensaia, `w` salva num `.sql`, `u` desfaz e `r` leva o foco ao
+    painel do SQL (nele, `x` tira a operação), igual ao canvas.
+  - **O aplicar confere**: cada alterar, apagar e duplicatas guarda quantas linhas você viu.
+    No ensaio, cada um mostra "pegou X, você viu Y". No aplicar, se o número for outro, tudo é
+    desfeito e a operação fica marcada: o banco mudou desde que você olhou.
+- corrigido (da 0.9.0): ligar uma coluna nova ou criar um N:N com uma chave primária de tipo
+  próprio (enum, domínio) agora funciona; mover uma caixa no modo foco guarda a posição; `F`,
+  num schema grande, pergunta antes e desenha em segundo plano, sem travar a tela.
+- corrigido (formulários): "cancelar" com o mouse em "nova tabela" não fecha mais o canvas;
+  `enter` num campo de coluna só acrescenta a coluna; os botões do formulário não saem do lugar
+  quando os avisos chegam.
+
 ## 0.9.0
 
 - **o canvas do ratt db**: `d` na tela do banco abre o diagrama das tabelas, desenhado no

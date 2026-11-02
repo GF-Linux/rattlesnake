@@ -77,7 +77,7 @@ ratt templates           o que é relido, e como aparece
 ratt check-update        procura uma versão nova e mostra o que mudou
 ratt upgrade             procura, mostra o que mudou e pergunta [s/N] antes de instalar
 ratt sync                reescreve a releitura em todo lugar, com a versão deste ratt
-ratt db                  a tela do banco: a árvore à esquerda, dados e estrutura à direita (d: o diagrama)
+ratt db                  a tela do banco: a árvore à esquerda, dados e estrutura à direita (d: o diagrama · e: editar os dados)
 ratt db status           o PostgreSQL: o que está instalado, ligado e configurado (ratt db -h)
 ratt db setup            o PostgreSQL do zero até o primeiro banco, em Debian/Ubuntu, Fedora/RHEL e Arch
 ratt db list             os bancos, com dono e tamanho
@@ -149,6 +149,38 @@ desfaz) e `w` salva o SQL num `.sql`. O SQL gerado é só leitura e exportação
 O rascunho de cada schema fica guardado em `~/.local/share/ratt/canvas/{porta}-{banco}/`
 (ou em `$XDG_DATA_HOME/ratt/canvas/…`), junto com as posições das caixas; o SQL de cada
 rascunho aplicado vai para a pasta `aplicados/` ali dentro, com a data e a hora no nome.
+
+### Os dados da tabela (a tela Dados)
+
+Na tela, `e` abre os dados da tabela escolhida na árvore (no canvas, é o `v`): inserir,
+filtrar, alterar e apagar linhas, sempre vendo o SQL que sai.
+
+```
+ratt db · estudos › public.pessoas · Dados · rascunho: 2
+filtro: [ nome  começa com  "G" ]  E  [ nascimento  mês  é maior ou igual a  junho ]
+── 3 de 454 linhas ──────────────────────────────────────────────────────────────────
+ id    nome        nascimento   email
+ int8  text        date         text
+ 12    Gabriel     1990-07-14   gab@x.com
+ 87    Gláucia     1985-06-02   ∅
+ 203   Guilherme   1992-11-30   gui@x.com
+⚠ 3 linhas com nascimento vazio (∅) ficam de fora: vazio não é "≥ junho" nem "< junho"
+┌ SQL ─────────────────────────────────────────────────────────────────────────────┐
+│ -- o filtro:  SELECT … FROM public.pessoas WHERE nome ILIKE 'G%' AND …           │
+│ -- 1. inserir em pessoas                                                         │
+│ INSERT INTO public.pessoas (nome, email) VALUES ('Ana', 'ana@x.com');            │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+As teclas: `i` inserir (uma chave estrangeira se escolhe numa lista), `f` filtro, `o` troca E / OU,
+`backspace` tira a última condição, `F` limpa o filtro, `t` escreve o `WHERE` em texto,
+`m` altera as linhas filtradas, `x` apaga as filtradas, `D` apaga duplicatas, `n` / `N` páginas,
+`u` desfaz, `enter` aplica, `e` ensaia, `w` salva num `.sql`, `r` leva o foco ao painel do SQL
+e `Esc` volta.
+
+**A grade mostra o banco como está; o que está no rascunho aparece depois de aplicar.** O
+rascunho é o mesmo do canvas, e o aplicar confere: se um alterar ou apagar pegar um número de
+linhas diferente do que você viu, tudo é desfeito e a operação é marcada.
 
 Funciona nas famílias Debian/Ubuntu, Fedora/RHEL e Arch; `ratt db status` diz o que falta e
 `ratt db reset` volta ao antes do setup (com backup e a trava do nome da máquina).
