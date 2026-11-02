@@ -871,10 +871,24 @@ _TIPOS_OP = {cls.tipo: cls for cls in (CriarTabela, AdicionarColuna, Renomear, O
                                        Apagar, ApagarDuplicatas)}
 
 
+# campos de `Coluna` que só vão para o JSON quando fogem do padrão: um rascunho sem eles continua legível por um
+# ratt mais velho (que não os conhece)
+_COLUNA_OPCIONAIS = {"gerada": False, "identidade_sempre": True}
+
+
+def _coluna_enxuta(c: dict) -> dict:
+    return {k: v for k, v in c.items() if k not in _COLUNA_OPCIONAIS or v != _COLUNA_OPCIONAIS[k]}
+
+
 def _op_para_dict(op: Operacao) -> dict:
     from . import filtro
     d = {"tipo": op.tipo}
     d.update(asdict(op))
+    for nome, como in _CAMPOS.get(type(op), {}).items():
+        if como == "Tabela" and d.get(nome):
+            d[nome]["colunas"] = [_coluna_enxuta(c) for c in d[nome]["colunas"]]
+        elif como in ("Coluna", "Coluna?") and d.get(nome):
+            d[nome] = _coluna_enxuta(d[nome])
     if hasattr(op, "filtro"):             # o filtro tem a forma própria do JSON dele
         d["filtro"] = filtro.para_dict(op.filtro)
     return d

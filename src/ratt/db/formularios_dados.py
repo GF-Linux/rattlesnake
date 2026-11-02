@@ -59,8 +59,8 @@ class CampoValor(Vertical):
 
     No inserir (`CampoValor(coluna, referencia)`): um campo que entende o tipo — booleano num `Select` sim/não/vazio,
     data e número num `Input` com a dica do formato, chave estrangeira (de uma coluna) num `Input` mais um botão que
-    pede a lista das linhas do pai (`Escolher`; quem abre a lista é o formulário, que conhece a fonte). Identidade e
-    coluna gerada: desativado, o banco preenche. `valor()` é None quando vazio — a coluna sai do INSERT (com
+    pede a lista das linhas do pai (`Escolher`; quem abre a lista é o formulário, que conhece a fonte). Identidade
+    ALWAYS e coluna gerada: desativado, o banco preenche; identidade BY DEFAULT: opcional (vazio, o banco preenche). `valor()` é None quando vazio — a coluna sai do INSERT (com
     `padrao`, o banco põe o padrão; sem, fica vazia). A validação de verdade é a dos avisos (no banco)."""
 
     class Escolher(Message):
@@ -94,7 +94,7 @@ class CampoValor(Vertical):
         self._escolhas: List[str] = []      # os valores do Select (o que se pode pôr nele)
         self._escolhido: Optional[tuple] = None     # (valor, rótulo) da lista do pai
         c = self.coluna
-        self.desativado = c is not None and (c.identidade or c.gerada)
+        self.desativado = c is not None and ((c.identidade and c.identidade_sempre) or c.gerada)
         self.familia = filtro.familia(c.tipo) if c is not None else ""
 
     # ── o jeito do campo ──
@@ -119,12 +119,14 @@ class CampoValor(Vertical):
             partes.append(t("dados.f.numero"))
         if c.padrao is not None:
             partes.append(t("dados.f.padrao", padrao=c.padrao))
+        elif c.identidade:
+            partes.append(t("dados.f.vazio_banco"))
         return " · ".join(partes)
 
     def _rotulo(self) -> Text:
         c = self.coluna
         texto = Text.assemble((c.nome, "bold"), (f"  {c.tipo}", COR["cinza"]))
-        if c.obrigatoria and c.padrao is None and not self.desativado:
+        if c.obrigatoria and c.padrao is None and not c.identidade and not c.gerada:
             texto.append(f"  * {t('dados.f.obrigatoria')}", style=COR["laranja"])
         if self.destino:
             tabela, _, coluna = self.destino.rpartition(".")
@@ -645,13 +647,14 @@ class EscolherLinha(ModalScreen):
     BINDINGS = [Binding("escape", "cancelar", t("canvas.f.cancelar"))]
     DEFAULT_CSS = """
     EscolherLinha { align: center middle; }
-    EscolherLinha > Vertical { width: 76; max-width: 100%; height: auto; max-height: 90%; border: round $primary;
+    EscolherLinha > Vertical { width: 76; max-width: 100%; height: auto; max-height: 100%; border: round $primary;
                                background: $surface; padding: 0 1; }
     EscolherLinha #escolher_titulo { text-style: bold; padding: 0 0 1 0; }
     EscolherLinha Input { height: 3; }
     EscolherLinha #estado { height: auto; }
-    EscolherLinha OptionList { height: auto; max-height: 18; }
+    EscolherLinha OptionList { height: auto; }
     """
+    _MOLDURA = 8        # bordas (2), título (2), busca (3) e estado (1): o que sobra da altura é da lista
 
     def __init__(self, fonte, esquema: str, tabela: str, chave: str):
         super().__init__()
@@ -669,7 +672,16 @@ class EscolherLinha(ModalScreen):
             yield OptionList(id="linhas")
 
     def on_mount(self) -> None:
+        self._ajustar()
         self._buscar()
+
+    def on_resize(self, evento) -> None:
+        self._ajustar()
+
+    def _ajustar(self) -> None:
+        """A lista ganha uma altura que cabe na tela: maior que a caixa, ela seria cortada e a linha destacada
+        poderia ficar fora da vista (a lista acha que a está mostrando)."""
+        self.query_one(OptionList).styles.max_height = max(3, min(18, self.size.height - self._MOLDURA))
 
     def on_input_changed(self, evento: Input.Changed) -> None:
         evento.stop()
@@ -751,6 +763,7 @@ class FormInserir(FormBase):
         self.tabela_id = tabela_id
         self.titulo = t("dados.f.inserir", tabela=self.rascunho.vista().tabelas[tabela_id].nome)
         self._campos: List[CampoValor] = []
+        self._postas = 0                    # linhas que este formulário já pôs no rascunho ("pôr e inserir outra")
 
     @property
     def rascunho(self) -> rs.Rascunho:
@@ -814,10 +827,11 @@ class FormInserir(FormBase):
         evento.stop()
         if self.por_sem_fechar() is None:
             return
+        self._postas += 1
         for campo in self._campos:
             campo.limpar()
         any(c.focar() for c in self._campos)
-        self.notify(t("dados.f.posta", n=len(self.rascunho.operacoes)))
+        self.notify(t("dados.f.posta", n=self._postas))
         self.atualizar()
 
     def on_campo_valor_escolher(self, evento: CampoValor.Escolher) -> None:

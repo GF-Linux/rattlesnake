@@ -306,9 +306,12 @@ class FormTabela(FormBase):
 
     DEFAULT_CSS = "FormTabela #botoes_colunas { height: 3; }"
 
+    # Nos handlers de mensagem (on_*) não se chama super(): o Textual já chama o handler de cada classe do MRO, a
+    # subclasse antes; com super() o do FormBase rodaria duas vezes (por() duas vezes, dismiss duas vezes...).
+    # Para impedir o do FormBase, `evento.prevent_default()`.
+
     def on_mount(self) -> None:
         self._lista()
-        super().on_mount()
 
     def _lista(self) -> None:
         linhas = []
@@ -354,14 +357,13 @@ class FormTabela(FormBase):
                 self.especs.pop()
             self._lista()
             self.atualizar()
-        else:
-            super().on_button_pressed(evento)
+        # os outros botões: o handler do FormBase (chamado pelo Textual em seguida)
 
     def on_input_submitted(self, evento) -> None:
         if evento.input.id in ("col_nome", "col_tipo", "col_padrao"):
+            evento.prevent_default()        # Enter na coluna acrescenta a coluna; não põe a tabela no rascunho
             self.query_one("#add_coluna", Button).press()
-        else:
-            self.por()
+        # nos outros campos, o do FormBase põe no rascunho
 
     def operacao(self) -> rs.Operacao:
         v = self.rascunho.vista()
@@ -430,11 +432,10 @@ class FormLigar(FormBase):
         if um:
             indice.value = False
         indice.disabled = um
-        super().on_radio_set_changed(evento)
+        # (o do FormBase, que atualiza a prévia, o Textual chama em seguida)
 
     def on_mount(self) -> None:
-        self.query_one("#destino", OptionList).highlighted = None
-        super().on_mount()
+        self.query_one("#destino", OptionList).highlighted = None     # antes do on_mount do FormBase (o MRO)
 
     def _destino(self) -> Optional[Tabela]:
         i = self.query_one("#destino", OptionList).highlighted
@@ -542,7 +543,7 @@ class ConfirmarApagar(FormBase):
     def on_mount(self) -> None:
         if self._local:
             self.query_one("#cascata").display = True
-        super().on_mount()
+        # (o on_mount do FormBase o Textual chama em seguida: não chamar super aqui)
         # foco no cancelar: um `x` seguido de Enter nunca põe um DROP no rascunho antes de a pessoa ver a prévia
         self.query_one("#cancelar", Button).focus()
 

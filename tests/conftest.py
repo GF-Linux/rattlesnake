@@ -45,7 +45,8 @@ def _processo_vivo(pid):
 
 def apagar_banco(admin, nome, limite=5.0, espera=time.sleep, relogio=time.monotonic):
     """`DROP DATABASE … WITH (FORCE)` com paciência: o PostgreSQL às vezes recusa terminar um processo que não é
-    nosso (um autovacuum do superusuário: "permissão negada para terminar o processo") ou o banco ainda está em uso.
+    nosso (um autovacuum do superusuário: "permissão negada para terminar o processo") ou o banco ainda está em uso;
+    só esses dois casos esperam.
     Tenta de novo com espera crescente por até `limite` segundos; devolve False se não conseguiu (as sobras são
     apagadas no começo da próxima rodada). Outro erro sobe na hora."""
     import psycopg
@@ -55,7 +56,11 @@ def apagar_banco(admin, nome, limite=5.0, espera=time.sleep, relogio=time.monoto
         try:
             admin.execute('DROP DATABASE IF EXISTS "%s" WITH (FORCE)' % nome)
             return True
-        except (psycopg.errors.InsufficientPrivilege, psycopg.errors.ObjectInUse):
+        except (psycopg.errors.InsufficientPrivilege, psycopg.errors.ObjectInUse) as erro:
+            # "permissão negada para terminar o processo" / "permission denied to terminate process": espera passar;
+            # outra falta de permissão (não poder apagar o banco) não passa com o tempo
+            if isinstance(erro, psycopg.errors.InsufficientPrivilege) and "termin" not in str(erro).lower():
+                raise
             if relogio() + pausa > fim:
                 return False
             espera(pausa)

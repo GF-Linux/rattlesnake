@@ -902,6 +902,7 @@ ratt db user passwd [name]            changes a password (no name: yours)
     "dados.banco_preenche": {"pt": "o banco preenche", "en": "the database fills it in"},
     "dados.f.padrao": {"pt": "vazio: o banco preenche ({padrao})", "en": "empty: the database fills it in ({padrao})"},
     "dados.f.vazio": {"pt": "vazio (∅)", "en": "empty (∅)"},
+    "dados.f.vazio_banco": {"pt": "vazio: o banco preenche", "en": "empty: the database fills it in"},
     "dados.f.obrigatoria": {"pt": "obrigatória", "en": "required"},
     "dados.f.referencia": {"pt": "→ {tabela}.{coluna}", "en": "→ {tabela}.{coluna}"},
     "dados.f.sim": {"pt": "sim", "en": "yes"},

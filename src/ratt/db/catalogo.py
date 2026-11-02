@@ -112,14 +112,14 @@ def modelo(conexao, esquema):
     if not por_oid:
         return m
     oids = list(por_oid)
-    for oid, num, nome, tipo, nn, padrao, ident, gerada in conexao.execute("""
+    for oid, num, nome, tipo, nn, padrao, ident, gerada, sempre in conexao.execute("""
             SELECT a.attrelid, a.attnum, a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull,
-                   pg_get_expr(d.adbin, d.adrelid), a.attidentity <> '', a.attgenerated <> ''
+                   pg_get_expr(d.adbin, d.adrelid), a.attidentity <> '', a.attgenerated <> '', a.attidentity <> 'd'
             FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
             WHERE a.attrelid = ANY (%s) AND a.attnum > 0 AND NOT a.attisdropped
             ORDER BY a.attrelid, a.attnum""", (oids,)):
         por_oid[oid].colunas.append(_modelo.Coluna("t%d.c%d" % (oid, num), nome, tipo, nn, padrao, ident,
-                                                   gerada=gerada))
+                                                   gerada=gerada, identidade_sempre=sempre))
     colunas_por_id = {c.id: c for t in por_oid.values() for c in t.colunas}
     for oid, coid, nome, tipo, conkey, confrelid, confkey, apagar in conexao.execute("""
             SELECT conrelid, oid, conname, contype, conkey, confrelid, confkey, confdeltype

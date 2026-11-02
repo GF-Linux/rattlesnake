@@ -25,6 +25,7 @@ class Coluna:
     nome_unica: Optional[str] = None    # nome dessa restrição, para poder apagá-la
     indexada: bool = False              # primeira coluna de algum índice
     gerada: bool = False                # GENERATED ALWAYS AS (…) STORED: o banco calcula, ninguém insere
+    identidade_sempre: bool = True      # com `identidade`: ALWAYS (ninguém insere) ou, False, BY DEFAULT (pode)
     estado: str = ""                    # "", "novo", "apagado" ou "mudado" (a vista do rascunho)
 
 

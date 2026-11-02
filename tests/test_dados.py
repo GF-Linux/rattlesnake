@@ -1078,7 +1078,7 @@ def test_coluna_e_tabela_do_rascunho_so_depois_de_aplicar(monkeypatch, tmp_path)
     asyncio.run(roteiro())
 
 
-def test_sem_tempo_mantem_as_linhas_e_sem_contagem(monkeypatch, tmp_path):
+def test_sem_tempo_ao_trocar_o_filtro_esvazia_a_grade_e_sem_contagem(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     from ratt.db import tela_dados
 
@@ -1480,6 +1480,12 @@ def test_inserir_booleano_e_data():
     assert campo.dica() == t("dados.f.data")
     hora = Coluna("x", "quando", "timestamp with time zone")
     assert formularios_dados.CampoValor(hora, None).dica() == t("dados.f.data_hora")
+    sempre = formularios_dados.CampoValor(Coluna("i", "id", "bigint", obrigatoria=True, identidade=True), None)
+    assert sempre.desativado
+    por_padrao = formularios_dados.CampoValor(Coluna("i", "id", "bigint", obrigatoria=True, identidade=True,
+                                                     identidade_sempre=False), None)
+    assert not por_padrao.desativado and por_padrao.dica() == t("dados.f.numero") + " · " + t("dados.f.vazio_banco")
+    assert t("dados.f.obrigatoria") not in str(por_padrao._rotulo())
     gerada = formularios_dados.CampoValor(Coluna("y", "total", "numeric", padrao="(a * b)", gerada=True), None)
     assert gerada.desativado and gerada.dica() == t("dados.banco_preenche")
     numero = formularios_dados.CampoValor(Coluna("z", "n", "integer", padrao="7"), None)
@@ -1493,7 +1499,11 @@ def test_por_e_inserir_outra(monkeypatch, tmp_path):
     async def roteiro():
         app = AppDados(FonteDadosFalsa())
         async with app.run_test(size=(140, 50)) as piloto:
+            await pronto_dados(app)
+            app.screen.sessao.acrescentar(rascunho.Inserir("t1", {"t1.c2": "antes"}))     # já havia algo no rascunho
             tela, form = await _abrir_inserir(app, piloto)
+            avisos = []
+            form.notify = lambda msg, **kw: avisos.append(msg)
             _digitar(form, "nome", "Um")
             form.campo("ativo").query_one(Select).value = "false"
             await asyncio.sleep(0.4)                       # os avisos chegam antes do clique (o formulário cresce)
@@ -1509,13 +1519,14 @@ def test_por_e_inserir_outra(monkeypatch, tmp_path):
             await pronto_dados(app)
             assert app.screen is form
             vista = tela.sessao.rascunho.vista()
-            assert [op.comandos(vista)[0] for op in tela.sessao.rascunho.operacoes] == [
+            assert avisos == [t("dados.f.posta", n=1), t("dados.f.posta", n=2)]      # as linhas deste formulário
+            assert [op.comandos(vista)[0] for op in tela.sessao.rascunho.operacoes[1:]] == [
                 "INSERT INTO public.pessoas (nome, ativo) VALUES ('Um', FALSE)",
                 "INSERT INTO public.pessoas (nome) VALUES ('Dois')"]
-            assert t("canvas.rascunho", n=2) in _texto(tela, "#dados_titulo")
+            assert t("canvas.rascunho", n=3) in _texto(tela, "#dados_titulo")
             await piloto.press("escape")
             await piloto.pause()
-            assert app.screen is tela and len(tela.sessao.rascunho.operacoes) == 2
+            assert app.screen is tela and len(tela.sessao.rascunho.operacoes) == 3
     asyncio.run(roteiro())
 
 
@@ -1674,6 +1685,59 @@ def test_apagar_banco_de_teste_tenta_de_novo():
         relogio[0] += s
     assert conftest.apagar_banco(admin, "ratt_teste_1", espera=espera, relogio=lambda: relogio[0]) is False
     assert 4.0 <= relogio[0] <= 6.0                                 # desiste depois de uns 5 s
+    admin = _AdminTeimoso([psycopg.errors.InsufficientPrivilege("permissão negada para remover o banco de dados")])
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):       # sem permissão de verdade: não adianta esperar
+        conftest.apagar_banco(admin, "ratt_teste_1", espera=esperas.append)
+    admin = _AdminTeimoso([psycopg.errors.InsufficientPrivilege("permission denied to terminate process")])
+    assert conftest.apagar_banco(admin, "ratt_teste_1", espera=esperas.append) is True
     admin = _AdminTeimoso([psycopg.errors.SyntaxError("outra coisa")])
     with pytest.raises(psycopg.errors.SyntaxError):                 # outro erro não é esperado: sobe na hora
         conftest.apagar_banco(admin, "ratt_teste_1", espera=esperas.append)
+
+
+def test_coluna_de_identidade_e_gerada_no_json_so_quando_fogem_do_padrao():
+    r = rascunho.Rascunho(Modelo("public"))
+    r.acrescentar(rascunho.CriarTabela(Tabela(r.novo_id("t"), "public", "x", [
+        Coluna(r.novo_id("c"), "id", "bigint", obrigatoria=True, identidade=True, pk=True)])))
+    r.acrescentar(rascunho.AdicionarColuna(r.operacoes[0].tabela.id,
+                                           Coluna(r.novo_id("c"), "n", "bigint", identidade=True, identidade_sempre=False)))
+    d = json.loads(json.dumps(r.para_dict()))
+    col_tabela = d["operacoes"][0]["tabela"]["colunas"][0]
+    assert "identidade_sempre" not in col_tabela and "gerada" not in col_tabela       # um ratt mais velho lê
+    assert d["operacoes"][1]["coluna"]["identidade_sempre"] is False and "gerada" not in d["operacoes"][1]["coluna"]
+    de_volta = rascunho.Rascunho.de_dict(d, Modelo("public"))
+    assert de_volta.operacoes[0].tabela.colunas[0].identidade_sempre is True
+    assert de_volta.operacoes[1].coluna.identidade_sempre is False
+
+
+def test_escolher_linha_mostra_a_destacada_em_tela_pequena():
+    from textual.app import App
+    from textual.containers import Vertical
+    from textual.widgets import OptionList
+    from ratt.db import formularios_dados
+
+    class Fonte:
+        def linhas_pai(self, esquema, tabela, chave, busca, limite=50):
+            return [(i, f"pessoa {i}") for i in range(1, 51)]
+
+    async def roteiro(largura, altura):
+        class A(App):
+            def on_mount(self):
+                self.push_screen(formularios_dados.EscolherLinha(Fonte(), "public", "pessoas", "id"))
+        app = A()
+        async with app.run_test(size=(largura, altura)) as piloto:
+            await app.workers.wait_for_complete()
+            await piloto.pause()
+            tela = app.screen
+            caixa, lista = tela.query_one(Vertical), tela.query_one(OptionList)
+            lista.focus()
+            for _ in range(20):
+                await piloto.press("down")
+            await piloto.pause()
+            assert lista.highlighted == 20
+            assert lista.region.bottom <= caixa.region.bottom <= altura, (largura, altura)   # a lista cabe na caixa
+            visiveis = lista.scrollable_content_region.height
+            assert visiveis >= 1
+            assert lista.scroll_offset.y <= 20 < lista.scroll_offset.y + visiveis, (altura, lista.scroll_offset, visiveis)
+    asyncio.run(roteiro(80, 24))
+    asyncio.run(roteiro(80, 16))
