@@ -274,3 +274,24 @@ def test_assinatura_sem_escritas_nao_muda_com_insert(banco):
     assert catalogo.assinatura(banco, escritas=False) == antes
     banco.execute("ALTER TABLE users ADD COLUMN x int")
     assert catalogo.assinatura(banco, escritas=False) != antes
+
+
+def test_ligar_com_coluna_nova_de_pk_com_dominio(banco):
+    """A PK de tipo próprio (domínio): a coluna nova nasce do mesmo tipo e o SQL do rascunho roda no banco."""
+    banco.execute("""
+        CREATE DOMAIN email_t AS text;
+        CREATE TABLE contas (email email_t PRIMARY KEY);
+        CREATE TABLE avisos (id int PRIMARY KEY);
+    """)
+    r = rascunho.Rascunho(catalogo.modelo(banco, "public"))
+    contas, avisos = r.base.por_nome("contas"), r.base.por_nome("avisos")
+    tipo = contas.colunas[0].tipo
+    col = modelo.Coluna(r.novo_id("c"), "conta_email", tipo)
+    lig = modelo.Ligacao(r.novo_id("k"), avisos.id, (col.id,), contas.id, (contas.colunas[0].id,), "")
+    r.acrescentar(rascunho.Ligar(lig, nova_coluna=col))
+    r.acrescentar(rascunho.LigarNN(r.novo_id("t"), "contas_avisos", contas.id, avisos.id,
+                                   (r.novo_id("c"), r.novo_id("c")), (r.novo_id("k"), r.novo_id("k"))))
+    banco.execute(r.sql_texto())
+    m = catalogo.modelo(banco, "public")
+    assert m.por_nome("avisos").colunas[-1].nome == "conta_email" and m.por_nome("avisos").colunas[-1].tipo == tipo
+    assert len(m.ligacoes) == 3

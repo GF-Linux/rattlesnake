@@ -72,9 +72,11 @@ def nome_tabela(tab: Tabela) -> str:
     return ident(tab.esquema) + "." + ident(tab.nome)
 
 
-def tipo_valido(tipo: str) -> bool:
-    """Um dos tipos da lista ou texto livre que tenha cara de tipo (`varchar(255)`, `int[]`...)."""
-    return tipo in TIPOS or bool(_TIPO.fullmatch(tipo))
+def tipo_valido(tipo: str, referencia: Optional[str] = None) -> bool:
+    """Um dos tipos da lista ou texto livre que tenha cara de tipo (`varchar(255)`, `int[]`...). `referencia` é o
+    tipo da PK de destino como o catálogo o escreve (domínio, enum, tipo de outro schema): igual a ele, caractere
+    por caractere, também vale — o texto vem do catálogo, não de quem digitou."""
+    return (referencia is not None and tipo == referencia) or tipo in TIPOS or bool(_TIPO.fullmatch(tipo))
 
 
 def _clip(s: str, n: int) -> str:
@@ -123,8 +125,8 @@ def _marcar(obj, estado: str) -> None:
         obj.estado = estado
 
 
-def _col_sql(c: Coluna, sem_not_null: bool = False) -> str:
-    if not tipo_valido(c.tipo):
+def _col_sql(c: Coluna, sem_not_null: bool = False, referencia: Optional[str] = None) -> str:
+    if not tipo_valido(c.tipo, referencia):
         raise ValueError(t("canvas.e.tipo", tipo=c.tipo))
     partes = [ident(c.nome), c.tipo]
     if c.identidade:
@@ -365,7 +367,8 @@ class Ligar(Operacao):
         lista = ", ".join(ident(c) for c in cols)
         cmds = []
         if self.nova_coluna is not None:
-            cmds.append(f"ALTER TABLE {t_sql} ADD COLUMN {_col_sql(self.nova_coluna)}")
+            ref = destino.coluna(lig.colunas_destino[0]).tipo if len(lig.colunas_destino) == 1 else None
+            cmds.append(f"ALTER TABLE {t_sql} ADD COLUMN {_col_sql(self.nova_coluna, referencia=ref)}")
         fk = (f"ALTER TABLE {t_sql} ADD CONSTRAINT {ident(self._nome_fk(origem, cols))} FOREIGN KEY ({lista}) "
               f"REFERENCES {nome_tabela(destino)} ({', '.join(ident(c) for c in dest)})")
         if lig.ao_apagar not in _AO_APAGAR:
@@ -437,7 +440,9 @@ class LigarNN(Operacao):
 
     def comandos(self, m: Modelo) -> List[str]:
         nova, ligs = self._construir(m)
-        cols = [_col_sql(c) for c in nova.colunas]
+        # o tipo de cada coluna é o da PK que ela aponta (`_construir`): é a referência aceita
+        refs = [m.tabelas[k.destino].coluna(k.colunas_destino[0]).tipo if k.colunas_destino else None for k in ligs]
+        cols = [_col_sql(c, referencia=ref) for c, ref in zip(nova.colunas, refs)]
         pk = ", ".join(ident(c.nome) for c in nova.colunas)
         cmds = [f"CREATE TABLE {nome_tabela(nova)} ({', '.join(cols)}, PRIMARY KEY ({pk}))"]
         for k, col in zip(ligs, nova.colunas):

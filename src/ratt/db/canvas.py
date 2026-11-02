@@ -422,6 +422,7 @@ class TelaCanvas(Screen):
         Binding("plus", "expandir", t("canvas.k.expandir")),
         Binding("escape,q", "voltar", t("canvas.k.voltar")),
     ]
+    LIMITE_TUDO = 150               # `F` em schema com mais tabelas que isso pergunta antes e desenha fora da thread da tela
     DEFAULT_CSS = """
     #canvas_titulo { height: 1; padding: 0 1; background: $panel; }
     #canvas_avisos { height: 1; padding: 0 1; }
@@ -434,6 +435,9 @@ class TelaCanvas(Screen):
         self.posicoes: Dict[str, Tuple[int, int]] = {}     # as do que se vê: `_pos_todo` ou, em foco, `_pos_foco`
         self._pos_todo: Dict[str, Tuple[int, int]] = {}    # as do schema inteiro (as que vão ao disco)
         self._pos_foco: Dict[str, Tuple[int, int]] = {}    # as do recorte do foco, desde a origem (só na memória)
+        self._foco_base: Dict[str, Tuple[int, int]] = {}   # `_pos_foco` como estava na última vez que foi gravada ou posta
+        self._desenhando = False            # o schema inteiro está sendo desenhado numa thread
+        self._grade_pronta = None           # (posições, Desenho) vindo dessa thread
         self._foco_total = 0                # tabelas na vizinhança do foco (o recorte mostra no máximo LIMITE_FOCO)
         self.expandidas: set = set()        # tabelas recolhidas (`←N`) que a pessoa abriu com `+`
         self._versao = 0                    # sobe a cada nova vista: a grade em cache vale para uma versão só
@@ -569,6 +573,7 @@ class TelaCanvas(Screen):
             # inteiro ele ficaria espalhado por uma grade enorme (e cada seta roteada nela)
             self.vista, self._foco_total = self._recorte(m, self.foco)
             self._pos_foco = self._posicionar(self.vista, self._pos_foco)
+            self._foco_base = dict(self._pos_foco)
             self.posicoes = self._pos_foco
         else:
             self.vista = m
@@ -677,14 +682,22 @@ class TelaCanvas(Screen):
             contagem = None
             if self.foco:
                 contagem = {i: n for i, n in _modelo.chegando(self.todo).items() if i in self.vista.tabelas}
-            self._grade = (chave, desenho.desenhar_grade(self.vista, self.posicoes, self.avisos, self.expandidas,
-                                                          contagem=contagem))
+            pronta, self._grade_pronta = self._grade_pronta, None
+            if (pronta is not None and not self.foco and not self.expandidas
+                    and pronta[0] == tuple(sorted(self.posicoes.items()))):
+                grade = pronta[1]       # a que a thread já desenhou para estas mesmas posições
+            else:
+                grade = desenho.desenhar_grade(self.vista, self.posicoes, self.avisos, self.expandidas,
+                                               contagem=contagem)
+            self._grade = (chave, grade)
         self.query_one(Quadro).definir(self._grade[1].com_selecao(self.selecao), self._aviso_vazio())
         self._titulo()
         self._linha_avisos()
 
     def _aviso_vazio(self) -> str:
         """O que o quadro diz sem tabela nenhuma: lendo, não deu para ler, ou o schema está vazio mesmo."""
+        if self._desenhando:
+            return t("canvas.desenhando")
         if self.vista.tabelas:
             return ""
         if not self.carregado:
@@ -754,11 +767,22 @@ class TelaCanvas(Screen):
         self._guardar()
 
     def _guardar(self) -> None:
-        """Só as posições do schema inteiro vão ao disco; as do recorte do foco valem enquanto o foco durar."""
+        """Só as posições do schema inteiro vão ao disco. Em foco, as caixas movidas passam do sistema do recorte
+        (que recomeça na origem) para o do schema inteiro: o deslocamento desde que foram postas; as demais
+        posições guardadas ficam como estão."""
         if self.foco:
-            return
+            for i, (x, y) in self.posicoes.items():
+                antes = self._foco_base.get(i)
+                if antes is None or antes == (x, y):
+                    continue
+                bx, by = self._pos_todo.get(i, antes)
+                self._pos_todo[i] = (max(MIN_X, bx + x - antes[0]), max(MIN_Y, by + y - antes[1]))
+                self._foco_base[i] = (x, y)
+            dados = self._pos_todo
+        else:
+            dados = self.posicoes
         try:
-            guardar.gravar_posicoes(self.fonte.porta, self.fonte.banco, self.esquema, self.posicoes)
+            guardar.gravar_posicoes(self.fonte.porta, self.fonte.banco, self.esquema, dados)
         except OSError as erro:         # disco cheio, só leitura: a caixa se move do mesmo jeito; avisa uma vez
             if not self._avisou_posicoes:
                 self.notify(t("canvas.erro_posicoes", erro=erro), severity="error")
@@ -839,9 +863,55 @@ class TelaCanvas(Screen):
         self.app.push_screen(PerguntarNome(t("canvas.qual_foco")), nome_dado)
 
     def action_tudo(self) -> None:
-        if self.foco:
+        if not self.foco or self._desenhando:
+            return
+        if len(self.todo.tabelas) <= self.LIMITE_TUDO:
             self.foco = None
             self._montar()
+            return
+        self.app.push_screen(
+            formularios.Confirmar(t("canvas.tudo_pergunta", n=len(self.todo.tabelas)), [], t("canvas.tudo_sim"), foco="nao"),
+            self._tudo_confirmado)
+
+    def _tudo_confirmado(self, sim) -> None:
+        if not sim or not self.foco or self._desenhando:
+            return
+        self._desenhando = True
+        self.redesenhar()
+        self.desenhar_tudo(self.esquema, self.todo, dict(self._pos_todo), frozenset(self.expandidas))
+
+    @work(thread=True, exclusive=True, group="desenho_tudo")
+    def desenhar_tudo(self, esquema, todo, guardadas, expandidas):
+        """O layout e a grade do schema inteiro, fora da thread da tela (centenas de tabelas demoram)."""
+        try:
+            pos = self._posicionar(todo, guardadas)
+            avisos = self._avisos(todo, checagem.avisos_do_modelo(todo))
+            grade = desenho.desenhar_grade(todo, pos, avisos, set(expandidas))
+        except Exception as erro:
+            self.app.call_from_thread(self._tudo_falhou, esquema, erro)
+            return
+        self.app.call_from_thread(self._tudo_chegou, esquema, todo, pos, grade)
+
+    def _tudo_falhou(self, esquema, erro) -> None:
+        if not self.is_attached or esquema != self.esquema:
+            return
+        self._desenhando = False
+        self.redesenhar()
+        self.notify(t("canvas.e.operacao", erro=erro), severity="error")
+
+    def _tudo_chegou(self, esquema, todo, pos, grade) -> None:
+        """Descarta o que chegou se a tela saiu ou trocou de schema (ou largou o foco) no meio do desenho."""
+        if not self.is_attached or esquema != self.esquema or not self._desenhando:
+            return
+        self._desenhando = False
+        if not self.foco:
+            self.redesenhar()
+            return
+        self.foco = None
+        if self.todo is todo:           # nada mudou na leitura: a grade pronta vale
+            self._pos_todo = pos
+            self._grade_pronta = (tuple(sorted(pos.items())), grade)
+        self._montar()
 
     def action_expandir(self) -> None:
         """`+` abre (ou recolhe de novo) a tabela selecionada que está recolhida com `←N`."""
@@ -1283,6 +1353,7 @@ class TelaCanvas(Screen):
         if not nome or nome == self.esquema:
             return
         self.esquema, self.selecao, self.foco = nome, None, None
+        self._desenhando, self._grade_pronta = False, None
         self.posicoes, self.carregado, self.marca = {}, False, None
         self._pos_todo, self._pos_foco, self.expandidas = {}, {}, set()
         self.falha, self._sem_gravar, self._contagens = None, False, {}

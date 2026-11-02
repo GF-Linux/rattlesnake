@@ -1,5 +1,6 @@
 """Testes do canvas: o modelo puro e, nas tarefas seguintes, a tela."""
 import os
+import threading
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -2443,3 +2444,133 @@ def test_m15_exportado_diz_como_rodar_numa_transacao(monkeypatch, tmp_path):
     from ratt.db.rodar import dividir
     comandos = dividir(texto)
     assert len(comandos) == 1 and comandos[0].texto.splitlines()[-1] == "ALTER TABLE public.users RENAME TO pessoas"
+
+
+# ---- pendências da 0.9.0 (fase 2, tarefa 1) -------------------------------------------------------------------
+
+def test_ligar_aceita_pk_de_tipo_do_catalogo():
+    m = modelo_png()
+    m.tabelas["t1"].coluna("t1.c1").tipo = "public.email_t"
+    r = rascunho.Rascunho(m)
+    col = modelo.Coluna(r.novo_id("c"), "dono_id", "public.email_t")
+    lig = modelo.Ligacao(r.novo_id("k"), "t4", (col.id,), "t1", ("t1.c1",), "")
+    r.acrescentar(rascunho.Ligar(lig, nova_coluna=col))
+    assert "dono_id public.email_t" in r.sql_texto()
+
+
+def test_ligar_nn_aceita_pk_de_tipo_do_catalogo():
+    m = modelo_png()
+    m.tabelas["t1"].coluna("t1.c1").tipo = "public.email_t"
+    r = rascunho.Rascunho(m)
+    r.acrescentar(rascunho.LigarNN(r.novo_id("t"), "users_perfis", "t1", "t4", (r.novo_id("c"), r.novo_id("c")),
+                                   (r.novo_id("k"), r.novo_id("k"))))
+    assert "user_id public.email_t" in r.sql_texto()
+
+
+def test_tipo_digitado_continua_na_lista_branca():
+    assert not rascunho.tipo_valido("public.email_t")
+    assert rascunho.tipo_valido("public.email_t", "public.email_t")
+    assert not rascunho.tipo_valido("public.outro_t", "public.email_t")
+    m = modelo_png()
+    r = rascunho.Rascunho(m)
+    col = modelo.Coluna(r.novo_id("c"), "dono_id", "public.email_t")      # a PK é bigint: o tipo não casa
+    lig = modelo.Ligacao(r.novo_id("k"), "t4", (col.id,), "t1", ("t1.c1",), "")
+    with pytest.raises(ValueError):
+        r.acrescentar(rascunho.Ligar(lig, nova_coluna=col))
+        r.sql_texto()
+
+
+def _tela_com_30_tabelas():
+    m = modelo_largo(30)
+    m.ligacoes["k1"] = Ligacao("k1", "t2", ("t2.c1",), "t1", ("t1.c1",), "a")
+    m.ligacoes["k2"] = Ligacao("k2", "t3", ("t3.c1",), "t2", ("t2.c1",), "b")
+    return m
+
+
+def test_mover_no_foco_guarda_posicao(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    m = _tela_com_30_tabelas()
+    guardadas = {"t1": (40, 10), "t5": (90, 30), "t9": (120, 50)}
+    guardar.gravar_posicoes(5432, "teste", "public", guardadas)
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa(m))
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            assert tela.foco is not None and len(tela.vista.tabelas) < 30
+            alvo = "t1"
+            assert alvo in tela.vista.tabelas
+            tela._selecionar(("tabela", alvo))
+            await piloto.press("shift+down"); await piloto.press("shift+right"); await piloto.pause()
+            lidas = guardar.ler_posicoes(5432, "teste", "public")
+            assert lidas[alvo] == (40 + 2, 10 + 1)                       # o mesmo deslocamento, no sistema do schema inteiro
+            assert lidas["t5"] == (90, 30) and lidas["t9"] == (120, 50)  # as de fora do foco não mudaram
+            assert set(lidas) == {"t1", "t5", "t9"}
+            # sem posição guardada (t2, vizinha): a posição nova também vai ao disco, e só ela
+            tela._selecionar(("tabela", "t2"))
+            await piloto.press("shift+down"); await piloto.pause()
+            lidas = guardar.ler_posicoes(5432, "teste", "public")
+            assert "t2" in lidas and lidas["t1"] == (42, 11) and lidas["t5"] == (90, 30)
+    asyncio.run(roteiro())
+
+
+def test_tudo_em_schema_grande_pede_confirmacao_e_nao_trava(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    m = _hub_tela(200)
+    assert len(m.tabelas) > canvas.TelaCanvas.LIMITE_TUDO
+    from ratt.db import formularios
+    soltar = threading.Event()
+    original = canvas.TelaCanvas._posicionar
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa(m))
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            assert tela.foco == "t0"
+            await piloto.press("F"); await piloto.pause()
+            assert isinstance(app.screen, formularios.Confirmar) and app.screen.foco == "nao"
+            await piloto.press("escape"); await piloto.pause()
+            assert app.screen is tela and tela.foco == "t0" and len(tela.vista.tabelas) == canvas.LIMITE_FOCO
+            # enter no foco inicial (cancelar) também não muda nada
+            await piloto.press("F"); await piloto.pause()
+            await piloto.press("enter"); await piloto.pause()
+            assert tela.foco == "t0"
+            # agora com sim: o desenho demora (segura a thread) e a tela segue respondendo
+            monkeypatch.setattr(canvas.TelaCanvas, "_posicionar",
+                                staticmethod(lambda mm, g: (soltar.wait(5), original(mm, g))[1]))
+            await piloto.press("F"); await piloto.pause()
+            await piloto.click("#sim"); await piloto.pause(0.1)
+            assert app.screen is tela and tela.foco == "t0"
+            assert t("canvas.desenhando") == tela.query_one(canvas.Quadro).aviso_vazio
+            await piloto.press("tab"); await piloto.pause()                  # a tela responde enquanto desenha
+            assert tela.selecao is not None
+            soltar.set()
+            await app.workers.wait_for_complete(); await piloto.pause(0.1)
+            assert tela.foco is None and len(tela.vista.tabelas) == 201
+            assert tela.query_one(canvas.Quadro).aviso_vazio == ""
+    asyncio.run(roteiro())
+
+
+def test_tudo_grande_descarta_se_trocou_de_schema(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    m = _hub_tela(200)
+    soltar = threading.Event()
+    original = canvas.TelaCanvas._posicionar
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa(m))
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            tela = app.screen
+            monkeypatch.setattr(canvas.TelaCanvas, "_posicionar",
+                                staticmethod(lambda mm, g: (soltar.wait(5), original(mm, g))[1]))
+            await piloto.press("F"); await piloto.pause()
+            await piloto.click("#sim"); await piloto.pause(0.1)
+            tela.trocar_esquema("outro")              # trocou de schema durante o desenho
+            soltar.set()
+            await app.workers.wait_for_complete(); await piloto.pause(0.1)
+            assert tela.esquema == "outro" and not tela._desenhando and tela._grade_pronta is None
+            assert tela.foco == "t0" and len(tela.vista.tabelas) == canvas.LIMITE_FOCO   # o schema novo abriu em foco
+    asyncio.run(roteiro())
