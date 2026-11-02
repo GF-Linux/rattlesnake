@@ -44,7 +44,9 @@ TIPOS = ("bigint", "integer", "numeric", "text", "boolean", "date", "timestamptz
 def ident(nome: str) -> str:
     """O nome como o PostgreSQL o exige no SQL: sem aspas só se casar `^[a-z_][a-z0-9_]*$` e não for
     palavra reservada; senão entre aspas, com `"` dobrado."""
-    if _SEGURO.match(nome) and nome not in _RESERVADAS:
+    if nome == "":
+        raise ValueError("nome vazio")
+    if _SEGURO.fullmatch(nome) and nome not in _RESERVADAS:
         return nome
     return '"' + nome.replace('"', '""') + '"'
 
@@ -58,7 +60,7 @@ def nome_tabela(tab: Tabela) -> str:
 
 def tipo_valido(tipo: str) -> bool:
     """Um dos tipos da lista ou texto livre que tenha cara de tipo (`varchar(255)`, `int[]`...)."""
-    return tipo in TIPOS or bool(_TIPO.match(tipo))
+    return tipo in TIPOS or bool(_TIPO.fullmatch(tipo))
 
 
 def _clip(s: str, n: int) -> str:
@@ -571,11 +573,13 @@ class Rascunho:
                 desc = op.descricao(m) if valida else op.tipo
             except KeyError:
                 desc = op.tipo
+            # uma linha só: um nome com quebra de linha não pode virar comando solto no .sql
+            desc = " ".join(desc.splitlines())
             marcas.append(len(linhas) + 1)
             linhas.append(f"-- {n}. {desc}")
             if valida:
                 for cmd in op.comandos(m):
-                    linhas.extend((cmd + ";").splitlines())
+                    linhas.extend((cmd + ";").split("\n"))
                 op.aplicar(m)
         return linhas, marcas
 

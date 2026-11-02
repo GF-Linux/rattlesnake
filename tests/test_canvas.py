@@ -192,3 +192,23 @@ def test_nomes_hostis_no_sql():
     r.acrescentar(rascunho.Renomear("t1", None, "user"))
     r.acrescentar(rascunho.AdicionarColuna("t1", modelo.Coluna(r.novo_id("c"), "Data Nasc", "date")))
     assert 'ALTER TABLE "user" ADD COLUMN "Data Nasc" date;' in r.sql_texto()
+
+
+def test_ident_quebra_de_linha_e_vazio():
+    assert rascunho.ident("abc\n") == '"abc\n"'
+    with pytest.raises(ValueError):
+        rascunho.ident("")
+    assert not rascunho.tipo_valido("text\n")
+
+
+def test_descricao_com_quebra_de_linha_fica_em_um_comentario():
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.Renomear("t1", None, "x\nDROP TABLE users"))
+    r.acrescentar(rascunho.AdicionarColuna("t1", modelo.Coluna(r.novo_id("c"), "a\u2028b\x0bc", "date")))
+    linhas = r.sql_texto().split("\n")
+    # o comentário é uma linha só; a quebra no SQL fica dentro do identificador entre aspas
+    assert linhas[0] == "-- 1. renomear a tabela users para x DROP TABLE users"
+    assert linhas[1] == 'ALTER TABLE users RENAME TO "x'
+    assert linhas[2] == 'DROP TABLE users";'
+    assert linhas[r.linhas_das_operacoes()[1] - 1] == ""
+    assert '"a\u2028b\x0bc"' in r.sql_texto()
