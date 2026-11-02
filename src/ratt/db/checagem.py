@@ -52,6 +52,21 @@ def avisos_do_modelo(m: Modelo) -> List[Aviso]:
     return avisos
 
 
+@dataclass
+class Dependente:
+    """Algo no banco que depende de uma tabela ou coluna. O texto sai de `idioma`, não do SQL."""
+    tipo: str                               # "fk" (chave estrangeira de outra tabela) ou "view"
+    oid: int                                # da tabela ou view dependente
+    nome: str
+    oid_restricao: Optional[int] = None     # só para "fk"
+    nome_restricao: Optional[str] = None
+
+    def texto(self) -> str:
+        if self.tipo == "fk":
+            return t("chk.dep_fk", nome=self.nome, restricao=self.nome_restricao)
+        return t("chk.dep_view", nome=self.nome)
+
+
 # ── contagens no banco, só leitura ──
 
 class Consulta:
@@ -96,23 +111,23 @@ class Consulta:
         ).format(f=sql.Identifier(esquema, tabela), c=sql.Identifier(coluna),
                  p=sql.Identifier(esquema_pai, pai), pc=sql.Identifier(coluna_pai)))
 
-    def dependentes(self, oid_tabela: int, attnum: Optional[int] = None) -> List[str]:
+    def dependentes(self, oid_tabela: int, attnum: Optional[int] = None) -> Optional[List[Dependente]]:
         """O que quebra ou some junto: chaves estrangeiras de outras tabelas que chegam na tabela (ou
-        na coluna) e views que a leem. Vazio se nada depende, ou se o PostgreSQL demorou demais."""
+        na coluna) e views que a leem. None se o PostgreSQL cancelou por demora."""
         so_coluna_fk = "" if attnum is None else "AND %(a)s = ANY (k.confkey) "
         so_coluna_dep = "" if attnum is None else "AND d.refobjsubid = %(a)s "
         consulta = (
-            "SELECT 'tabela ' || c.relname || ' (chave estrangeira ' || k.conname || ')' "
+            "SELECT 'fk', c.oid::bigint, c.relname::text, k.oid::bigint, k.conname::text "
             "FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid "
             "WHERE k.contype = 'f' AND k.confrelid = %(o)s AND k.conrelid <> %(o)s " + so_coluna_fk +
             "UNION "
-            "SELECT 'view ' || c.relname FROM pg_depend d "
+            "SELECT 'view', c.oid::bigint, c.relname::text, NULL::bigint, NULL::text FROM pg_depend d "
             "JOIN pg_rewrite w ON w.oid = d.objid JOIN pg_class c ON c.oid = w.ev_class "
             "WHERE d.classid = 'pg_rewrite'::regclass AND d.refclassid = 'pg_class'::regclass "
             "AND d.refobjid = %(o)s AND c.oid <> %(o)s " + so_coluna_dep +
-            "ORDER BY 1")
+            "ORDER BY 3, 5")
         linhas = self._rodar(consulta, {"o": oid_tabela, "a": attnum})
-        return [] if linhas is None else [l[0] for l in linhas]
+        return None if linhas is None else [Dependente(*l) for l in linhas]
 
 
 # ── avisos de uma operação ──
@@ -171,20 +186,37 @@ class _Contagens:
             self._sem_tempo(coluna_id)
         return n
 
-    def repetidos(self, tabela_id, coluna_id) -> Optional[int]:
+    def _deduzida(self, tabela_id, coluna_id, extra, repetidos: bool) -> Optional[int]:
+        """Contagem de uma coluna que o banco ainda não tem. NULL nunca é repetido nem órfão; com
+        padrão, todas as linhas ganham o mesmo valor: repetido se houver mais de uma. Sem como deduzir,
+        None (e o aviso de indeterminado)."""
+        if tabela_id not in self.r.base.tabelas:
+            return 0                        # tabela do rascunho: sem linhas
+        tab = self.r.vista().tabelas.get(tabela_id)
+        col = (tab.coluna(coluna_id) if tab is not None else None) or extra
+        if col is not None and col.padrao is None:
+            return 0
+        if col is not None and repetidos:
+            k = self.linhas(tabela_id)
+            return None if k is None else int(k > 1)
+        self.avisos.append(Aviso(coluna_id, "info", "chk.indeterminado", {}))
+        return None
+
+    def repetidos(self, tabela_id, coluna_id, extra=None) -> Optional[int]:
         tab, col = self._base(tabela_id, coluna_id)
         if col is None:
-            self.avisos.append(Aviso(coluna_id, "info", "chk.indeterminado", {}))
-            return None
+            return self._deduzida(tabela_id, coluna_id, extra, True)
         n = self.consulta.repetidos(tab.esquema, tab.nome, col.nome)
         if n is None:
             self._sem_tempo(coluna_id)
         return n
 
-    def orfaos(self, origem_id, coluna_id, destino_id, coluna_destino_id) -> Optional[int]:
+    def orfaos(self, origem_id, coluna_id, destino_id, coluna_destino_id, extra=None) -> Optional[int]:
         tab, col = self._base(origem_id, coluna_id)
         pai, col_pai = self._base(destino_id, coluna_destino_id)
-        if col is None or col_pai is None:
+        if col is None:
+            return self._deduzida(origem_id, coluna_id, extra, False)
+        if col_pai is None:
             self.avisos.append(Aviso(coluna_id, "info", "chk.indeterminado", {}))
             return None
         n = self.consulta.orfaos(tab.esquema, tab.nome, col.nome, pai.esquema, pai.nome, col_pai.nome)
@@ -236,32 +268,50 @@ def _ligar(op, r, n: _Contagens, v):
         n.avisos.append(Aviso(lig.id, "impede", "chk.tipos", {
             "coluna": nome, "tipo": col.tipo, "pai": f"{destino.nome}.{col_pai.nome}", "tipo_pai": col_pai.tipo}))
     else:                                   # com tipos diferentes a contagem nem rodaria
-        k = n.orfaos(lig.origem, col.id, lig.destino, col_pai.id)
+        k = n.orfaos(lig.origem, col.id, lig.destino, col_pai.id, op.nova_coluna)
         if k:
             n.avisos.append(Aviso(lig.id, "impede", "chk.orfaos_impedem", {"n": k, "coluna": nome}))
     if op.unica:
         n.avisos.append(Aviso(lig.id, "info", "chk.um_para_um", {"coluna": nome}))
 
 
-def _dependentes(op, r, n: _Contagens, alvo, nome, oid_attnum):
-    deps = []
-    if oid_attnum is not None:              # o que nasceu no rascunho não existe no banco: ninguém depende
-        deps = n.consulta.dependentes(*oid_attnum) or []
+def _ainda_depende(d: Dependente, r: rs.Rascunho, v: Modelo) -> bool:
+    """Falso se o rascunho já apagou a tabela dependente ou a chave estrangeira (nesse caso ela não
+    impede mais). O que a base não conhece (outro esquema, views) continua valendo."""
+    alvo = "t%d" % d.oid
+    if alvo in r.base.tabelas and (alvo not in v.tabelas or v.tabelas[alvo].estado == "apagado"):
+        return False
+    if d.oid_restricao is not None:
+        k = "k%d" % d.oid_restricao
+        if k in r.base.ligacoes and (k not in v.ligacoes or v.ligacoes[k].estado == "apagado"):
+            return False
+    return True
+
+
+def _dependentes(op, r, n: _Contagens, v, alvo, nome, oid_attnum):
+    if oid_attnum is None:                  # o que nasceu no rascunho não existe no banco: ninguém depende
+        return
+    deps = n.consulta.dependentes(*oid_attnum)
+    if deps is None:
+        n._sem_tempo(alvo)
+        return
+    deps = [d for d in (deps or []) if _ainda_depende(d, r, v)]
     if deps:
-        n.avisos.append(Aviso(alvo, "atencao", "chk.dependentes", {"nome": nome, "lista": "; ".join(deps)}))
+        n.avisos.append(Aviso(alvo, "atencao", "chk.dependentes",
+                              {"nome": nome, "lista": "; ".join(d.texto() for d in deps)}))
         if not op.cascata:
             n.avisos.append(Aviso(alvo, "impede", "chk.precisa_cascata", {"nome": nome}))
 
 
 def _apagar_coluna(op, r, n: _Contagens, v):
     ids = _id_catalogo(op.coluna) if op.tabela in r.base.tabelas else None
-    _dependentes(op, r, n, op.coluna, _nome(v, op.tabela, op.coluna), ids)
+    _dependentes(op, r, n, v, op.coluna, _nome(v, op.tabela, op.coluna), ids)
 
 
 def _apagar_tabela(op, r, n: _Contagens, v):
     ids = _id_catalogo(op.tabela) if op.tabela in r.base.tabelas else None
     nome = v.tabelas[op.tabela].nome
-    _dependentes(op, r, n, op.tabela, nome, ids)
+    _dependentes(op, r, n, v, op.tabela, nome, ids)
     k = n.linhas(op.tabela)
     if k:
         n.avisos.append(Aviso(op.tabela, "atencao", "chk.linhas_somem", {"n": k, "tabela": nome}))

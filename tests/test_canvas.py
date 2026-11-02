@@ -430,7 +430,7 @@ def test_tabela_nova_nao_consulta():
 
 def test_apagar_tabela_com_dependentes_pede_cascata():
     r = rascunho.Rascunho(modelo_png())
-    falsa = ConsultaFalsa(dependentes=["tabela profiles (chave estrangeira x)"], linhas=4)
+    falsa = ConsultaFalsa(dependentes=[checagem.Dependente("fk", 4, "profiles", 3, "x")], linhas=4)
     avisos = checagem.avisos_da_operacao(rascunho.ApagarTabela("t1"), r, falsa)
     assert [(a.nivel, a.chave) for a in avisos] == [
         ("atencao", "chk.dependentes"), ("impede", "chk.precisa_cascata"), ("atencao", "chk.linhas_somem")]
@@ -444,3 +444,60 @@ def test_apagar_coluna_consulta_pelo_attnum():
     falsa = ConsultaFalsa()
     assert checagem.avisos_da_operacao(rascunho.ApagarColuna("t1", "t1.c4"), r, falsa) == []
     assert ("dependentes", (1, 4)) in falsa.chamadas
+
+
+def _fk_profiles(**kw):
+    return checagem.Dependente("fk", 4, "profiles", 3, "profiles_user_id_fkey")
+
+
+def test_dependente_tem_texto_nos_dois_idiomas(monkeypatch):
+    monkeypatch.setenv("RATT_LANG", "en")
+    assert checagem.Dependente("fk", 4, "profiles", 3, "f").texto() == "table profiles (foreign key f)"
+    monkeypatch.setenv("RATT_LANG", "pt")
+    assert checagem.Dependente("fk", 4, "profiles", 3, "f").texto() == "tabela profiles (chave estrangeira f)"
+    assert checagem.Dependente("view", 9, "v_x").texto() == "view v_x"
+
+
+def test_dependentes_com_tempo_esgotado_avisa_sem_tempo():
+    r = rascunho.Rascunho(modelo_png())
+    avisos = checagem.avisos_da_operacao(rascunho.ApagarColuna("t1", "t1.c4"), r, ConsultaFalsa(dependentes=None))
+    assert [a.chave for a in avisos] == ["chk.sem_tempo"]
+
+
+def test_dependente_ja_apagado_no_rascunho_nao_conta():
+    base = modelo_png()
+    falsa = ConsultaFalsa(dependentes=[_fk_profiles()])
+    # profiles inteira apagada antes
+    r = rascunho.Rascunho(base)
+    r.acrescentar(rascunho.ApagarTabela("t4"))
+    assert [a.chave for a in checagem.avisos_da_operacao(rascunho.ApagarTabela("t1"), r, falsa)] == []
+    # só a ligação apagada
+    r = rascunho.Rascunho(modelo_png())
+    r.acrescentar(rascunho.ApagarLigacao("k3"))
+    assert [a.chave for a in checagem.avisos_da_operacao(rascunho.ApagarTabela("t1"), r, falsa)] == []
+    # nada apagado: conta
+    r = rascunho.Rascunho(modelo_png())
+    assert "chk.precisa_cascata" in [a.chave for a in checagem.avisos_da_operacao(rascunho.ApagarTabela("t1"), r, falsa)]
+
+
+def test_coluna_nova_sem_padrao_nao_tem_repetidos_nem_orfaos():
+    r = rascunho.Rascunho(modelo_png())
+    c = modelo.Coluna(r.novo_id("c"), "ref", "bigint")
+    r.acrescentar(rascunho.AdicionarColuna("t4", c))
+    falsa = ConsultaFalsa(linhas=10, repetidos=5, orfaos=5)
+    assert checagem.avisos_da_operacao(rascunho.Unica("t4", c.id, True), r, falsa) == []
+    lig = modelo.Ligacao(r.novo_id("k"), "t4", (c.id,), "t1", ("t1.c1",), "x")
+    assert checagem.avisos_da_operacao(rascunho.Ligar(lig), r, falsa) == []
+    assert all(nome not in ("repetidos", "orfaos") for nome, _ in falsa.chamadas)
+
+
+def test_coluna_nova_com_padrao_deduz_repetidos():
+    r = rascunho.Rascunho(modelo_png())
+    c = modelo.Coluna(r.novo_id("c"), "ref", "bigint", padrao="0")
+    r.acrescentar(rascunho.AdicionarColuna("t4", c))
+    mais = checagem.avisos_da_operacao(rascunho.Unica("t4", c.id, True), r, ConsultaFalsa(linhas=2))
+    assert [(a.chave, a.valores["n"]) for a in mais] == [("chk.repetidos_impedem", 1)]
+    uma = checagem.avisos_da_operacao(rascunho.Unica("t4", c.id, True), r, ConsultaFalsa(linhas=1))
+    assert uma == []
+    lig = modelo.Ligacao(r.novo_id("k"), "t4", (c.id,), "t1", ("t1.c1",), "x")
+    assert [a.chave for a in checagem.avisos_da_operacao(rascunho.Ligar(lig), r, ConsultaFalsa())] == ["chk.indeterminado"]

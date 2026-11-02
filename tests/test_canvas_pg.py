@@ -157,7 +157,7 @@ def test_consulta_real(banco):
     assert c.repetidos("public", "users", "email") == 1
     assert c.orfaos("public", "profiles", "user_id", "public", "users", "id") == 0
     oid = banco.execute("SELECT 'users'::regclass::oid").fetchone()[0]
-    assert any("profiles" in d for d in c.dependentes(oid))
+    assert any(d.tipo == "fk" and d.nome == "profiles" for d in c.dependentes(oid))
 
 
 def test_consulta_dependentes_de_coluna_e_view(banco):
@@ -165,13 +165,13 @@ def test_consulta_dependentes_de_coluna_e_view(banco):
     banco.execute("CREATE VIEW v_x AS SELECT email FROM users")
     c = checagem.Consulta(banco)
     oid = banco.execute("SELECT 'users'::regclass::oid").fetchone()[0]
-    assert "view v_x" in c.dependentes(oid)
+    assert any(d.tipo == "view" and d.nome == "v_x" for d in c.dependentes(oid))
     attnum = banco.execute("SELECT attnum FROM pg_attribute WHERE attrelid = %s AND attname = 'email'",
                            (oid,)).fetchone()[0]
-    assert c.dependentes(oid, attnum) == ["view v_x"]
+    assert [(d.tipo, d.nome) for d in c.dependentes(oid, attnum)] == [("view", "v_x")]
     attnum = banco.execute("SELECT attnum FROM pg_attribute WHERE attrelid = %s AND attname = 'id'",
                            (oid,)).fetchone()[0]
-    assert any("chave estrangeira" in d for d in c.dependentes(oid, attnum))
+    assert any(d.tipo == "fk" and d.nome_restricao for d in c.dependentes(oid, attnum))
 
 
 def test_consulta_orfaos_e_nome_com_aspas(banco):
