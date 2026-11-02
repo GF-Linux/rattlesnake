@@ -298,26 +298,23 @@ class AcoesRascunho:
             conexao.close()
         self._concluir(resultado[0], resultado[1], ensaio, texto)
 
-    def _aplicar(self, conexao, arquivo: Path, ensaio: bool, cabecalho: str) -> tuple:
-        """Roda o rascunho pela sessão: (código, índice da operação que falhou, mensagem)."""
-        return self.sessao.aplicar(conexao, arquivo, ensaio)
-
     def _sessao(self, conexao, arquivo: Path, ensaio: bool, cabecalho: str) -> tuple:
-        """A parte que fala com o terminal de verdade (não roda sob `run_test`): cabeçalho, execução, Enter."""
+        """A parte que fala com o terminal de verdade (não roda sob `run_test`): cabeçalho, execução, Enter.
+        Roda pela sessão, com o mesmo `cabecalho` do SQL confirmado; devolve (código, índice que falhou, mensagem)."""
         from ratt.cli import c
         modo = c(f" · {t('run.modo_ensaio')}", "amarelo") if ensaio else ""
         quem = f"{t('canvas.run_rascunho')} · {getattr(self.fonte, 'usuario', None) or getpass.getuser()} @ {self.fonte.banco}"
         print(f"{c('ratt db run', 'azul', 'negrito')} {c(quem, 'cinza')}{modo}")
         try:
             with conexao:
-                resultado = self._aplicar(conexao, arquivo, ensaio, cabecalho)
+                resultado = self.sessao.aplicar(conexao, arquivo, ensaio, cabecalho)
         except KeyboardInterrupt:       # Ctrl+C no meio: nada fica, o rascunho continua, a tela não cai
             try:
                 conexao.rollback()
             except Exception:
                 pass
             print("\n" + c(f"↺ {t('canvas.interrompido')}", "amarelo"))
-            resultado = (1, None)
+            resultado = (1, None, None)
         try:
             input("\n" + t("canvas.enter_volta"))
         except (EOFError, KeyboardInterrupt):   # Ctrl+C aqui é o mesmo que Enter: o que rodou já está decidido

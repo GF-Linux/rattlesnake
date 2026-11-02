@@ -1837,6 +1837,9 @@ def test_canvas_coberto_nao_apaga_o_rascunho_de_outro(monkeypatch, tmp_path):
 
 # ---- revisão final: Importants --------------------------------------------------------------------------------
 
+from ratt.db import sessao
+
+
 class _ConCtx:
     """Conexão falsa que aguenta `with` e conta os rollbacks."""
 
@@ -1863,7 +1866,7 @@ def _interrompe(*a, **k):
 
 def test_ctrl_c_durante_o_aplicar_desfaz_e_nao_derruba(monkeypatch, tmp_path):
     _com_rascunho(tmp_path, monkeypatch)
-    monkeypatch.setattr(canvas, "aplicar_rascunho", _interrompe)
+    monkeypatch.setattr(sessao.SessaoRascunho, "aplicar", _interrompe)
     monkeypatch.setattr("builtins.input", lambda *a: "")
 
     async def roteiro():
@@ -1871,14 +1874,14 @@ def test_ctrl_c_durante_o_aplicar_desfaz_e_nao_derruba(monkeypatch, tmp_path):
         async with app.run_test(size=(120, 40)) as piloto:
             await pronto(app)
             con = _ConCtx()
-            assert app.screen._sessao(con, tmp_path / "a.sql", False, "") == (1, None)
+            assert app.screen._sessao(con, tmp_path / "a.sql", False, "") == (1, None, None)
             assert con.rollbacks == 1
     asyncio.run(roteiro())
 
 
 def test_ctrl_c_no_enter_para_voltar_vale_como_enter(monkeypatch, tmp_path):
     _com_rascunho(tmp_path, monkeypatch)
-    monkeypatch.setattr(canvas, "aplicar_rascunho", lambda *a, **k: (0, None))
+    monkeypatch.setattr(sessao.SessaoRascunho, "aplicar", lambda *a, **k: (0, None, None))
     monkeypatch.setattr("builtins.input", _interrompe)
     monkeypatch.setattr(canvas.TelaCanvas, "_reler_aplicado", lambda self, *a: None)
     from contextlib import contextmanager

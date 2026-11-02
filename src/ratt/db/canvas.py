@@ -245,7 +245,7 @@ class EscolherEsquema(ModalScreen):
 
 def aplicar_rascunho(r: _rascunho.Rascunho, conexao, arquivo: Path, ensaio: bool, cabecalho: str) -> Tuple[int, Optional[int]]:
     """Grava o SQL do rascunho em `arquivo` e o roda com o mesmo executor do `ratt db run` (é
-    `sessao.executar_rascunho`; continua aqui porque a tela o chama por este nome)."""
+    `sessao.executar_rascunho`; a tela aplica por `SessaoRascunho.aplicar`, este nome fica para quem já o usa)."""
     return sessao.executar_rascunho(r, conexao, arquivo, ensaio, cabecalho)
 
 
@@ -370,7 +370,7 @@ class TelaCanvas(AcoesRascunho, Screen):
     def _rascunho_mudou(self) -> None:
         """A sessão mudou o rascunho (por esta tela ou por outra): refaz a vista e o painel. Antes do primeiro
         modelo não há o que montar; e quando é a própria tela que chamou a sessão, ela se redesenha em seguida."""
-        if self.carregado and not self._calado:
+        if self.is_attached and self.carregado and not self._calado:
             self._montar()
 
     def _calada(self, fn, *args):
@@ -907,11 +907,6 @@ class TelaCanvas(AcoesRascunho, Screen):
         self._abrir(form)
 
     # ── depois de aplicar ───────────────────────────────────────────────────
-
-    def _aplicar(self, conexao, arquivo: Path, ensaio: bool, cabecalho: str) -> tuple:
-        """Pelo nome `aplicar_rascunho` deste módulo (é o mesmo executor que `sessao.aplicar` usa)."""
-        codigo, indice = aplicar_rascunho(self.rascunho, conexao, arquivo, ensaio, cabecalho)
-        return codigo, indice, None
 
     def depois_de_aplicar(self, esquema: str, nomes: Dict[str, str]) -> None:
         """O banco gravou e a sessão já esvaziou o rascunho: traz o catálogo novo (as posições das tabelas criadas

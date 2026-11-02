@@ -85,9 +85,10 @@ class SessaoRascunho:
 
     def abrir(self, base: Modelo) -> List[str]:
         """Chegou o modelo do banco a uma tela que abre este schema. Na primeira vez (ou se a última leitura do
-        disco falhou) o rascunho vem do disco; nas seguintes, se o disco mudou por fora, vale o do disco; senão o
-        da memória é rebaseado. Devolve os avisos que a tela deve mostrar."""
-        if not self._aberta or self.sem_gravar:
+        disco falhou e nada entrou no rascunho desde então) o rascunho vem do disco; nas seguintes, se o disco
+        mudou por fora, vale o do disco; senão o da memória é rebaseado. Um rascunho com operações na memória
+        nunca é trocado pelo do disco enquanto `sem_gravar`. Devolve os avisos que a tela deve mostrar."""
+        if not self._aberta or (self.sem_gravar and not self.rascunho.operacoes):
             self._aberta, self.sem_gravar = True, False
             avisos = self._ler(base)
             self._avisar_ouvintes()
@@ -100,7 +101,10 @@ class SessaoRascunho:
 
     def reler(self, base: Modelo) -> Optional[List[str]]:
         """Se o rascunho no disco não é mais o que a sessão gravou ou leu (outro processo mexeu nele), vale o do
-        disco. None quando nada mudou (ou não deu para ler agora: fica o da memória, nada se grava por cima)."""
+        disco. None quando nada mudou (ou não deu para ler agora: fica o da memória, nada se grava por cima). Sem
+        conseguir gravar (`sem_gravar`), o que entrou na memória só existe ali: não é trocado pelo do disco."""
+        if self.sem_gravar and self.rascunho.operacoes:
+            return None
         try:
             dados = guardar.ler_rascunho(self.porta, self.banco, self.esquema)
         except _rascunho.RascunhoCorrompido:
@@ -199,9 +203,13 @@ class SessaoRascunho:
         """A linha de comentário do topo do SQL. A mesma para o texto e para achar a operação pela linha."""
         return t("canvas.cabecalho_sql", banco=self.banco, esquema=self.esquema, n=len(self.rascunho.operacoes))
 
-    def aplicar(self, conexao, arquivo: Path, ensaio: bool) -> Tuple[int, Optional[int], Optional[str]]:
-        """Roda o rascunho (ou só ensaia). Devolve (código, índice da operação que falhou, mensagem)."""
-        codigo, indice = executar_rascunho(self.rascunho, conexao, arquivo, ensaio, self.cabecalho())
+    def aplicar(self, conexao, arquivo: Path, ensaio: bool,
+                cabecalho: Optional[str] = None) -> Tuple[int, Optional[int], Optional[str]]:
+        """Roda o rascunho (ou só ensaia). Devolve (código, índice da operação que falhou, mensagem). `cabecalho`:
+        o mesmo que entrou no SQL que a pessoa confirmou (sem ele, o de agora)."""
+        if cabecalho is None:
+            cabecalho = self.cabecalho()
+        codigo, indice = executar_rascunho(self.rascunho, conexao, arquivo, ensaio, cabecalho)
         return codigo, indice, None
 
     def concluir(self, codigo: int, indice: Optional[int], ensaio: bool, texto: str) -> None:
