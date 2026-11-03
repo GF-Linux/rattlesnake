@@ -30,6 +30,7 @@ class Aviso:
     nivel: str                  # "info", "atencao" ou "impede"
     chave: str                  # chave de texto em idioma.py (`chk.*`)
     valores: Dict[str, object] = field(default_factory=dict)
+    oferta: Optional[object] = None     # uma operação que o aviso oferece pôr junto no rascunho (a tela pergunta)
 
     def texto(self) -> str:
         return t(self.chave, **self.valores)
@@ -252,6 +253,23 @@ class Consulta:
             return None
         n = len(colunas)
         return [(tuple(l[:n]), tuple(l[n:])) for l in linhas]
+
+    # ── as das permissões ──
+
+    def usage_no_schema(self, esquema, nomes: List[str]) -> Optional[Dict[str, bool]]:
+        """Nome do papel ("public" para o PUBLIC) → tem USAGE no schema, como o PostgreSQL decide (direto, pelo
+        PUBLIC, por um grupo, sendo o dono ou superusuário). None no tempo esgotado ou se o banco recusar."""
+        linhas = self._rodar("SELECT u.nome, has_schema_privilege(u.nome::name, %s, 'USAGE') "
+                             "FROM unnest(%s::text[]) AS u(nome)", (esquema, list(dict.fromkeys(nomes))), engolir=True)
+        return None if linhas is None else {nome: bool(tem) for nome, tem in linhas}
+
+    def permissoes(self, esquema) -> Optional[catalogo.Permissoes]:
+        """As permissões do schema (`catalogo.permissoes`); None no tempo esgotado."""
+        self._erro = None
+        try:
+            return catalogo.permissoes(self.conexao, esquema, self.limite_ms)
+        except psycopg.errors.QueryCanceled:
+            return None
 
     def _grafo(self) -> Optional[Dict[int, List[_Aresta]]]:
         """Todas as chaves estrangeiras do banco (de qualquer schema), por tabela pai. As que o PostgreSQL copia nas
@@ -851,11 +869,137 @@ def _avisos_de_dados(op, r: rs.Rascunho, consulta) -> List[Aviso]:
     return d.avisos
 
 
+# ── avisos das permissões ──
+# O que a pessoa tem vem da base (o catálogo de agora); o rascunho só conta para o USAGE que uma operação anterior
+# já concede (o aviso não insiste no que vai junto).
+
+def _anteriores(op, r: rs.Rascunho) -> list:
+    """As operações do rascunho antes de `op` (todas, se ela ainda não está nele)."""
+    for i, o in enumerate(r.operacoes):
+        if o is op:
+            return r.operacoes[:i]
+    return list(r.operacoes)
+
+
+def _usage_no_rascunho(anteriores, papel: str) -> bool:
+    return any(isinstance(o, rs.PermissaoNoSchema) and o.usage is True and o.papel in (papel, rs.PUBLIC)
+               for o in anteriores)
+
+
+class _Permissao:
+    def __init__(self, op, r: rs.Rascunho, consulta):
+        self.op, self.r, self.consulta = op, r, consulta
+        self.v = r.vista()
+        self.eu = r.base.eu
+        self.avisos: List[Aviso] = []
+        self._perms = None
+        self._lidas = False
+
+    def avisar(self, alvo, nivel, chave, oferta=None, **valores) -> None:
+        if not any(a.alvo == alvo and a.chave == chave and a.valores == valores for a in self.avisos):
+            self.avisos.append(Aviso(alvo, nivel, chave, valores, oferta))
+
+    def nome(self, papel: str) -> str:
+        return rs.PUBLIC if papel == rs.PUBLIC else self.v.papeis.get(papel, papel)
+
+    def perms(self, alvo) -> Optional[catalogo.Permissoes]:
+        """`catalogo.permissoes` lida uma vez; None (com o aviso de sem resposta) se não deu."""
+        if not self._lidas:
+            self._lidas = True
+            self._perms = self.consulta.permissoes(self.r.base.esquema)
+            if self._perms is None:
+                _sem_resposta(self.consulta, self.avisar, alvo)
+        return self._perms
+
+    def revogar_de_si(self, alvo, privilegios: str, onde: str) -> None:
+        self.avisar(alvo, "atencao", "chk.perm_revogar_si", papel=self.nome(alvo), eu=self.nome(self.eu),
+                    privilegios=privilegios, onde=onde)
+
+
+def _sem_usage(d: _Permissao) -> None:
+    op = d.op
+    anteriores = _anteriores(op, d.r)
+    faltam = [p for p in dict.fromkeys(op.papeis) if not _usage_no_rascunho(anteriores, p)]
+    if not faltam:
+        return
+    nomes = {p: ("public" if p == rs.PUBLIC else d.nome(p)) for p in faltam}
+    tem = d.consulta.usage_no_schema(d.r.base.esquema, list(nomes.values()))
+    if tem is None:
+        _sem_resposta(d.consulta, d.avisar, faltam[0])
+        return
+    for p in faltam:
+        if not tem.get(nomes[p], False):
+            d.avisar(p, "atencao", "chk.perm_sem_usage", rs.PermissaoNoSchema(p, usage=True, create=None),
+                     papel=d.nome(p), esquema=d.r.base.esquema)
+
+
+def _conceder(d: _Permissao) -> None:
+    op = d.op
+    _sem_usage(d)
+    papeis = [p for p in dict.fromkeys(op.papeis) if p != rs.PUBLIC]
+    if op.tabelas and papeis:
+        perms = d.perms(papeis[0])
+        dono = dict(perms.dono) if perms is not None else {}
+        for i in op.tabelas:
+            if i not in d.r.base.tabelas:
+                dono[i] = d.eu                  # criada no rascunho: será de quem aplica
+        for p in papeis:
+            suas = [d.v.tabelas[i].nome for i in dict.fromkeys(op.tabelas) if dono.get(i) == p and i in d.v.tabelas]
+            if suas:
+                d.avisar(p, "info", "chk.perm_dono", papel=d.nome(p), tabelas=", ".join(suas))
+    if op.futuras:
+        d.avisar(op.papeis[0] if op.papeis else "", "info", "chk.perm_futuras", papel=op.por or "")
+
+
+def _revogar(d: _Permissao) -> None:
+    op = d.op
+    privs = ", ".join(nome for letra, nome in rs.PRIVILEGIOS.items() if letra in op.privilegios)
+    onde = ", ".join(d.v.tabelas[i].nome for i in dict.fromkeys(op.tabelas) if i in d.v.tabelas) or d.r.base.esquema
+    if d.eu in op.papeis:
+        d.revogar_de_si(d.eu, privs, onde)
+    elif rs.PUBLIC in op.papeis and op.tabelas:
+        perms = d.perms(rs.PUBLIC)
+        if perms is None:
+            return
+        for i in op.tabelas:
+            if perms.dono.get(i) == d.eu:
+                continue
+            minhas = perms.por_tabela.get((d.eu, i), frozenset())
+            publicas = perms.por_tabela.get((rs.PUBLIC, i), frozenset())
+            if any(x in publicas and x not in minhas for x in op.privilegios):
+                d.revogar_de_si(rs.PUBLIC, privs, onde)
+                return
+
+
+def _no_schema(d: _Permissao) -> None:
+    op = d.op
+    tirar = [nome for nome, valor in (("USAGE", op.usage), ("CREATE", op.create)) if valor is False]
+    if not tirar:
+        return
+    onde = d.r.base.esquema
+    if op.papel == d.eu:
+        d.revogar_de_si(d.eu, ", ".join(tirar), onde)
+    elif op.papel == rs.PUBLIC:
+        perms = d.perms(rs.PUBLIC)
+        if perms is None:
+            return
+        minhas, publicas = perms.schema.get(d.eu, frozenset()), perms.schema.get(rs.PUBLIC, frozenset())
+        if any(x in publicas and x not in minhas for x in tirar):
+            d.revogar_de_si(rs.PUBLIC, ", ".join(tirar), onde)
+
+
+_DE_PERMISSAO = {rs.Conceder: _conceder, rs.Revogar: _revogar, rs.PermissaoNoSchema: _no_schema}
+
+
 def avisos_da_operacao(op, r: rs.Rascunho, consulta) -> List[Aviso]:
     """O que a operação vai encontrar no banco, antes de entrar no rascunho. `consulta` é uma `Consulta`
     (ou qualquer objeto com os mesmos métodos)."""
     if type(op) in _DE_DADOS:
         return _avisos_de_dados(op, r, consulta)
+    if type(op) in _DE_PERMISSAO:
+        d = _Permissao(op, r, consulta)
+        _DE_PERMISSAO[type(op)](d)
+        return d.avisos
     f = _POR_OPERACAO.get(type(op))
     if f is None:
         return []

@@ -1059,3 +1059,220 @@ def test_trocar_ids_leva_a_operacao_para_o_id_do_catalogo():
     criar = CriarPapel(Papel("novo-p3", "d", True, False, False, False, membro_de=("novo-p2",)))
     _sessao._trocar_ids(criar, {"novo-p2": ("r40", "carlos")})
     assert criar.papel.membro_de == ("r40",) and criar.papel.id == "novo-p3"
+
+
+# ── Task 5: permissões de tabela e de schema no rascunho do schema ──
+
+from ratt.db import checagem as _checagem, rascunho as _rascunho
+from ratt.db.modelo import Coluna as _Coluna, Modelo as _Modelo, Tabela as _Tabela
+from ratt.db.rascunho import Conceder, PermissaoNoSchema, Revogar
+
+
+def _schema_perm(esquema="public"):
+    """Um schema com duas tabelas (uma de nome hostil) e papéis de nomes hostis; a pessoa é `r1` (app)."""
+    tabelas = {
+        "t1": _Tabela("t1", esquema, "a", [_Coluna("t1.c1", "id", "bigint", pk=True)]),
+        "t2": _Tabela("t2", esquema, 'Tabela "X"', [_Coluna("t2.c1", "id", "bigint", pk=True)]),
+        "t3": _Tabela("t3", esquema, "ação", [_Coluna("t3.c1", "id", "bigint")]),
+    }
+    papeis = {"r1": "app", "r2": "Leitura Ü", "r3": 'o"quote', "r4": "select"}
+    return _Modelo(esquema, tabelas, {}, papeis=papeis, eu="r1")
+
+
+def _cmds(op, m):
+    return _rascunho.comandos_de(op, m)
+
+
+def test_conceder_e_revogar_um_comando_com_as_listas_e_nomes_hostis():
+    m = _schema_perm()
+    op = Conceder(("r1", "r2", "PUBLIC"), ("t1", "t2"), ("I", "S"))
+    assert _cmds(op, m) == ['GRANT SELECT, INSERT ON public.a, public."Tabela ""X""" TO app, "Leitura Ü", PUBLIC']
+    op = Revogar(("r3", "r4"), ("t3",), ("t", "R", "T", "D", "U", "I", "S"))
+    assert _cmds(op, m) == ['REVOKE SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON public."ação" '
+                            'FROM "o""quote", "select"']
+    # schema de nome hostil também vai citado
+    m2 = _schema_perm('Meu "Esq"')
+    assert _cmds(Conceder(("r2",), ("t1",), ("S",)), m2) == ['GRANT SELECT ON "Meu ""Esq""".a TO "Leitura Ü"']
+
+
+def test_conceder_futuras_gera_alter_default_privileges_for_role():
+    m = _schema_perm("Vendas")
+    op = Conceder(("r2", "PUBLIC"), ("t1",), ("S", "I"), futuras=True, por="Eu Mesmo")
+    assert _cmds(op, m) == [
+        'GRANT SELECT, INSERT ON "Vendas".a TO "Leitura Ü", PUBLIC',
+        'ALTER DEFAULT PRIVILEGES FOR ROLE "Eu Mesmo" IN SCHEMA "Vendas" GRANT SELECT, INSERT ON TABLES '
+        'TO "Leitura Ü", PUBLIC']
+    # sem tabela na lista: só as futuras
+    assert _cmds(Conceder(("r2",), (), ("S",), futuras=True, por="app"), m) == [
+        'ALTER DEFAULT PRIVILEGES FOR ROLE app IN SCHEMA "Vendas" GRANT SELECT ON TABLES TO "Leitura Ü"']
+    assert _cmds(Revogar(("r2",), ("t1",), ("S",), futuras=True, por="app"), m) == [
+        'REVOKE SELECT ON "Vendas".a FROM "Leitura Ü"',
+        'ALTER DEFAULT PRIVILEGES FOR ROLE app IN SCHEMA "Vendas" REVOKE SELECT ON TABLES FROM "Leitura Ü"']
+
+
+def test_operacao_de_permissao_mal_formada_e_recusada_e_fica_invalida():
+    m = _schema_perm()
+    for op in (Conceder(("r2",), ("t1",), ("S",), futuras=True),           # futuras sem `por`
+               Conceder(("r2",), ("t1",), ("X",)),                         # letra que não é privilégio
+               Conceder(("r2",), ("t1",), ("m",)),                         # MAINTAIN não é oferecido
+               Conceder((), ("t1",), ("S",)),
+               Conceder(("r2",), (), ("S",)),                              # sem tabela e sem futuras
+               Conceder(("r2",), ("t1",), ()),
+               PermissaoNoSchema("r2", None, None)):
+        with pytest.raises(ValueError):
+            _rascunho.Rascunho(m).acrescentar(op)
+        r = _rascunho.Rascunho(m, [op])
+        assert r.invalidas == {0}
+
+
+def test_permissao_no_schema_grant_e_revoke():
+    m = _schema_perm("Vendas")
+    assert _cmds(PermissaoNoSchema("r2", True, True), m) == ['GRANT USAGE, CREATE ON SCHEMA "Vendas" TO "Leitura Ü"']
+    assert _cmds(PermissaoNoSchema("PUBLIC", False, None), m) == ['REVOKE USAGE ON SCHEMA "Vendas" FROM PUBLIC']
+    assert _cmds(PermissaoNoSchema("r3", True, False), m) == [
+        'GRANT USAGE ON SCHEMA "Vendas" TO "o""quote"', 'REVOKE CREATE ON SCHEMA "Vendas" FROM "o""quote"']
+    assert PermissaoNoSchema("r3", True, False).refere() == {"r3"}
+    assert PermissaoNoSchema("PUBLIC", True, None).refere() == set()
+
+
+def test_refere_tabelas_e_papeis_e_o_texto_sql():
+    m = _schema_perm()
+    op = Conceder(("r2", "PUBLIC"), ("t1", "t2"), ("S",))
+    assert op.refere() == {"r2", "t1", "t2"}
+    r = _rascunho.Rascunho(m)
+    r.acrescentar(op)
+    assert op.nomes == {"r2": "Leitura Ü", "t1": "a", "t2": 'Tabela "X"'}
+    texto = r.sql_texto()
+    assert 'GRANT SELECT ON public.a, public."Tabela ""X""" TO "Leitura Ü", PUBLIC;' in texto
+    assert texto.startswith("-- 1. ")
+
+
+def test_papel_que_some_ou_muda_de_nome_invalida_no_rebase():
+    m = _schema_perm()
+    r = _rascunho.Rascunho(m)
+    r.acrescentar(Conceder(("r2",), ("t1",), ("S",)))
+    r.acrescentar(PermissaoNoSchema("r3", True, None))
+    r.acrescentar(Conceder(("PUBLIC",), ("t2",), ("S",)))
+    assert r.invalidas == set()
+    sem = _schema_perm()
+    del sem.papeis["r2"]
+    assert r.rebase(sem) == {0}
+    renomeado = _schema_perm()
+    renomeado.papeis["r3"] = "outro"
+    assert r.rebase(renomeado) == {1}
+    sem_tabela = _schema_perm()
+    del sem_tabela.tabelas["t2"]
+    assert r.rebase(sem_tabela) == {2}
+    assert r.rebase(_schema_perm()) == set()
+
+
+def test_papel_pendente_do_rascunho_do_servidor_e_recusado():
+    r = _rascunho.Rascunho(_schema_perm())
+    with pytest.raises(ValueError, match="aplique primeiro o rascunho do servidor"):
+        r.acrescentar(Conceder(("novo-p1",), ("t1",), ("S",)))
+    with pytest.raises(ValueError, match="aplique primeiro o rascunho do servidor"):
+        r.acrescentar(PermissaoNoSchema("novo-p2", True, None))
+    assert r.operacoes == []
+
+
+def test_permissoes_vao_e_voltam_do_json_e_rascunho_antigo_ainda_abre():
+    import json
+    m = _schema_perm()
+    r = _rascunho.Rascunho(m)
+    r.acrescentar(Conceder(("r2", "PUBLIC"), ("t1", "t2"), ("S", "I"), futuras=True, por="app"))
+    r.acrescentar(Revogar(("r3",), ("t3",), ("D",)))
+    r.acrescentar(PermissaoNoSchema("r2", True, None))
+    dados = json.loads(json.dumps(r.para_dict()))
+    volta = _rascunho.Rascunho.de_dict(dados, m)
+    assert volta.operacoes == r.operacoes and volta.sql_texto() == r.sql_texto()
+    # um rascunho de antes (só operações de estrutura) abre sobre o modelo novo, e o modelo sem papéis ainda serve
+    antigo = {"operacoes": [{"tipo": "renomear", "tabela": "t1", "coluna": None, "novo": "b", "nomes": {"t1": "a"}}],
+              "proximo": 1}
+    assert _rascunho.Rascunho.de_dict(antigo, m).invalidas == set()
+    assert _rascunho.Rascunho.de_dict(antigo, _Modelo("public", m.tabelas)).invalidas == set()
+    # forma errada no JSON: corrompido, não um erro solto
+    ruim = {"operacoes": [{"tipo": "conceder", "papeis": [["r2"]], "tabelas": ["t1"], "privilegios": ["S"]}]}
+    with pytest.raises(_rascunho.RascunhoCorrompido):
+        _rascunho.Rascunho.de_dict(ruim, m)
+    ruim = {"operacoes": [{"tipo": "permissao_schema", "papel": "r2", "usage": "sim", "create": None}]}
+    with pytest.raises(_rascunho.RascunhoCorrompido):
+        _rascunho.Rascunho.de_dict(ruim, m)
+
+
+def test_modelo_do_rascunho_aplicado_guarda_papeis_e_eu():
+    r = _rascunho.Rascunho(_schema_perm())
+    r.acrescentar(Conceder(("r2",), ("t1",), ("S",)))
+    depois = r.modelo()
+    assert depois.papeis == _schema_perm().papeis and depois.eu == "r1"
+
+
+class _ConsultaPerm:
+    """Finge o banco para os avisos de permissão: quem tem USAGE no schema e o que `permissoes` leria."""
+
+    def __init__(self, usage, permissoes):
+        self._usage, self._permissoes = usage, permissoes
+
+    def erro(self):
+        return None
+
+    def usage_no_schema(self, esquema, nomes):
+        return {n: self._usage.get(n, False) for n in nomes}
+
+    def permissoes(self, esquema):
+        return self._permissoes
+
+
+def _perms(por_tabela=None, dono=None, schema=None):
+    from ratt.db.catalogo import Permissoes
+    return Permissoes(por_tabela or {}, dono or {"t1": "r1", "t2": "r3", "t3": "r1"}, schema or {}, {})
+
+
+def _chaves(avisos):
+    return sorted((a.nivel, a.chave, a.alvo) for a in avisos)
+
+
+def test_aviso_sem_usage_oferece_a_permissao_no_schema():
+    r = _rascunho.Rascunho(_schema_perm())
+    c = _ConsultaPerm({"app": True, "public": False}, _perms())
+    avisos = _checagem.avisos_da_operacao(Conceder(("r2", "PUBLIC"), ("t1",), ("S",)), r, c)
+    sem = [a for a in avisos if a.chave == "chk.perm_sem_usage"]
+    assert {a.alvo for a in sem} == {"r2", "PUBLIC"} and all(a.nivel == "atencao" for a in sem)
+    oferta = next(a.oferta for a in sem if a.alvo == "r2")
+    assert oferta == PermissaoNoSchema("r2", usage=True, create=None)
+    assert "USAGE" in sem[0].texto()
+    # com o USAGE já no rascunho (antes), o aviso some
+    r.acrescentar(PermissaoNoSchema("r2", True, None))
+    avisos = _checagem.avisos_da_operacao(Conceder(("r2",), ("t1",), ("S",)), r, c)
+    assert not [a for a in avisos if a.chave == "chk.perm_sem_usage"]
+
+
+def test_aviso_dono_ja_tem_tudo_e_futuras():
+    r = _rascunho.Rascunho(_schema_perm())
+    c = _ConsultaPerm({"o\"quote": True, "Leitura Ü": True}, _perms())
+    avisos = _checagem.avisos_da_operacao(Conceder(("r3",), ("t1", "t2"), ("S",)), r, c)
+    assert _chaves(avisos) == [("info", "chk.perm_dono", "r3")]
+    assert "Tabela \"X\"" in avisos[0].texto()
+    avisos = _checagem.avisos_da_operacao(Conceder(("r2",), (), ("S",), futuras=True, por="app"), r, c)
+    assert _chaves(avisos) == [("info", "chk.perm_futuras", "r2")]
+    assert "app" in avisos[0].texto()
+
+
+def test_aviso_revogar_de_si_mesmo_ou_do_public_quando_e_por_ele():
+    r = _rascunho.Rascunho(_schema_perm())
+    # t2 é de r3; app (a pessoa) só tem SELECT em t2 pelo PUBLIC
+    perms = _perms(por_tabela={("PUBLIC", "t2"): frozenset("S"), ("r3", "t2"): frozenset("SIUDTRt")})
+    c = _ConsultaPerm({}, perms)
+    avisos = _checagem.avisos_da_operacao(Revogar(("r1",), ("t2",), ("S",)), r, c)
+    assert _chaves(avisos) == [("atencao", "chk.perm_revogar_si", "r1")]
+    avisos = _checagem.avisos_da_operacao(Revogar(("PUBLIC",), ("t2",), ("S",)), r, c)
+    assert _chaves(avisos) == [("atencao", "chk.perm_revogar_si", "PUBLIC")]
+    # dela mesma no que ela possui não vem pelo PUBLIC; e tirar do PUBLIC o que ela tem direto também não
+    assert _checagem.avisos_da_operacao(Revogar(("PUBLIC",), ("t1",), ("S",)), r, c) == []
+    perms.por_tabela[("r1", "t2")] = frozenset("S")
+    assert _checagem.avisos_da_operacao(Revogar(("PUBLIC",), ("t2",), ("S",)), r, c) == []
+    # no schema: tirar o próprio USAGE, ou o do PUBLIC quando é por ele que ela tem
+    c = _ConsultaPerm({}, _perms(schema={"PUBLIC": frozenset({"USAGE"})}))
+    avisos = _checagem.avisos_da_operacao(PermissaoNoSchema("PUBLIC", False, None), r, c)
+    assert _chaves(avisos) == [("atencao", "chk.perm_revogar_si", "PUBLIC")]
+    avisos = _checagem.avisos_da_operacao(PermissaoNoSchema("r1", None, False), r, c)
+    assert _chaves(avisos) == [("atencao", "chk.perm_revogar_si", "r1")]

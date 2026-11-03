@@ -811,10 +811,156 @@ class ApagarDuplicatas(Operacao):
             | _refere_filtro(self.filtro, self.tabela)
 
 
+# ── permissões de tabela e de schema ──
+# Papéis por id (`r{oid}`, que precisa existir na base: um papel criado no rascunho do servidor, `novo-p…`, ainda
+# não existe aqui) ou "PUBLIC", que não é id e nunca fica inválido. Nunca `ON ALL TABLES IN SCHEMA` (pegaria views e
+# tabelas estrangeiras que a grade não mostra): sempre a lista das tabelas, cada uma pelo id.
+
+PUBLIC = "PUBLIC"
+# as letras do `aclitem` (as do `catalogo.permissoes`) → a palavra do GRANT, na ordem em que o comando as escreve
+PRIVILEGIOS = {"S": "SELECT", "I": "INSERT", "U": "UPDATE", "D": "DELETE", "T": "TRUNCATE", "R": "REFERENCES",
+               "t": "TRIGGER"}
+
+
+def papel_pendente(id: str) -> bool:
+    """Um papel criado no rascunho do servidor e ainda não aplicado: o rascunho do schema não o aceita."""
+    return isinstance(id, str) and id.startswith("novo-p")
+
+
+def _papel_sql(m: Modelo, id: str) -> str:
+    if id == PUBLIC:
+        return PUBLIC
+    if id not in m.papeis:
+        raise KeyError(id)
+    return ident(m.papeis[id])
+
+
+def _papel_nome(m: Modelo, id: str) -> str:
+    return PUBLIC if id == PUBLIC else m.papeis[id]
+
+
+def _papeis_sql(m: Modelo, papeis: Tuple[str, ...]) -> str:
+    if not papeis:
+        raise ValueError(t("perm.e.sem_papel"))
+    return ", ".join(_papel_sql(m, p) for p in dict.fromkeys(papeis))
+
+
+def _privilegios_sql(privilegios: Tuple[str, ...]) -> str:
+    fora = [p for p in privilegios if p not in PRIVILEGIOS]
+    if fora:
+        raise ValueError(t("perm.e.privilegio", privilegio=", ".join(map(str, fora))))
+    if not privilegios:
+        raise ValueError(t("perm.e.sem_privilegio"))
+    return ", ".join(nome for letra, nome in PRIVILEGIOS.items() if letra in privilegios)
+
+
+@dataclass
+class Conceder(Operacao):
+    """`GRANT … ON a, b TO x, y` — um comando com as listas. `futuras`: também as tabelas que `por` (o papel da pessoa,
+    guardado ao criar a operação, para o SQL mostrado ser sempre o mesmo) criar no schema, pelo `ALTER DEFAULT
+    PRIVILEGES FOR ROLE`; sem tabela na lista, só esse."""
+    papeis: Tuple[str, ...]
+    tabelas: Tuple[str, ...]
+    privilegios: Tuple[str, ...]
+    futuras: bool = False
+    por: Optional[str] = None
+    nomes: Dict[str, str] = field(default_factory=dict)
+    tipo: ClassVar[str] = "conceder"
+    _verbo: ClassVar[Tuple[str, str]] = ("GRANT", "TO")
+
+    def aplicar(self, m: Modelo) -> None:
+        pass
+
+    def comandos(self, m: Modelo) -> List[str]:
+        verbo, prep = self._verbo
+        privs, papeis = _privilegios_sql(self.privilegios), _papeis_sql(m, self.papeis)
+        if not isinstance(self.futuras, bool):
+            raise TypeError("futuras")
+        if not self.tabelas and not self.futuras:
+            raise ValueError(t("perm.e.sem_tabela"))
+        cmds = []
+        if self.tabelas:
+            lista = ", ".join(nome_tabela(m.tabelas[i]) for i in dict.fromkeys(self.tabelas))
+            cmds.append(f"{verbo} {privs} ON {lista} {prep} {papeis}")
+        if self.futuras:
+            if not isinstance(self.por, str) or not self.por:
+                raise ValueError(t("perm.e.sem_por"))
+            cmds.append(f"ALTER DEFAULT PRIVILEGES FOR ROLE {ident(self.por)} IN SCHEMA {ident(m.esquema)} "
+                        f"{verbo} {privs} ON TABLES {prep} {papeis}")
+        return cmds
+
+    def descricao(self, m: Modelo) -> str:
+        valores = {"privilegios": _privilegios_sql(self.privilegios),
+                   "papeis": ", ".join(_papel_nome(m, p) for p in dict.fromkeys(self.papeis)),
+                   "tabelas": ", ".join(m.tabelas[i].nome for i in dict.fromkeys(self.tabelas)),
+                   "por": self.por or "", "esquema": m.esquema}
+        chave = "op." + self.tipo + ("_futuras" if self.futuras else "")
+        if self.futuras and not self.tabelas:
+            chave += "_so"
+        return t(chave, **valores)
+
+    def refere(self) -> Set[str]:
+        return set(self.tabelas) | {p for p in self.papeis if p != PUBLIC}
+
+
+@dataclass
+class Revogar(Conceder):
+    """`REVOKE … ON a, b FROM x, y`; com `futuras`, o `ALTER DEFAULT PRIVILEGES … REVOKE … FROM` correspondente."""
+    tipo: ClassVar[str] = "revogar"
+    _verbo: ClassVar[Tuple[str, str]] = ("REVOKE", "FROM")
+
+
+@dataclass
+class PermissaoNoSchema(Operacao):
+    """USAGE e CREATE de um papel (ou do PUBLIC) no schema: True concede, False revoga, None deixa como está."""
+    papel: str
+    usage: Optional[bool] = None
+    create: Optional[bool] = None
+    nomes: Dict[str, str] = field(default_factory=dict)
+    tipo: ClassVar[str] = "permissao_schema"
+
+    def _partes(self) -> Tuple[List[str], List[str]]:
+        dar, tirar = [], []
+        for nome, valor in (("USAGE", self.usage), ("CREATE", self.create)):
+            if valor is not None and not isinstance(valor, bool):
+                raise TypeError(nome)
+            if valor is True:
+                dar.append(nome)
+            elif valor is False:
+                tirar.append(nome)
+        if not dar and not tirar:
+            raise ValueError(t("perm.e.nada_no_schema"))
+        return dar, tirar
+
+    def aplicar(self, m: Modelo) -> None:
+        pass
+
+    def comandos(self, m: Modelo) -> List[str]:
+        dar, tirar = self._partes()
+        papel, esquema = _papel_sql(m, self.papel), ident(m.esquema)
+        cmds = []
+        if dar:
+            cmds.append(f"GRANT {', '.join(dar)} ON SCHEMA {esquema} TO {papel}")
+        if tirar:
+            cmds.append(f"REVOKE {', '.join(tirar)} ON SCHEMA {esquema} FROM {papel}")
+        return cmds
+
+    def descricao(self, m: Modelo) -> str:
+        dar, tirar = self._partes()
+        partes = ([t("op.permissao_schema_dar", privilegios=", ".join(dar))] if dar else []) + \
+                 ([t("op.permissao_schema_tirar", privilegios=", ".join(tirar))] if tirar else [])
+        return t("op.permissao_schema", papel=_papel_nome(m, self.papel), esquema=m.esquema, acoes="; ".join(partes))
+
+    def refere(self) -> Set[str]:
+        return set() if self.papel == PUBLIC else {self.papel}
+
+
 # ── o rascunho ──
 
 def _existe(m: Modelo, id: str) -> bool:
-    """O id existe no modelo e nem ele nem a tabela dele estão apagados."""
+    """O id existe no modelo e nem ele nem a tabela dele estão apagados (um papel: existe no servidor)."""
+    if id in m.papeis:
+        return True
     achado = _achar(m, id)
     if achado is None:
         return False
@@ -839,6 +985,8 @@ def comandos_de(op: Operacao, m: Modelo) -> List[str]:
 def _nome_de(id: str, *modelos: Modelo) -> str:
     """O nome de um id para uma mensagem (o primeiro modelo que o conhece); o próprio id se nenhum conhece."""
     for m in modelos:
+        if id in m.papeis:
+            return m.papeis[id]
         achado = _achar(m, id)
         if achado is not None and getattr(achado[0], "nome", None):
             return achado[0].nome
@@ -846,7 +994,9 @@ def _nome_de(id: str, *modelos: Modelo) -> str:
 
 
 def _nome_na_base(base: Modelo, id: str) -> Optional[str]:
-    """O nome que o id tem na base (tabela, coluna ou ligação); None se ela não o conhece."""
+    """O nome que o id tem na base (tabela, coluna, ligação ou papel); None se ela não o conhece."""
+    if id in base.papeis:
+        return base.papeis[id]
     if id in base.tabelas:
         return base.tabelas[id].nome
     if id in base.ligacoes:
@@ -884,10 +1034,12 @@ _CAMPOS = {
     Alterar: {"filtro": "Filtro", "mudancas": "Mudancas"},
     Apagar: {"filtro": "Filtro"},
     ApagarDuplicatas: {"filtro": "Filtro", "por": "tupla"},
+    Conceder: {"papeis": "tupla", "tabelas": "tupla", "privilegios": "tupla"},
+    Revogar: {"papeis": "tupla", "tabelas": "tupla", "privilegios": "tupla"},
 }
 _TIPOS_OP = {cls.tipo: cls for cls in (CriarTabela, AdicionarColuna, Renomear, Obrigatoria, Unica, Ligar,
                                        LigarNN, ApagarLigacao, ApagarColuna, ApagarTabela, Inserir, Alterar,
-                                       Apagar, ApagarDuplicatas)}
+                                       Apagar, ApagarDuplicatas, Conceder, Revogar, PermissaoNoSchema)}
 
 
 # campos de `Coluna` que só vão para o JSON quando fogem do padrão: um rascunho sem eles continua legível por um
@@ -974,6 +1126,13 @@ def _conferir(op: Operacao) -> None:
     if isinstance(op, Alterar) and not all(isinstance(x.tipo, str) and (x.valor is None or isinstance(x.valor, str))
                                            for x in op.mudancas.values()):
         raise TypeError("mudanças inválidas")
+    if isinstance(op, Conceder) and (
+            not all(isinstance(x, str) for x in op.papeis + op.tabelas + op.privilegios)
+            or not isinstance(op.futuras, bool) or not (op.por is None or isinstance(op.por, str))):
+        raise TypeError("permissão inválida")
+    if isinstance(op, PermissaoNoSchema) and (not isinstance(op.papel, str) or not all(
+            v is None or isinstance(v, bool) for v in (op.usage, op.create))):
+        raise TypeError("permissão no schema inválida")
     if not isinstance(op.nomes, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in op.nomes.items()):
         raise TypeError(f"nomes inválidos: {op.nomes!r}")
 
@@ -994,6 +1153,9 @@ class Rascunho:
 
     def acrescentar(self, op: Operacao) -> None:
         v = self.vista()
+        pendentes = sorted(i for i in op.refere() if papel_pendente(i))
+        if pendentes:
+            raise ValueError(t("perm.e.papel_pendente"))
         for i in sorted(op.refere()):
             if not _existe(v, i):
                 raise ValueError(t("canvas.e.nao_existe", nome=_nome_de(i, v, self.base)))
@@ -1096,7 +1258,7 @@ class Rascunho:
             tabelas[i] = tab
         ligacoes = {i: k for i, k in v.ligacoes.items()
                     if k.estado != "apagado" and k.origem in tabelas and k.destino in tabelas}
-        return Modelo(v.esquema, tabelas, ligacoes)
+        return Modelo(v.esquema, tabelas, ligacoes, v.papeis, v.eu)
 
     def _linhas(self, cabecalho: str) -> Tuple[List[str], List[int]]:
         """As linhas do texto SQL e a linha (1-based) do comentário de cada operação."""

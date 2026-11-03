@@ -1188,3 +1188,156 @@ def test_aplicar_o_rascunho_do_servidor_pela_tela(servidor, banco_servidor, monk
         assert c.execute("SELECT count(*) FROM pg_roles WHERE rolname = 'bruno'").fetchone()[0] == 0
     assert _donos(servidor, b1) == {"t_bruno": servidor.usuario}
     _sem_segredo_no_disco(tmp_path / "dados")
+
+
+# ── Task 5: permissões de tabela e de schema (rascunho do schema), aplicadas pelo caminho de sempre ──
+
+def _aplicar_schema(servidor, banco, r, tmp_path):
+    """Aplica o rascunho do schema como a tela aplica: `SessaoRascunho.aplicar` (o mesmo executor do `ratt db run`)."""
+    from ratt.db import sessao as _sessao_mod
+    s = _sessao_mod.SessaoRascunho(servidor.porta, banco, r.base.esquema)
+    s.rascunho = r
+    con = servidor.conectar(banco)
+    try:
+        codigo, indice, msg = s.aplicar(con, tmp_path / "perm.sql", ensaio=False)
+    finally:
+        con.close()
+    assert (codigo, indice, msg) == (0, None, None)
+
+
+def _ids(m):
+    return {nome: i for i, nome in m.papeis.items()}, {tab.nome: i for i, tab in m.tabelas.items()}
+
+
+def test_conceder_aplicado_da_select_nas_tabelas_da_lista(servidor, banco_servidor, tmp_path):
+    from ratt.db import rascunho
+    admin = servidor.conectar()
+    admin.execute('CREATE ROLE leitura NOLOGIN')
+    admin.execute('CREATE ROLE "Leitura Ü" NOLOGIN')
+    admin.close()
+    c = servidor.conectar(banco_servidor)
+    c.execute('CREATE TABLE public.a (id int); CREATE TABLE public.b (id int); CREATE TABLE public."C x" (id int)')
+    m = catalogo.modelo(c, "public")
+    papeis, tabelas = _ids(m)
+    assert m.eu == papeis[servidor.usuario]
+    r = rascunho.Rascunho(m)
+    r.acrescentar(rascunho.Conceder((papeis["leitura"], papeis["Leitura Ü"]), (tabelas["a"], tabelas["b"]), ("S",)))
+    r.acrescentar(rascunho.Conceder(("PUBLIC",), (tabelas["C x"],), ("I", "S")))
+    _aplicar_schema(servidor, banco_servidor, r, tmp_path)
+    tem = lambda papel, tab, priv: c.execute("SELECT has_table_privilege(%s, %s, %s)", (papel, tab, priv)).fetchone()[0]
+    assert tem("leitura", "public.a", "SELECT") and tem("leitura", "public.b", "SELECT")
+    assert tem("Leitura Ü", "public.b", "SELECT")
+    assert not tem("leitura", "public.a", "INSERT")
+    assert tem("leitura", 'public."C x"', "INSERT")                    # pelo PUBLIC
+    assert tem("public", 'public."C x"', "INSERT")
+    # revogar pelo mesmo caminho
+    r = rascunho.Rascunho(catalogo.modelo(c, "public"))
+    r.acrescentar(rascunho.Revogar((papeis["leitura"],), (tabelas["b"],), ("S",)))
+    _aplicar_schema(servidor, banco_servidor, r, tmp_path)
+    assert tem("leitura", "public.a", "SELECT") and not tem("leitura", "public.b", "SELECT")
+    c.close()
+
+
+def test_futuras_vale_para_a_tabela_que_eu_criar_depois(servidor, banco_servidor, tmp_path):
+    from ratt.db import rascunho
+    admin = servidor.conectar()
+    admin.execute("CREATE ROLE leitura NOLOGIN")
+    admin.close()
+    c = servidor.conectar(banco_servidor)
+    c.execute('CREATE SCHEMA "Vendas"; CREATE TABLE "Vendas".velha (id int)')
+    m = catalogo.modelo(c, "Vendas")
+    papeis, tabelas = _ids(m)
+    eu = m.papeis[m.eu]
+    r = rascunho.Rascunho(m)
+    r.acrescentar(rascunho.Conceder((papeis["leitura"],), (tabelas["velha"],), ("S",), futuras=True, por=eu))
+    r.acrescentar(rascunho.PermissaoNoSchema(papeis["leitura"], True, None))
+    _aplicar_schema(servidor, banco_servidor, r, tmp_path)
+    c.execute('CREATE TABLE "Vendas".nova (id int)')
+    tem = lambda tab: c.execute("SELECT has_table_privilege('leitura', %s, 'SELECT')", (tab,)).fetchone()[0]
+    assert tem('"Vendas".velha') and tem('"Vendas".nova')
+    assert c.execute("SELECT has_schema_privilege('leitura', 'Vendas', 'USAGE')").fetchone()[0]
+    p = catalogo.permissoes(c, "Vendas")
+    assert p.padrao == {papeis["leitura"]: frozenset({"S"})}
+    # revogar as futuras: a próxima tabela já não vem com o SELECT
+    r = rascunho.Rascunho(catalogo.modelo(c, "Vendas"))
+    r.acrescentar(rascunho.Revogar((papeis["leitura"],), (), ("S",), futuras=True, por=eu))
+    _aplicar_schema(servidor, banco_servidor, r, tmp_path)
+    c.execute('CREATE TABLE "Vendas".outra (id int)')
+    assert not tem('"Vendas".outra') and catalogo.permissoes(c, "Vendas").padrao == {}
+    c.close()
+
+
+def test_permissoes_le_public_dono_schema_e_padrao(servidor, banco_servidor):
+    admin = servidor.conectar()
+    admin.execute("CREATE ROLE ana LOGIN")
+    admin.execute("CREATE ROLE leitura NOLOGIN")
+    admin.close()
+    c = servidor.conectar(banco_servidor)
+    c.execute("CREATE TABLE public.a (id int); CREATE TABLE public.b (id int); CREATE TABLE public.vazia (id int)")
+    c.execute("CREATE TABLE public.mae (id int) PARTITION BY RANGE (id)")
+    c.execute("CREATE TABLE public.filha PARTITION OF public.mae FOR VALUES FROM (0) TO (10)")
+    c.execute("CREATE VIEW public.v AS SELECT 1 AS x")
+    c.execute("ALTER TABLE public.b OWNER TO ana")
+    c.execute("GRANT SELECT ON public.a TO PUBLIC")
+    c.execute("GRANT INSERT, TRIGGER ON public.a TO leitura")
+    c.execute("REVOKE ALL ON public.vazia FROM CURRENT_USER")      # o dono tirou tudo de si: a ACL fica vazia
+    c.execute("GRANT CREATE ON SCHEMA public TO leitura")
+    c.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, UPDATE ON TABLES TO leitura")
+    c.execute("ALTER DEFAULT PRIVILEGES FOR ROLE ana IN SCHEMA public GRANT SELECT ON TABLES TO leitura")
+    m = catalogo.modelo(c, "public")
+    papeis, tabelas = _ids(m)
+    eu = papeis[servidor.usuario]
+    p = catalogo.permissoes(c, "public")
+    tudo = frozenset("SIUDTRt")
+    assert p.por_tabela[("PUBLIC", tabelas["a"])] == frozenset("S")
+    assert p.por_tabela[(papeis["leitura"], tabelas["a"])] == frozenset("It")
+    assert p.por_tabela[(eu, tabelas["a"])] == tudo                      # sem MAINTAIN, mesmo no 17+
+    assert p.por_tabela[(papeis["ana"], tabelas["b"])] == tudo           # ACL padrão (NULL): o dono tem tudo
+    assert not any(k[1] == tabelas["vazia"] for k in p.por_tabela)
+    assert p.dono == {tabelas["a"]: eu, tabelas["b"]: papeis["ana"], tabelas["vazia"]: eu, tabelas["mae"]: eu}
+    assert "v" not in tabelas and "filha" not in tabelas and set(p.dono) == set(m.tabelas)
+    assert p.schema["PUBLIC"] == frozenset({"USAGE"}) and p.schema[papeis["leitura"]] == frozenset({"CREATE"})
+    assert p.padrao == {papeis["leitura"]: frozenset({"S", "U"})}       # só os FOR ROLE da pessoa
+    assert {papeis["leitura"], papeis["ana"], eu} <= set(m.papeis)
+    c.close()
+
+
+def test_avisos_de_permissao_com_o_banco(servidor, banco_servidor):
+    from ratt.db import checagem, rascunho
+    admin = servidor.conectar()
+    admin.execute("CREATE ROLE leitura NOLOGIN")
+    admin.execute("CREATE ROLE ana LOGIN")
+    admin.close()
+    c = servidor.conectar(banco_servidor)
+    c.execute("CREATE SCHEMA fechado; CREATE TABLE fechado.a (id int); ALTER TABLE fechado.a OWNER TO ana")
+    m = catalogo.modelo(c, "fechado")
+    papeis, tabelas = _ids(m)
+    r = rascunho.Rascunho(m)
+    avisos = checagem.avisos_da_operacao(rascunho.Conceder((papeis["leitura"], papeis["ana"]), (tabelas["a"],), ("S",)),
+                                         r, checagem.Consulta(c))
+    assert sorted((a.nivel, a.chave, a.alvo) for a in avisos) == sorted([
+        ("atencao", "chk.perm_sem_usage", papeis["ana"]), ("atencao", "chk.perm_sem_usage", papeis["leitura"]),
+        ("info", "chk.perm_dono", papeis["ana"])])
+    assert all(a.oferta == rascunho.PermissaoNoSchema(a.alvo, True, None) for a in avisos if a.nivel == "atencao")
+    c.close()
+
+
+def test_papel_removido_no_servidor_invalida_a_operacao_no_rebase(servidor, banco_servidor):
+    from ratt.db import rascunho
+    admin = servidor.conectar()
+    admin.execute("CREATE ROLE leitura NOLOGIN")
+    admin.execute("CREATE ROLE ana NOLOGIN")
+    c = servidor.conectar(banco_servidor)
+    c.execute("CREATE TABLE public.a (id int)")
+    antes = catalogo.assinatura(c, escritas=False)
+    m = catalogo.modelo(c, "public")
+    papeis, tabelas = _ids(m)
+    r = rascunho.Rascunho(m)
+    r.acrescentar(rascunho.Conceder((papeis["leitura"],), (tabelas["a"],), ("S",)))
+    r.acrescentar(rascunho.Conceder((papeis["ana"],), (tabelas["a"],), ("S",)))
+    admin.execute("DROP ROLE leitura")
+    admin.execute("ALTER ROLE ana RENAME TO bia")
+    assert catalogo.assinatura(c, escritas=False) != antes             # a tela relê o schema e faz o rebase
+    assert r.rebase(catalogo.modelo(c, "public")) == {0, 1}
+    admin.close()
+    c.close()

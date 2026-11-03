@@ -3,7 +3,8 @@
 O catálogo preenche, o rascunho altera uma cópia, o desenho lê. Tudo se liga por ids (não por nomes),
 para que renomear uma tabela ou coluna no rascunho não quebre as ligações. Ids do catálogo:
 tabela `t{oid}`, coluna `t{oid}.c{attnum}`, ligação `k{oid_da_restricao}`; os criados no rascunho
-são `novo-t{n}`, `novo-c{n}` e `novo-k{n}`.
+são `novo-t{n}`, `novo-c{n}` e `novo-k{n}`. Os papéis do servidor que as permissões referem: `r{oid}` (só os que já
+existem; um papel criado no rascunho do servidor não vale aqui).
 """
 from __future__ import annotations
 
@@ -68,6 +69,8 @@ class Modelo:
     esquema: str
     tabelas: Dict[str, Tabela] = field(default_factory=dict)
     ligacoes: Dict[str, Ligacao] = field(default_factory=dict)
+    papeis: Dict[str, str] = field(default_factory=dict)    # id do papel (`r{oid}`) → nome, para as permissões
+    eu: str = ""                                            # id do papel da pessoa (o current_user da conexão)
 
     def copia(self) -> "Modelo":
         """Cópia profunda: o rascunho mexe nela sem tocar no que veio do banco."""
@@ -135,4 +138,5 @@ def recortar(m: Modelo, centro: str, saltos: int = 1) -> Modelo:
         m.esquema,
         {i: copy.deepcopy(t) for i, t in m.tabelas.items() if i in dentro},
         {i: copy.deepcopy(k) for i, k in m.ligacoes.items() if k.origem in dentro and k.destino in dentro},
+        dict(m.papeis), m.eu,
     )

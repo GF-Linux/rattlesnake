@@ -81,6 +81,7 @@ def assinatura(conexao, escritas: bool = True):
           (SELECT md5(coalesce(string_agg(x.indexrelid || ':' || x.indrelid || ':' || x.indkey::text, ',' ORDER BY x.indexrelid), ''))
              FROM pg_index x JOIN pg_class c ON c.oid = x.indrelid JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE {_SEM_SISTEMA}),
+          (SELECT md5(coalesce(string_agg(r.oid || ':' || r.rolname, ',' ORDER BY r.oid), '')) FROM pg_roles r),
           {escritas_sql}""").fetchone()
 
 
@@ -94,10 +95,15 @@ _AO_APAGAR = {"a": "NO ACTION", "r": "RESTRICT", "c": "CASCADE", "n": "SET NULL"
 
 
 def modelo(conexao, esquema):
-    """O esquema inteiro como um Modelo, em quatro consultas — não importa quantas tabelas tenha.
+    """O esquema inteiro como um Modelo, em cinco consultas — não importa quantas tabelas tenha.
     Partições ficam de fora (a tabela mãe conta quantas são); chaves estrangeiras para outro
-    esquema também, porque o desenho só tem as tabelas deste."""
+    esquema também, porque o desenho só tem as tabelas deste. Os papéis do servidor (`r{oid}` → nome) e o da pessoa
+    (`eu`) vão junto: as operações de permissão os referem pelo id, e o rebase vê um papel que sumiu ou mudou de nome."""
     m = _modelo.Modelo(esquema)
+    for oid, nome, sou_eu in conexao.execute("SELECT oid, rolname, rolname = current_user FROM pg_roles ORDER BY oid"):
+        m.papeis["r%d" % oid] = nome
+        if sou_eu:
+            m.eu = "r%d" % oid
     por_oid = {}
     for oid, nome, linhas, particoes in conexao.execute("""
             SELECT c.oid, c.relname, c.reltuples::bigint,
@@ -394,6 +400,60 @@ def escritas_da_tabela(conexao, oid, limite_ms=2000):
            OR s.relid IN (SELECT d.refobjid FROM pg_rewrite w JOIN pg_depend d ON d.objid = w.oid
                           WHERE w.ev_class = %(o)s AND d.classid = 'pg_rewrite'::regclass
                             AND d.refclassid = 'pg_class'::regclass)""", {"o": oid}).fetchone()[0]
+
+
+# ── permissões de tabela e de schema: somente leitura ──
+
+# as letras do `aclitem` que a grade oferece, na ordem em que o GRANT as escreve (o MAINTAIN do 17+, `m`, fica de fora)
+PRIVILEGIOS = {"SELECT": "S", "INSERT": "I", "UPDATE": "U", "DELETE": "D", "TRUNCATE": "T", "REFERENCES": "R",
+               "TRIGGER": "t"}
+_NO_SCHEMA = ("USAGE", "CREATE")
+
+
+@dataclass
+class Permissoes:
+    """As permissões de um schema como o catálogo as tem. Papel é `r{oid}` ou "PUBLIC"; tabela é o id do modelo.
+    `por_tabela`: (papel, tabela) → letras (`S I U D T R t`), só quem tem alguma. `dono`: tabela → papel dono.
+    `schema`: papel → {"USAGE", "CREATE"} no schema. `padrao`: as permissões padrão (`ALTER DEFAULT PRIVILEGES FOR
+    ROLE <a pessoa> IN SCHEMA …`) em tabelas — papel que recebe → letras."""
+    por_tabela: dict
+    dono: dict
+    schema: dict
+    padrao: dict
+
+
+def permissoes(conexao, esquema, limite_ms=5000):
+    """As permissões do schema numa consulta só (somente leitura, com tempo limite): as das tabelas (comuns e
+    particionadas, sem as partições — as que o canvas mostra) pelo `relacl` (NULL: o padrão, `acldefault`), as do
+    schema pelo `nspacl` e as permissões padrão da pessoa (`pg_default_acl` deste schema, em tabelas)."""
+    with somente_leitura(conexao, limite_ms):
+        linhas = executar(conexao, """
+            WITH esq AS (SELECT oid, nspowner, nspacl FROM pg_namespace WHERE nspname = %(e)s)
+            SELECT 't', c.oid, c.relowner, a.grantee, a.privilege_type
+            FROM pg_class c JOIN esq ON esq.oid = c.relnamespace
+            LEFT JOIN LATERAL aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a ON true
+            WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition
+            UNION ALL
+            SELECT 'n', esq.oid, esq.nspowner, a.grantee, a.privilege_type
+            FROM esq, aclexplode(coalesce(esq.nspacl, acldefault('n', esq.nspowner))) a
+            UNION ALL
+            SELECT 'd', d.oid, d.defaclrole, a.grantee, a.privilege_type
+            FROM pg_default_acl d JOIN esq ON esq.oid = d.defaclnamespace, aclexplode(d.defaclacl) a
+            WHERE d.defaclobjtype = 'r' AND d.defaclrole = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+            """, {"e": esquema}).fetchall()
+    por_tabela, dono, schema, padrao = {}, {}, {}, {}
+    for tipo, oid, quem, recebe, privilegio in linhas:
+        papel = None if recebe is None else ("PUBLIC" if recebe == 0 else "r%d" % recebe)
+        if tipo == "t":
+            dono["t%d" % oid] = "r%d" % quem
+            if papel is not None and privilegio in PRIVILEGIOS:
+                chave = (papel, "t%d" % oid)
+                por_tabela[chave] = por_tabela.get(chave, frozenset()) | {PRIVILEGIOS[privilegio]}
+        elif tipo == "n" and privilegio in _NO_SCHEMA:
+            schema[papel] = schema.get(papel, frozenset()) | {privilegio}
+        elif tipo == "d" and privilegio in PRIVILEGIOS:
+            padrao[papel] = padrao.get(papel, frozenset()) | {PRIVILEGIOS[privilegio]}
+    return Permissoes(por_tabela, dono, schema, padrao)
 
 
 def versao(conexao):
