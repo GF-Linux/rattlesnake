@@ -747,6 +747,10 @@ class RascunhoServidor:
         """Para cada operação, na ordem do rascunho: (operação, válida, descrição, comandos)."""
         return self._percorrer()[1]
 
+    def motivos(self) -> List[Optional[str]]:
+        """Para cada operação, na ordem do rascunho, por que ela não vale (None: vale)."""
+        return self._percorrer()[2]
+
     @property
     def invalidas(self) -> Set[int]:
         return {i for i, (_, valida, _, _) in enumerate(self._percorrer()[1]) if not valida}

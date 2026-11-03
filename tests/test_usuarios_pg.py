@@ -427,3 +427,133 @@ def test_grupos_de_cada_operacao_aplicados_no_servidor(servidor, banco_servidor)
     assert zz.dono == novo.id and not zz.publico and depois.papel_por_nome('c"x; --').id not in zz.acesso_direto
     assert novo.login and novo.cria_bancos and novo.cria_papeis
     assert novo.membro_de == (depois.papel_por_nome("grupo novo").id,)
+
+
+# ── o aviso de remoção e o pré-voo, no servidor de verdade ──
+
+class _Conexoes:
+    """`conectar(nome)` dos avisos e do pré-voo: uma conexão por banco (guardada, fechada no fim); None para os
+    bancos `fora` (como um banco em que a pessoa não consegue entrar)."""
+
+    def __init__(self, servidor, fora=()):
+        self.servidor, self.fora, self.abertas, self.pedidos = servidor, set(fora), {}, []
+
+    def __call__(self, nome):
+        self.pedidos.append(nome)
+        if nome in self.fora:
+            return None
+        if nome not in self.abertas:
+            self.abertas[nome] = self.servidor.conectar(nome)
+        return self.abertas[nome]
+
+    def fechar(self):
+        for c in self.abertas.values():
+            c.close()
+
+
+def test_aviso_de_remocao_conta_o_que_passa_e_o_que_some_em_cada_banco(servidor, banco_servidor):
+    """ana: dona de uma tabela em b1 (e deu SELECT nela a leitura), com SELECT numa tabela do admin, uma permissão
+    padrão, dona do banco ratt_da_ana; deu o CONNECT de b1 a carla pela opção de conceder. b4: `conectar` falha."""
+    from ratt.db import checagem_servidor as cs
+    from ratt.db.rascunho_servidor import RascunhoServidor, RemoverPapeis
+    b1 = banco_servidor
+    c = _cenario(servidor, b1)
+    try:
+        for comando in ("CREATE TABLE public.do_admin (i integer)", "GRANT SELECT ON public.do_admin TO ana",
+                        "ALTER DEFAULT PRIVILEGES FOR ROLE ana GRANT SELECT ON TABLES TO leitura"):
+            c.execute(comando)
+    finally:
+        c.close()
+    with servidor.conectar() as admin:
+        for comando in ("CREATE ROLE carla LOGIN", "CREATE DATABASE ratt_da_ana OWNER ana", "CREATE DATABASE ratt_b4",
+                        sql.SQL("GRANT CONNECT ON DATABASE {} TO ana WITH GRANT OPTION").format(sql.Identifier(b1)),
+                        "SET ROLE ana",
+                        sql.SQL("GRANT CONNECT ON DATABASE {} TO carla").format(sql.Identifier(b1)),
+                        "RESET ROLE"):
+            admin.execute(comando)
+        m = catalogo_servidor.modelo_servidor(admin)
+    ana, carla, eu = (m.papel_por_nome(n).id for n in ("ana", "carla", servidor.usuario))
+    bancos = tuple(b.nome for b in m.bancos.values() if b.aceita_conexao)
+    op = RemoverPapeis((ana,), eu, bancos)
+    conectar = _Conexoes(servidor, fora={"ratt_b4"})
+    try:
+        avisos = cs.avisos_da_operacao_servidor(op, RascunhoServidor(m), conectar)
+    finally:
+        conectar.fechar()
+    assert "ratt_b2" not in conectar.pedidos                       # não aceita conexão
+    do = lambda chave: [a for a in avisos if a.chave == chave and b1 in a.texto()]
+    posse, = do("chk.posse_passa")
+    assert "1 tabela" in posse.texto() and "1 função" in posse.texto() and servidor.usuario in posse.texto()
+    tem, = do("chk.priv_tem_somem")
+    assert tem.nivel == "atencao" and " 1 " in tem.texto()        # o SELECT em do_admin
+    dono, = do("chk.priv_deu_dono_fica")
+    assert dono.nivel == "info" and " 1 " in dono.texto()         # o SELECT em coisas dado a leitura
+    padrao, = do("chk.padrao_somem")
+    assert padrao.nivel == "atencao" and " 1 " in padrao.texto()
+    nao, = [a for a in avisos if a.chave == "chk.nao_verificado"]
+    assert "ratt_b4" in nao.texto() and nao.nivel == "atencao"
+    banco, = [a for a in avisos if a.chave == "chk.banco_passa"]
+    assert "ratt_da_ana" in banco.texto()
+    perde, = [a for a in avisos if a.chave == "chk.perde_acesso"]
+    assert perde.alvo == carla and b1 in perde.texto()
+    # a contagem da cascata é a do PostgreSQL: removida ana de verdade, carla deixa de entrar em b1
+    with servidor.conectar(b1) as c1:
+        c1.execute(sql.SQL("REASSIGN OWNED BY ana TO {}").format(sql.Identifier(servidor.usuario)))
+        c1.execute("DROP OWNED BY ana")
+    with servidor.conectar() as admin:
+        admin.execute("DROP DATABASE ratt_b2")
+        for nome in bancos:
+            if nome != b1:
+                with servidor.conectar(nome) as cx:
+                    cx.execute(sql.SQL("REASSIGN OWNED BY ana TO {}").format(sql.Identifier(servidor.usuario)))
+                    cx.execute("DROP OWNED BY ana")
+        admin.execute("DROP ROLE ana")
+        assert admin.execute("SELECT has_database_privilege('carla', %s, 'CONNECT')", (b1,)).fetchone()[0] is False
+
+
+def test_prevoo_recusa_antes_de_mudar_e_libera_depois(servidor, banco_servidor):
+    """Sessão aberta de ana, b3 com datallowconn=false e novo dono sem LOGIN: o pré-voo recusa (e nada muda);
+    resolvido cada um, a lista fica vazia."""
+    import psycopg
+    from ratt.db import checagem_servidor as cs
+    from ratt.db.rascunho_servidor import RascunhoServidor, RemoverPapeis
+    b1 = banco_servidor
+    _cenario(servidor, b1).close()
+    with servidor.conectar() as admin:
+        admin.execute("DROP DATABASE ratt_b2")
+        admin.execute("CREATE DATABASE ratt_b3 ALLOW_CONNECTIONS false")
+        m = catalogo_servidor.modelo_servidor(admin)
+    ana, leitura, eu = (m.papel_por_nome(n).id for n in ("ana", "leitura", servidor.usuario))
+    bancos = tuple(b.nome for b in m.bancos.values() if b.aceita_conexao)
+    r = RascunhoServidor(m)
+    r.acrescentar(RemoverPapeis((ana,), leitura, bancos))
+    da_ana = psycopg.connect(host=servidor.socket_dir, port=servidor.porta, user="ana", dbname=b1, autocommit=True)
+    conectar = _Conexoes(servidor)
+    try:
+        with servidor.conectar() as c:
+            msgs = cs.prevoo(r, c, conectar)
+        assert len(msgs) == 3
+        assert any("ana" in x and "1" in x for x in msgs)
+        assert any("ALTER DATABASE ratt_b3 ALLOW_CONNECTIONS true;" in x for x in msgs)
+        assert any("leitura" in x and "LOGIN" in x for x in msgs)
+        with servidor.conectar() as c:                             # nada foi mudado
+            assert c.execute("SELECT count(*) FROM pg_roles WHERE rolname = 'ana'").fetchone()[0] == 1
+            assert c.execute("SELECT datallowconn FROM pg_database WHERE datname = 'ratt_b3'").fetchone()[0] is False
+    finally:
+        da_ana.close()
+    r = RascunhoServidor(m)
+    r.acrescentar(RemoverPapeis((ana,), eu, bancos))
+    with servidor.conectar() as admin:
+        admin.execute("DROP DATABASE ratt_b3")
+        # a sessão de ana pode levar um instante para sair do pg_stat_activity
+        for _ in range(50):
+            if catalogo_servidor.sessoes(admin, ["ana"])["ana"] == 0:
+                break
+            admin.execute("SELECT pg_sleep(0.1)")
+        try:
+            assert cs.prevoo(r, admin, conectar) == []
+            admin.execute("ALTER ROLE ana RENAME TO ana2")         # mudou depois do rascunho
+            msgs = cs.prevoo(r, admin, conectar)
+            assert len(msgs) == 1 and "1" in msgs[0]               # o nome mudou: a remoção deixou de valer
+        finally:
+            conectar.fechar()

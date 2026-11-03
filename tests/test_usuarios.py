@@ -626,3 +626,201 @@ def test_de_dict_avanca_o_proximo_e_acrescentar_recusado_nao_mexe_nos_nomes():
     with pytest.raises(ValueError):
         r.acrescentar(op)
     assert op.nomes == {}
+
+
+# ── avisos do servidor e o pré-voo ──
+
+from ratt.db import catalogo_servidor
+from ratt.db import checagem_servidor as cs
+from ratt.db.catalogo_servidor import Privilegios
+
+
+class _ConexaoFalsa:
+    def __init__(self, banco):
+        self.banco = banco
+
+
+def _conectar_falso(fora=(), chamados=None):
+    """`conectar(nome)` que devolve uma conexão falsa (o banco dela é o nome) e None para os bancos `fora`."""
+    def conectar(nome):
+        if chamados is not None:
+            chamados.append(nome)
+        return None if nome in fora else _ConexaoFalsa(nome)
+    return conectar
+
+
+def _catalogo_falso(monkeypatch, posse=None, privilegios=None, padrao=None, sessoes=None, cifra="scram-sha-256"):
+    """As leituras de `catalogo_servidor` trocadas por dicionários {(banco, papel): valor}."""
+    posse, privilegios, padrao, sessoes = posse or {}, privilegios or {}, padrao or {}, sessoes or {}
+    monkeypatch.setattr(catalogo_servidor, "posse_no_banco",
+                        lambda c, nomes, *a: {n: posse.get((c.banco, n), {}) for n in nomes})
+    monkeypatch.setattr(catalogo_servidor, "privilegios_no_banco",
+                        lambda c, nomes, *a: {n: privilegios.get((c.banco, n), Privilegios(0, 0, 0)) for n in nomes})
+    monkeypatch.setattr(catalogo_servidor, "permissoes_padrao",
+                        lambda c, nomes, *a: {n: padrao.get((c.banco, n), 0) for n in nomes})
+    monkeypatch.setattr(catalogo_servidor, "sessoes", lambda c, nomes, *a: {n: sessoes.get(n, 0) for n in nomes})
+    monkeypatch.setattr(catalogo_servidor, "password_encryption", lambda c, *a: cifra)
+
+
+def _resumo(avisos):
+    return [(a.nivel, a.chave, a.texto()) for a in avisos]
+
+
+def _com(avisos, chave):
+    return [a for a in avisos if a.chave == chave]
+
+
+def test_aviso_de_remocao_por_banco_posse_privilegios_padrao_e_nao_verificado(monkeypatch):
+    m = modelo_exemplo()
+    m.bancos["d4"] = Banco("d4", "da_carla", "r16", True, ("r16",), True)
+    _catalogo_falso(monkeypatch,
+                    posse={("estudos", "ana"): {"tabela": 2, "funcao": 1}},
+                    privilegios={("estudos", "ana"): Privilegios(3, 1, 2)},
+                    padrao={("estudos", "carla"): 1})
+    chamados = []
+    op = RemoverPapeis(("r13", "r16"), "r11", ("estudos", "sistema", "da_carla"))
+    avisos = cs.avisos_da_operacao_servidor(op, RascunhoServidor(m), _conectar_falso({"sistema"}, chamados))
+    assert "fechado" not in chamados                                # não aceita conexão: nem tenta
+    posse, = _com(avisos, "chk.posse_passa")
+    assert posse.nivel == "info" and posse.alvo == "r13"
+    assert all(x in posse.texto() for x in ("estudos", "ana", "app", "2 tabelas", "1 função"))
+    tem, = _com(avisos, "chk.priv_tem_somem")
+    assert tem.nivel == "atencao" and "3" in tem.texto() and "ana" in tem.texto()
+    dono, = _com(avisos, "chk.priv_deu_dono_fica")
+    assert dono.nivel == "info" and "1" in dono.texto() and "app" in dono.texto()   # ficam: vêm do novo dono
+    opcao, = _com(avisos, "chk.priv_deu_opcao_somem")
+    assert opcao.nivel == "atencao" and "2" in opcao.texto()
+    padrao, = _com(avisos, "chk.padrao_somem")
+    assert padrao.nivel == "atencao" and padrao.alvo == "r16" and "carla" in padrao.texto()
+    nao, = _com(avisos, "chk.nao_verificado")
+    assert nao.nivel == "atencao" and nao.alvo == "d2" and "sistema" in nao.texto() and "superusuário" in nao.texto()
+    banco, = _com(avisos, "chk.banco_passa")
+    assert banco.nivel == "info" and all(x in banco.texto() for x in ("da_carla", "carla", "app"))
+    assert not _com(avisos, "chk.sessoes_abertas")
+
+
+def test_aviso_de_remocao_lista_quem_perde_o_acesso_pela_cascata(monkeypatch):
+    """carla deu o CONNECT de x5 a app (tinha a opção de conceder): removida carla, app deixa de entrar."""
+    m = modelo_exemplo()
+    m.bancos["d5"] = Banco("d5", "x5", "r10", True, ("r10", "r16", "r11"), False,
+                           concedido_por={"r10": {"r10": False}, "r16": {"r10": True}, "r11": {"r16": False}})
+    _catalogo_falso(monkeypatch)
+    op = RemoverPapeis(("r16",), "r10", ("estudos", "sistema", "x5"))
+    r = RascunhoServidor(m)
+    avisos = cs.avisos_da_operacao_servidor(op, r, _conectar_falso())
+    perde = _com(avisos, "chk.perde_acesso")
+    assert [(a.nivel, a.alvo) for a in perde] == [("atencao", "r11")] and "x5" in perde[0].texto()
+    # a mesma conta com a operação já no rascunho
+    r.acrescentar(op)
+    assert _resumo(cs.avisos_da_operacao_servidor(op, r, _conectar_falso())) == _resumo(avisos)
+
+
+def test_aviso_sessoes_abertas_e_password_encryption_md5(monkeypatch):
+    m = modelo_exemplo()
+    m.banco_atual = "d1"
+    _catalogo_falso(monkeypatch, sessoes={"ana": 2}, cifra="md5")
+    r = RascunhoServidor(m)
+    avisos = cs.avisos_da_operacao_servidor(RemoverPapeis(("r13",), "r11", ("estudos",)), r, _conectar_falso())
+    sess, = _com(avisos, "chk.sessoes_abertas")
+    assert sess.nivel == "impede" and "2" in sess.texto() and "ana" in sess.texto()
+    usuario = CriarPapel(Papel("novo-p1", "nova", True, False, False, False))
+    grupo = CriarPapel(Papel("novo-p2", "grupo", False, False, False, False))
+    for op in (usuario, TrocarSenha("r16")):
+        md5, = _com(cs.avisos_da_operacao_servidor(op, r, _conectar_falso()), "chk.md5")
+        assert md5.nivel == "atencao" and "md5" in md5.texto() and "SCRAM" in md5.texto()
+    assert not _com(cs.avisos_da_operacao_servidor(grupo, r, _conectar_falso()), "chk.md5")
+    assert not _com(cs.avisos_da_operacao_servidor(usuario, r, _conectar_falso({"estudos"})), "chk.md5")
+    _catalogo_falso(monkeypatch, cifra="scram-sha-256")
+    assert not _com(cs.avisos_da_operacao_servidor(usuario, r, _conectar_falso()), "chk.md5")
+
+
+def test_aviso_public_e_quem_continua_entrando(monkeypatch):
+    m = modelo_exemplo()
+    m.bancos["d1"].acesso_direto = ("r10", "r12", "r13", "r16")      # ana (também por leitura) e carla direto
+    m.bancos["d2"].acesso_direto = ("r11", "r16")                   # carla direto em sistema (e pelo PUBLIC)
+    _catalogo_falso(monkeypatch)
+    r = RascunhoServidor(m)
+    conectar = _conectar_falso()
+    dar, = cs.avisos_da_operacao_servidor(DarAcesso("PUBLIC", "d1"), r, conectar)
+    assert (dar.nivel, dar.chave) == ("info", "chk.public_dar") and "estudos" in dar.texto()
+    tirar = cs.avisos_da_operacao_servidor(TirarAcesso("PUBLIC", "d2"), r, conectar)
+    assert _com(tirar, "chk.public_tirar")[0].nivel == "info"
+    perdem = {a.alvo for a in _com(tirar, "chk.perde_acesso")}
+    assert perdem == {"r12", "r13", "r14", "r15"}                   # só pelo PUBLIC; carla e app têm direto
+    pelo_public, = cs.avisos_da_operacao_servidor(TirarAcesso("r16", "d2"), r, conectar)
+    assert (pelo_public.chave, pelo_public.nivel) == ("chk.continua_entrando", "info")
+    assert "PUBLIC" in pelo_public.texto() and "carla" in pelo_public.texto()
+    pelo_grupo, = cs.avisos_da_operacao_servidor(TirarAcesso("r13", "d1"), r, conectar)
+    assert pelo_grupo.chave == "chk.continua_entrando" and "leitura" in pelo_grupo.texto()
+    assert cs.avisos_da_operacao_servidor(TirarAcesso("r16", "d1"), r, conectar) == []   # sai mesmo: é o pedido
+    assert cs.avisos_da_operacao_servidor(TirarAcesso("r16", "d9"), r, conectar) == []   # inválida: nada a avisar
+
+
+def _prevoo_falso(monkeypatch, agora, sessoes=None):
+    _catalogo_falso(monkeypatch, sessoes=sessoes)
+    monkeypatch.setattr(catalogo_servidor, "modelo_servidor", lambda c, *a: agora.copia())
+
+
+def test_prevoo_recusa_sessoes_banco_fechado_e_novo_dono_sem_login(monkeypatch):
+    base = modelo_exemplo()
+    base.bancos["d0"] = Banco("d0", "template0", "r10", False, ("r10",), True, template=True)
+    r = RascunhoServidor(base)
+    r.acrescentar(RemoverPapeis(("r13",), "r11", ("estudos", "sistema")))
+    agora = base.copia()
+    agora.papeis["r11"].login = False                              # o novo dono perdeu o LOGIN depois
+    _prevoo_falso(monkeypatch, agora, sessoes={"ana": 2})
+    msgs = cs.prevoo(r, object(), _conectar_falso())
+    assert any("ana" in x and "2" in x for x in msgs)
+    fechado = [x for x in msgs if "fechado" in x]
+    assert len(fechado) == 1 and '"fechado"' not in fechado[0]
+    assert "ALTER DATABASE fechado ALLOW_CONNECTIONS true;" in fechado[0]
+    assert not any("template0" in x for x in msgs)                 # template0 fica fora
+    assert any("app" in x and "LOGIN" in x for x in msgs)
+    assert len(msgs) == 3
+
+
+def test_prevoo_vazio_quando_tudo_bem_e_cita_nome_com_aspas(monkeypatch):
+    base = modelo_exemplo()
+    del base.bancos["d3"]
+    r = RascunhoServidor(base)
+    r.acrescentar(RemoverPapeis(("r13",), "r10", ("estudos", "sistema")))   # o novo dono sou eu (tem LOGIN)
+    _prevoo_falso(monkeypatch, base)
+    assert cs.prevoo(r, object(), _conectar_falso()) == []
+    agora = base.copia()
+    agora.bancos["d7"] = Banco("d7", 'Fe"chado', "r10", False, ("r10",), True)
+    agora.bancos["d8"] = Banco("d8", "novo_banco", "r10", True, ("r10",), True)
+    _prevoo_falso(monkeypatch, agora)
+    msgs = cs.prevoo(r, object(), _conectar_falso({"sistema"}))
+    assert any('ALTER DATABASE "Fe""chado" ALLOW_CONNECTIONS true;' in x for x in msgs)
+    assert any("novo_banco" in x for x in msgs)                    # aceita conexão e não está na remoção
+    assert any("sistema" in x for x in msgs)                       # sou superusuário e não consegui entrar
+    assert len(msgs) == 3
+    # sem remoção no rascunho, nada disso pesa
+    r2 = RascunhoServidor(base)
+    r2.acrescentar(MudarPoderes("r16", True, False, True, False))
+    assert cs.prevoo(r2, object(), _conectar_falso({"sistema"})) == []
+
+
+def test_prevoo_operacao_que_deixou_de_valer_com_o_servidor_de_agora(monkeypatch):
+    base = modelo_exemplo()
+    del base.bancos["d3"]
+    r = RascunhoServidor(base)
+    r.acrescentar(PorNoGrupo("r16", "r12"))
+    r.acrescentar(MudarPoderes("r15", True, False, True, False))
+    r.operacoes.append(DarAcesso("r999", "d1"))                    # já inválida antes: não é novidade
+    agora = base.copia()
+    del agora.papeis["r16"]                                        # carla sumiu do servidor
+    _prevoo_falso(monkeypatch, agora)
+    msgs = cs.prevoo(r, object(), _conectar_falso())
+    assert len(msgs) == 1 and "1" in msgs[0] and "carla" in msgs[0]
+    assert len(r.operacoes) == 3 and r.base is base                # o rascunho não muda
+
+
+def test_prevoo_leitura_que_falha_recusa(monkeypatch):
+    import psycopg
+
+    def falha(c, *a):
+        raise psycopg.OperationalError("caiu")
+    monkeypatch.setattr(catalogo_servidor, "modelo_servidor", falha)
+    msgs = cs.prevoo(RascunhoServidor(modelo_exemplo()), object(), _conectar_falso())
+    assert len(msgs) == 1 and "caiu" in msgs[0]
