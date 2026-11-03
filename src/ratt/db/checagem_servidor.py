@@ -21,9 +21,9 @@ import psycopg
 from . import catalogo_servidor, servidor
 from .checagem import Aviso
 from .idioma import t
-from .rascunho import _ERROS_OP, ident
+from .rascunho import ERROS_OP, ident
 from .rascunho_servidor import (PUBLIC, CriarPapel, DarAcesso, OperacaoServidor, RascunhoServidor, RemoverPapeis,
-                                TirarAcesso, TrocarSenha)
+                                TirarAcesso, TirarDoGrupo, TrocarSenha)
 from .servidor import ModeloServidor
 
 Conectar = Callable[[str], Optional[object]]
@@ -70,6 +70,21 @@ def _perde_acesso(antes: ModeloServidor, depois: ModeloServidor, fora: set) -> L
     return avisos
 
 
+def _sai_de_grupo(antes: ModeloServidor, depois: ModeloServidor, fora: set,
+                  pedido: Optional[Tuple[str, str]]) -> List[Aviso]:
+    """Quem deixa de ser membro direto de um grupo — o grupo removido, ou a pertença que caiu junto com quem a deu
+    (a cascata que a vista do rascunho já faz). `pedido`: a saída que a própria operação pede (não é aviso)."""
+    avisos = []
+    for p in depois.papeis.values():
+        if p.id in fora or p.sistema or p.estado == "apagado" or p.id not in antes.papeis:
+            continue
+        for g in antes.papeis[p.id].membro_de:
+            if g not in p.membro_de and g in antes.papeis and (p.id, g) != pedido:
+                avisos.append(Aviso(p.id, "atencao", "chk.sai_do_grupo",
+                                    {"papel": p.nome, "grupo": antes.papeis[g].nome}))
+    return avisos
+
+
 def _origem(m: ModeloServidor, papel_id: str, banco_id: str) -> str:
     """Por onde `papel_id` entra em `banco_id` sem o CONNECT dado a ele."""
     b = m.bancos[banco_id]
@@ -110,7 +125,7 @@ def _remocao(op: RemoverPapeis, antes: ModeloServidor, conectar: Conectar) -> Li
         lista = list(nomes.values())
         try:
             posse = catalogo_servidor.posse_no_banco(c, lista)
-            privilegios = catalogo_servidor.privilegios_no_banco(c, lista)
+            privilegios = catalogo_servidor.privilegios_no_banco(c, lista, nao_ficam=lista + [novo])
             padrao = catalogo_servidor.permissoes_padrao(c, lista)
         except psycopg.Error as e:
             avisos.append(Aviso(b.id, "atencao", "chk.banco_falhou", {"banco": b.nome, "erro": str(e).strip()}))
@@ -149,14 +164,16 @@ def _md5(op: OperacaoServidor, antes: ModeloServidor, conectar: Conectar) -> Lis
 def avisos_da_operacao_servidor(op: OperacaoServidor, r: RascunhoServidor, conectar: Conectar) -> List[Aviso]:
     """Os avisos de `op` sobre o rascunho `r` (com ou sem `op` dentro). Uma operação que não vale ali não avisa
     nada (o rascunho a recusa com o motivo dela). Além dos avisos próprios de cada tipo, toda operação diz quem
-    deixa de entrar em algum banco por causa dela (inclusive pela cascata do que um papel removido tinha dado)."""
+    deixa de entrar em algum banco e quem deixa de ser membro de um grupo por causa dela (inclusive pela cascata do
+    que um papel removido tinha dado)."""
     antes, depois = _antes_e_depois(op, r)
     try:
         op.comandos(antes)
-    except _ERROS_OP:
+    except ERROS_OP:
         return []
     avisos: List[Aviso] = []
     fora = set()
+    pedido = (op.papel, op.grupo) if isinstance(op, TirarDoGrupo) else None
     if isinstance(op, RemoverPapeis):
         avisos += _remocao(op, antes, conectar)
         fora = set(op.papeis)
@@ -174,7 +191,8 @@ def avisos_da_operacao_servidor(op: OperacaoServidor, r: RascunhoServidor, conec
                 avisos.append(Aviso(op.alvo, "info", "chk.continua_entrando",
                                     {"papel": antes.papeis[op.alvo].nome, "banco": banco,
                                      "origem": _origem(depois, op.alvo, op.banco)}))
-    return avisos + _perde_acesso(antes, depois, fora)
+    removidos = set(op.papeis) if isinstance(op, RemoverPapeis) else set()
+    return avisos + _perde_acesso(antes, depois, fora) + _sai_de_grupo(antes, depois, removidos, pedido)
 
 
 # ── o pré-voo ──
@@ -184,9 +202,10 @@ def prevoo(r: RascunhoServidor, conexao_servidor, conectar: Conectar) -> List[st
     nada (nem o rascunho: o rebase é numa cópia).
 
     - Cada operação que valia e deixou de valer com o servidor de agora (o rebase), com o motivo.
-    - Para cada remoção: sessões abertas dos papéis (com quantas); bancos com `datallowconn = false` (fora o
-      `template0`), com o `ALTER DATABASE … ALLOW_CONNECTIONS true;` que a pessoa pode rodar; um banco que aceita
-      conexão e não está na remoção (o `DROP ROLE` falharia no fim); o novo dono tem de ter LOGIN ou ser a pessoa;
+    - Para cada remoção: sessões abertas dos papéis (com quantas); bancos com `datallowconn = false` em que o
+      `pg_shdepend` mostra algo deles (com quantas dependências), com o `ALTER DATABASE … ALLOW_CONNECTIONS true;`
+      que a pessoa pode rodar; um banco que aceita conexão e não está na remoção (o `DROP ROLE` falharia no fim);
+      o novo dono tem de ter LOGIN ou ser a pessoa;
       e, se a pessoa é superusuária (o aplicar entra com ela), cada banco da remoção tem de deixar entrar.
     Uma leitura que falha também recusa (com o erro)."""
     try:
@@ -215,11 +234,14 @@ def _prevoo_remocao(op: RemoverPapeis, agora: ModeloServidor, conexao_servidor, 
     abertas = catalogo_servidor.sessoes(conexao_servidor, nomes)
     msgs += [t("chk.pv_sessoes", papel=nome, n=abertas[nome]) for nome in nomes if abertas.get(nome)]
     fechados = set()
+    dependencias = None
     for b in agora.bancos.values():
         if not b.aceita_conexao:
             fechados.add(b.nome)
-            if b.nome != "template0":
-                msgs.append(t("chk.pv_banco_fechado", banco=b.nome, papeis=", ".join(nomes),
+            if dependencias is None:            # só se há banco fechado: o pg_shdepend diz se eles têm algo lá
+                dependencias = catalogo_servidor.dependencias_por_banco(conexao_servidor, nomes)
+            if dependencias.get(b.nome):
+                msgs.append(t("chk.pv_banco_fechado", banco=b.nome, papeis=", ".join(nomes), n=dependencias[b.nome],
                               comando=f"ALTER DATABASE {ident(b.nome)} ALLOW_CONNECTIONS true;"))
         elif b.nome not in op.bancos:
             msgs.append(t("chk.pv_banco_fora", banco=b.nome))

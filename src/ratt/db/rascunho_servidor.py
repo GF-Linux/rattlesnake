@@ -28,7 +28,7 @@ from typing import ClassVar, Dict, Iterable, List, Optional, Set, Tuple
 
 from . import servidor
 from .idioma import t
-from .rascunho import _ERROS_OP, RascunhoCorrompido, _marcar, ident
+from .rascunho import ERROS_OP, RascunhoCorrompido, _marcar, ident
 from .servidor import ModeloServidor, Papel
 
 PUBLIC = "PUBLIC"           # alvo especial de DarAcesso/TirarAcesso: não é um id (ids são `r…`, `d…`, `novo-p…`)
@@ -712,7 +712,7 @@ class RascunhoServidor:
             except KeyError as e:
                 x = e.args[0] if e.args and isinstance(e.args[0], str) else str(e)
                 motivo = t("canvas.e.nao_existe", nome=_nome_de(x, m, self.base))
-            except _ERROS_OP as e:
+            except ERROS_OP as e:
                 motivo = str(e) or type(e).__name__
             if motivo is not None:
                 desc, cmds, de_quem[i] = op.tipo, [], None
@@ -789,7 +789,7 @@ class RascunhoServidor:
                     op = _op_de_dict(o)
                     _conferir(op)
                     ops.append(op)
-                except _ERROS_OP as e:
+                except ERROS_OP as e:
                     raise RascunhoCorrompido(f"operação {n} ilegível: {type(e).__name__}: {e}") from e
             proximo = d.get("proximo", 1)
             if isinstance(proximo, bool):
@@ -803,7 +803,7 @@ class RascunhoServidor:
             r.rebase(base)
         except RascunhoCorrompido:
             raise
-        except _ERROS_OP as e:
+        except ERROS_OP as e:
             raise RascunhoCorrompido(f"rascunho ilegível: {type(e).__name__}: {e}") from e
         return r
 

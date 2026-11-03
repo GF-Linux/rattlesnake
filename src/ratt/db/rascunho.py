@@ -946,8 +946,10 @@ class RascunhoCorrompido(ValueError):
     """O rascunho lido do disco não tem a forma esperada (editado à mão ou estragado)."""
 
 
-# o que um JSON editado à mão pode provocar dentro de uma operação: nunca passa daqui
-_ERROS_OP = (KeyError, ValueError, TypeError, AttributeError, IndexError)
+# o que um JSON editado à mão pode provocar dentro de uma operação: nunca passa daqui (público: os outros módulos
+# de rascunho e de checagem pegam os mesmos erros)
+ERROS_OP = (KeyError, ValueError, TypeError, AttributeError, IndexError)
+_ERROS_OP = ERROS_OP
 
 
 def _conferir(op: Operacao) -> None:

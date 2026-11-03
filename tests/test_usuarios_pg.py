@@ -92,7 +92,7 @@ def test_posse_privilegios_e_permissoes_padrao_no_banco(servidor, banco_servidor
         privilegios = catalogo_servidor.privilegios_no_banco(c, nomes)
         P = catalogo_servidor.Privilegios
         assert privilegios["ana"] == P(0, 1, 0)             # deu SELECT a leitura como dona (o de si para si não conta)
-        assert privilegios["leitura"] == P(2, 0, 0)         # SELECT em coisas e USAGE em dele
+        assert privilegios["leitura"] == P(3, 0, 0)         # SELECT em coisas, USAGE em dele e CONNECT no banco
         assert privilegios["Bruno Silva"] == P(0, 1, 0) and privilegios[nomes[-1]] == P(0, 0, 0)
         padrao = catalogo_servidor.permissoes_padrao(c, nomes)
         assert padrao["ana"] == 1 and padrao["leitura"] == 1 and padrao["Bruno Silva"] == 0
@@ -485,7 +485,9 @@ def test_aviso_de_remocao_conta_o_que_passa_e_o_que_some_em_cada_banco(servidor,
     posse, = do("chk.posse_passa")
     assert "1 tabela" in posse.texto() and "1 função" in posse.texto() and servidor.usuario in posse.texto()
     tem, = do("chk.priv_tem_somem")
-    assert tem.nivel == "atencao" and " 1 " in tem.texto()        # o SELECT em do_admin
+    assert tem.nivel == "atencao" and tem.valores["n"] == 2       # o SELECT em do_admin e o CONNECT em b1
+    opcao, = do("chk.priv_deu_opcao_somem")
+    assert opcao.valores["n"] == 1                                  # o CONNECT que deu a carla
     dono, = do("chk.priv_deu_dono_fica")
     assert dono.nivel == "info" and " 1 " in dono.texto()         # o SELECT em coisas dado a leitura
     padrao, = do("chk.padrao_somem")
@@ -519,41 +521,191 @@ def test_prevoo_recusa_antes_de_mudar_e_libera_depois(servidor, banco_servidor):
     from ratt.db.rascunho_servidor import RascunhoServidor, RemoverPapeis
     b1 = banco_servidor
     _cenario(servidor, b1).close()
+    with servidor.conectar() as admin:                             # ratt_b2 (fechado) não tem nada de ana: não pesa
+        admin.execute("CREATE DATABASE ratt_b3")
+    with servidor.conectar("ratt_b3") as c3:
+        c3.execute("CREATE TABLE da_ana (i integer)")
+        c3.execute("ALTER TABLE da_ana OWNER TO ana")
     with servidor.conectar() as admin:
-        admin.execute("DROP DATABASE ratt_b2")
-        admin.execute("CREATE DATABASE ratt_b3 ALLOW_CONNECTIONS false")
+        admin.execute("ALTER DATABASE ratt_b3 ALLOW_CONNECTIONS false")
         m = catalogo_servidor.modelo_servidor(admin)
     ana, leitura, eu = (m.papel_por_nome(n).id for n in ("ana", "leitura", servidor.usuario))
     bancos = tuple(b.nome for b in m.bancos.values() if b.aceita_conexao)
     r = RascunhoServidor(m)
     r.acrescentar(RemoverPapeis((ana,), leitura, bancos))
-    da_ana = psycopg.connect(host=servidor.socket_dir, port=servidor.porta, user="ana", dbname=b1, autocommit=True)
-    conectar = _Conexoes(servidor)
+    conectar = _Conexoes(servidor)          # fechada no fim, falhe o que falhar (senão segura o template1)
     try:
-        with servidor.conectar() as c:
-            msgs = cs.prevoo(r, c, conectar)
-        assert len(msgs) == 3
-        assert any("ana" in x and "1" in x for x in msgs)
-        assert any("ALTER DATABASE ratt_b3 ALLOW_CONNECTIONS true;" in x for x in msgs)
-        assert any("leitura" in x and "LOGIN" in x for x in msgs)
-        with servidor.conectar() as c:                             # nada foi mudado
-            assert c.execute("SELECT count(*) FROM pg_roles WHERE rolname = 'ana'").fetchone()[0] == 1
-            assert c.execute("SELECT datallowconn FROM pg_database WHERE datname = 'ratt_b3'").fetchone()[0] is False
-    finally:
-        da_ana.close()
-    r = RascunhoServidor(m)
-    r.acrescentar(RemoverPapeis((ana,), eu, bancos))
-    with servidor.conectar() as admin:
-        admin.execute("DROP DATABASE ratt_b3")
-        # a sessão de ana pode levar um instante para sair do pg_stat_activity
-        for _ in range(50):
-            if catalogo_servidor.sessoes(admin, ["ana"])["ana"] == 0:
-                break
-            admin.execute("SELECT pg_sleep(0.1)")
+        da_ana = psycopg.connect(host=servidor.socket_dir, port=servidor.porta, user="ana", dbname=b1,
+                                 autocommit=True)
         try:
+            with servidor.conectar() as c:
+                msgs = cs.prevoo(r, c, conectar)
+            assert len(msgs) == 3
+            assert any("ana" in x and "1" in x for x in msgs)
+            assert any("ALTER DATABASE ratt_b3 ALLOW_CONNECTIONS true;" in x for x in msgs)
+            assert not any("ratt_b2" in x for x in msgs)
+            assert any("leitura" in x and "LOGIN" in x for x in msgs)
+            with servidor.conectar() as c:                         # nada foi mudado
+                assert c.execute("SELECT count(*) FROM pg_roles WHERE rolname = 'ana'").fetchone()[0] == 1
+                assert c.execute("SELECT datallowconn FROM pg_database "
+                                 "WHERE datname = 'ratt_b3'").fetchone()[0] is False
+        finally:
+            da_ana.close()
+        r = RascunhoServidor(m)
+        r.acrescentar(RemoverPapeis((ana,), eu, bancos))
+        with servidor.conectar() as admin:
+            admin.execute("DROP DATABASE ratt_b3")
+            # a sessão de ana pode levar um instante para sair do pg_stat_activity
+            for _ in range(50):
+                if catalogo_servidor.sessoes(admin, ["ana"])["ana"] == 0:
+                    break
+                admin.execute("SELECT pg_sleep(0.1)")
             assert cs.prevoo(r, admin, conectar) == []
             admin.execute("ALTER ROLE ana RENAME TO ana2")         # mudou depois do rascunho
             msgs = cs.prevoo(r, admin, conectar)
             assert len(msgs) == 1 and "1" in msgs[0]               # o nome mudou: a remoção deixou de valer
-        finally:
-            conectar.fechar()
+    finally:
+        conectar.fechar()
+
+
+_ACLS = """
+    SELECT 'rel', c.oid::bigint, 0, c.relowner, x.grantor, x.grantee, x.privilege_type
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace, aclexplode(c.relacl) x
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+    UNION ALL
+    SELECT 'col', a.attrelid::bigint, a.attnum, c.relowner, x.grantor, x.grantee, x.privilege_type
+    FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace,
+         aclexplode(a.attacl) x
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+    UNION ALL
+    SELECT 'proc', p.oid::bigint, 0, p.proowner, x.grantor, x.grantee, x.privilege_type
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, aclexplode(p.proacl) x
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+    UNION ALL
+    SELECT 'type', t.oid::bigint, 0, t.typowner, x.grantor, x.grantee, x.privilege_type
+    FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace, aclexplode(t.typacl) x
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+    UNION ALL
+    SELECT 'nsp', n.oid::bigint, 0, n.nspowner, x.grantor, x.grantee, x.privilege_type
+    FROM pg_namespace n, aclexplode(n.nspacl) x
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+    UNION ALL
+    SELECT 'db', d.oid::bigint, 0, d.datdba, x.grantor, x.grantee, x.privilege_type
+    FROM pg_database d, aclexplode(d.datacl) x WHERE d.datname = current_database()
+    UNION ALL
+    SELECT 'lo', l.oid::bigint, 0, l.lomowner, x.grantor, x.grantee, x.privilege_type
+    FROM pg_largeobject_metadata l, aclexplode(l.lomacl) x
+    UNION ALL
+    SELECT 'fdw', w.oid::bigint, 0, w.fdwowner, x.grantor, x.grantee, x.privilege_type
+    FROM pg_foreign_data_wrapper w, aclexplode(w.fdwacl) x
+    UNION ALL
+    SELECT 'srv', s.oid::bigint, 0, s.srvowner, x.grantor, x.grantee, x.privilege_type
+    FROM pg_foreign_server s, aclexplode(s.srvacl) x"""
+
+
+def _acls(servidor, bancos, nomes):
+    """{banco: {(fonte, objeto, coluna, dono, concedente, quem recebe, privilégio)}} com os papéis por nome."""
+    nome = lambda oid: "PUBLIC" if oid == 0 else nomes.get(oid, "?%d" % oid)
+    saida = {}
+    for b in bancos:
+        with servidor.conectar(b) as c:
+            saida[b] = {(f, o, s, nome(d), nome(g), nome(r), p) for f, o, s, d, g, r, p in c.execute(_ACLS)}
+    return saida
+
+
+def test_aviso_de_remocao_bate_com_o_que_o_postgresql_faz(servidor, banco_servidor):
+    """Remover dora e fabio (novo dono: o superusuário). dora tem privilégios em coluna, função, schema, no banco
+    (CONNECT/TEMP), em large object e em foreign data wrapper; repassou parte pela opção de conceder; é dona de uma
+    tabela, de um tipo, de um foreign server e de um large object e deu neles a eva, a fabio (também removido) e ao
+    novo dono; deu a pertença em g2 a eva e o CONNECT do banco. Cada número do aviso é o que a remoção de verdade
+    tira ou mantém no catálogo; quem perde o acesso e quem sai do grupo, também."""
+    from ratt.db import checagem_servidor as cs
+    from ratt.db.rascunho_servidor import RemoverPapeis, RascunhoServidor
+    b6, eu_nome = banco_servidor, servidor.usuario
+    q = lambda x: sql.Identifier(x)
+    with servidor.conectar() as admin:
+        for cmd in ("CREATE ROLE dora LOGIN", "CREATE ROLE fabio LOGIN", "CREATE ROLE eva LOGIN",
+                    "CREATE ROLE g2 NOLOGIN", "GRANT g2 TO dora WITH ADMIN OPTION",
+                    "SET ROLE dora", "GRANT g2 TO eva", "RESET ROLE",
+                    sql.SQL("REVOKE CONNECT ON DATABASE {} FROM PUBLIC").format(q(b6)),
+                    sql.SQL("GRANT CONNECT, TEMP ON DATABASE {} TO dora WITH GRANT OPTION").format(q(b6)),
+                    "SET ROLE dora", sql.SQL("GRANT CONNECT ON DATABASE {} TO eva").format(q(b6)), "RESET ROLE"):
+            admin.execute(cmd)
+    with servidor.conectar(b6) as c:
+        lo1 = c.execute("SELECT lo_create(0)").fetchone()[0]
+        for cmd in ("CREATE SCHEMA s", "GRANT USAGE ON SCHEMA s TO dora", "GRANT CREATE ON SCHEMA public TO dora",
+                    "CREATE TABLE tt (i integer, j integer)", "GRANT SELECT (i) ON tt TO dora WITH GRANT OPTION",
+                    "CREATE FUNCTION ff() RETURNS integer LANGUAGE sql AS 'SELECT 1'",
+                    "REVOKE EXECUTE ON FUNCTION ff() FROM PUBLIC",
+                    "GRANT EXECUTE ON FUNCTION ff() TO dora WITH GRANT OPTION",
+                    "CREATE FOREIGN DATA WRAPPER ratt_fdw",
+                    "GRANT USAGE ON FOREIGN DATA WRAPPER ratt_fdw TO dora WITH GRANT OPTION",
+                    "CREATE SERVER ratt_srv FOREIGN DATA WRAPPER ratt_fdw", "ALTER SERVER ratt_srv OWNER TO dora",
+                    "GRANT SELECT ON LARGE OBJECT %d TO dora" % lo1,
+                    "SET ROLE dora",
+                    "GRANT SELECT (i) ON tt TO eva", "GRANT EXECUTE ON FUNCTION ff() TO eva",
+                    "GRANT USAGE ON FOREIGN DATA WRAPPER ratt_fdw TO eva",
+                    "CREATE TABLE td (x integer)", "GRANT SELECT ON td TO eva", "GRANT SELECT ON td TO fabio",
+                    sql.SQL("GRANT SELECT ON td TO {}").format(q(eu_nome)),
+                    "CREATE TYPE cor_d AS ENUM ('a')", "GRANT USAGE ON TYPE cor_d TO eva",
+                    "GRANT USAGE ON FOREIGN SERVER ratt_srv TO eva"):
+            c.execute(cmd)
+        lo2 = c.execute("SELECT lo_create(0)").fetchone()[0]
+        c.execute("GRANT SELECT ON LARGE OBJECT %d TO eva" % lo2)
+        c.execute("RESET ROLE")
+    with servidor.conectar() as admin:
+        m = catalogo_servidor.modelo_servidor(admin)
+        nomes = {int(o): n for o, n in admin.execute("SELECT oid, rolname FROM pg_roles")}
+        membros_antes = set(admin.execute("SELECT member::regrole::text, roleid::regrole::text FROM pg_auth_members"))
+        entra_antes = set(admin.execute("SELECT r.rolname, d.datname FROM pg_roles r, pg_database d "
+                                        "WHERE d.datallowconn AND r.rolname !~ '^pg_' "
+                                        "AND has_database_privilege(r.oid, d.oid, 'CONNECT')"))
+    bancos = tuple(b.nome for b in m.bancos.values() if b.aceita_conexao)
+    removidos = ("dora", "fabio")
+    op = RemoverPapeis(tuple(m.papel_por_nome(n).id for n in removidos), m.eu, bancos)
+    conectar = _Conexoes(servidor)
+    try:
+        avisos = cs.avisos_da_operacao_servidor(op, RascunhoServidor(m), conectar)
+    finally:
+        conectar.fechar()
+    antes = _acls(servidor, bancos, nomes)
+    for destino, cmd in op.comandos(m):                            # a remoção de verdade, como o ratt a gera
+        with servidor.conectar(destino or "postgres") as c:
+            c.execute(cmd)
+    with servidor.conectar() as admin:
+        membros_depois = set(admin.execute("SELECT member::regrole::text, roleid::regrole::text FROM pg_auth_members"))
+        entra_depois = set(admin.execute("SELECT r.rolname, d.datname FROM pg_roles r, pg_database d "
+                                         "WHERE d.datallowconn AND r.rolname !~ '^pg_' "
+                                         "AND has_database_privilege(r.oid, d.oid, 'CONNECT')"))
+    depois = _acls(servidor, bancos, {o: n for o, n in nomes.items() if n not in removidos})
+    numero = lambda chave, papel, banco: sum(a.valores["n"] for a in avisos if a.chave == chave
+                                             and a.valores["papel"] == papel and a.valores["banco"] == banco)
+    fontes = {"tem": set(), "opcao": set(), "dono": set()}
+    for b in bancos:
+        sumiram = antes[b] - depois[b]
+        for r in removidos:
+            tem = {e for e in sumiram if e[5] == r and e[4] != r}
+            opcao = {e for e in sumiram if e[4] == r and e[5] != r and e[3] != r}
+            dados = {e for e in antes[b] if e[4] == r and e[3] == r and e[5] not in removidos + (eu_nome,)}
+            ficaram = {e for e in dados if (e[0], e[1], e[2], eu_nome, eu_nome, e[5], e[6]) in depois[b]}
+            assert ficaram == dados, (b, r, dados - ficaram)       # o que deu como dono fica, vindo do novo dono
+            assert {e for e in antes[b] if e[5] == r and e[4] != r} == tem      # o que tinha sumiu todo
+            assert numero("chk.priv_tem_somem", r, b) == len(tem), (b, r)
+            assert numero("chk.priv_deu_opcao_somem", r, b) == len(opcao), (b, r)
+            assert numero("chk.priv_deu_dono_fica", r, b) == len(ficaram), (b, r)
+            fontes["tem"] |= {e[0] for e in tem}
+            fontes["opcao"] |= {e[0] for e in opcao}
+            fontes["dono"] |= {e[0] for e in ficaram}
+    # o cenário passou por cada tipo de acl
+    assert fontes["tem"] >= {"col", "proc", "nsp", "db", "lo", "fdw"}
+    assert fontes["opcao"] >= {"col", "proc", "fdw", "db"}
+    assert fontes["dono"] >= {"rel", "type", "srv", "lo"}
+    assert numero("chk.priv_tem_somem", "fabio", b6) == 1          # o SELECT em td, dado por dora
+    posse, = [a for a in avisos if a.chave == "chk.posse_passa" and a.valores["banco"] == b6]
+    assert posse.valores["papel"] == "dora" and posse.valores["lista"] == "1 tabela, 1 tipo"
+    perde = {(a.valores["papel"], a.valores["banco"]) for a in avisos if a.chave == "chk.perde_acesso"}
+    assert perde == {x for x in entra_antes - entra_depois if x[0] not in removidos} == {("eva", b6)}
+    sai = {(a.valores["papel"], a.valores["grupo"]) for a in avisos if a.chave == "chk.sai_do_grupo"}
+    assert sai == {x for x in membros_antes - membros_depois if x[0] not in removidos}
+    if m.versao >= 160000:                                         # a pertença que dora deu cai com ela
+        assert sai == {("eva", "g2")}

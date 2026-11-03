@@ -649,17 +649,25 @@ def _conectar_falso(fora=(), chamados=None):
     return conectar
 
 
-def _catalogo_falso(monkeypatch, posse=None, privilegios=None, padrao=None, sessoes=None, cifra="scram-sha-256"):
-    """As leituras de `catalogo_servidor` trocadas por dicionários {(banco, papel): valor}."""
+def _catalogo_falso(monkeypatch, posse=None, privilegios=None, padrao=None, sessoes=None, cifra="scram-sha-256",
+                    dependencias=None):
+    """As leituras de `catalogo_servidor` trocadas por dicionários {(banco, papel): valor}. Devolve o que o aviso
+    passou como `nao_ficam` a cada `privilegios_no_banco` (lista de conjuntos)."""
     posse, privilegios, padrao, sessoes = posse or {}, privilegios or {}, padrao or {}, sessoes or {}
+    dependencias, nao_ficam = dependencias or {}, []
+
+    def privs(c, nomes, *a, **k):
+        nao_ficam.append(set(k.get("nao_ficam", ())))
+        return {n: privilegios.get((c.banco, n), Privilegios(0, 0, 0)) for n in nomes}
     monkeypatch.setattr(catalogo_servidor, "posse_no_banco",
                         lambda c, nomes, *a: {n: posse.get((c.banco, n), {}) for n in nomes})
-    monkeypatch.setattr(catalogo_servidor, "privilegios_no_banco",
-                        lambda c, nomes, *a: {n: privilegios.get((c.banco, n), Privilegios(0, 0, 0)) for n in nomes})
+    monkeypatch.setattr(catalogo_servidor, "privilegios_no_banco", privs)
+    monkeypatch.setattr(catalogo_servidor, "dependencias_por_banco", lambda c, nomes, *a: dict(dependencias))
     monkeypatch.setattr(catalogo_servidor, "permissoes_padrao",
                         lambda c, nomes, *a: {n: padrao.get((c.banco, n), 0) for n in nomes})
     monkeypatch.setattr(catalogo_servidor, "sessoes", lambda c, nomes, *a: {n: sessoes.get(n, 0) for n in nomes})
     monkeypatch.setattr(catalogo_servidor, "password_encryption", lambda c, *a: cifra)
+    return nao_ficam
 
 
 def _resumo(avisos):
@@ -673,7 +681,7 @@ def _com(avisos, chave):
 def test_aviso_de_remocao_por_banco_posse_privilegios_padrao_e_nao_verificado(monkeypatch):
     m = modelo_exemplo()
     m.bancos["d4"] = Banco("d4", "da_carla", "r16", True, ("r16",), True)
-    _catalogo_falso(monkeypatch,
+    nao_ficam = _catalogo_falso(monkeypatch,
                     posse={("estudos", "ana"): {"tabela": 2, "funcao": 1}},
                     privilegios={("estudos", "ana"): Privilegios(3, 1, 2)},
                     padrao={("estudos", "carla"): 1})
@@ -697,6 +705,8 @@ def test_aviso_de_remocao_por_banco_posse_privilegios_padrao_e_nao_verificado(mo
     banco, = _com(avisos, "chk.banco_passa")
     assert banco.nivel == "info" and all(x in banco.texto() for x in ("da_carla", "carla", "app"))
     assert not _com(avisos, "chk.sessoes_abertas")
+    # o que vai aos outros removidos e ao novo dono não "fica" (some com eles, ou o novo dono já tem tudo)
+    assert nao_ficam and all(x == {"ana", "carla", "app"} for x in nao_ficam)
 
 
 def test_aviso_de_remocao_lista_quem_perde_o_acesso_pela_cascata(monkeypatch):
@@ -723,6 +733,8 @@ def test_aviso_sessoes_abertas_e_password_encryption_md5(monkeypatch):
     avisos = cs.avisos_da_operacao_servidor(RemoverPapeis(("r13",), "r11", ("estudos",)), r, _conectar_falso())
     sess, = _com(avisos, "chk.sessoes_abertas")
     assert sess.nivel == "impede" and "2" in sess.texto() and "ana" in sess.texto()
+    # o PostgreSQL NÃO recusa o DROP ROLE com sessão aberta: quem recusa é o ratt, porque a sessão quebraria
+    assert "recusaria" not in sess.texto() and "quebrada" in sess.texto()
     usuario = CriarPapel(Papel("novo-p1", "nova", True, False, False, False))
     grupo = CriarPapel(Papel("novo-p2", "grupo", False, False, False, False))
     for op in (usuario, TrocarSenha("r16")):
@@ -756,8 +768,8 @@ def test_aviso_public_e_quem_continua_entrando(monkeypatch):
     assert cs.avisos_da_operacao_servidor(TirarAcesso("r16", "d9"), r, conectar) == []   # inválida: nada a avisar
 
 
-def _prevoo_falso(monkeypatch, agora, sessoes=None):
-    _catalogo_falso(monkeypatch, sessoes=sessoes)
+def _prevoo_falso(monkeypatch, agora, sessoes=None, dependencias=None):
+    _catalogo_falso(monkeypatch, sessoes=sessoes, dependencias=dependencias)
     monkeypatch.setattr(catalogo_servidor, "modelo_servidor", lambda c, *a: agora.copia())
 
 
@@ -768,13 +780,13 @@ def test_prevoo_recusa_sessoes_banco_fechado_e_novo_dono_sem_login(monkeypatch):
     r.acrescentar(RemoverPapeis(("r13",), "r11", ("estudos", "sistema")))
     agora = base.copia()
     agora.papeis["r11"].login = False                              # o novo dono perdeu o LOGIN depois
-    _prevoo_falso(monkeypatch, agora, sessoes={"ana": 2})
+    _prevoo_falso(monkeypatch, agora, sessoes={"ana": 2}, dependencias={"fechado": 7})
     msgs = cs.prevoo(r, object(), _conectar_falso())
     assert any("ana" in x and "2" in x for x in msgs)
     fechado = [x for x in msgs if "fechado" in x]
-    assert len(fechado) == 1 and '"fechado"' not in fechado[0]
+    assert len(fechado) == 1 and '"fechado"' not in fechado[0] and "7" in fechado[0]   # com quantas dependências
     assert "ALTER DATABASE fechado ALLOW_CONNECTIONS true;" in fechado[0]
-    assert not any("template0" in x for x in msgs)                 # template0 fica fora
+    assert not any("template0" in x for x in msgs)                 # sem dependência deles lá
     assert any("app" in x and "LOGIN" in x for x in msgs)
     assert len(msgs) == 3
 
@@ -789,11 +801,13 @@ def test_prevoo_vazio_quando_tudo_bem_e_cita_nome_com_aspas(monkeypatch):
     agora = base.copia()
     agora.bancos["d7"] = Banco("d7", 'Fe"chado', "r10", False, ("r10",), True)
     agora.bancos["d8"] = Banco("d8", "novo_banco", "r10", True, ("r10",), True)
-    _prevoo_falso(monkeypatch, agora)
+    agora.bancos["d9"] = Banco("d9", "vazio_fechado", "r10", False, ("r10",), True)   # fechado, mas nada deles
+    _prevoo_falso(monkeypatch, agora, dependencias={'Fe"chado': 1})
     msgs = cs.prevoo(r, object(), _conectar_falso({"sistema"}))
     assert any('ALTER DATABASE "Fe""chado" ALLOW_CONNECTIONS true;' in x for x in msgs)
     assert any("novo_banco" in x for x in msgs)                    # aceita conexão e não está na remoção
     assert any("sistema" in x for x in msgs)                       # sou superusuário e não consegui entrar
+    assert not any("vazio_fechado" in x for x in msgs)
     assert len(msgs) == 3
     # sem remoção no rascunho, nada disso pesa
     r2 = RascunhoServidor(base)
@@ -824,3 +838,22 @@ def test_prevoo_leitura_que_falha_recusa(monkeypatch):
     monkeypatch.setattr(catalogo_servidor, "modelo_servidor", falha)
     msgs = cs.prevoo(RascunhoServidor(modelo_exemplo()), object(), _conectar_falso())
     assert len(msgs) == 1 and "caiu" in msgs[0]
+
+
+def test_aviso_quem_sai_de_um_grupo_pela_remocao_ou_pela_cascata(monkeypatch):
+    m = modelo_exemplo()
+    _catalogo_falso(monkeypatch)
+    r = RascunhoServidor(m)
+    # remover o grupo leitura: ana e meio deixam de ser membros (bruno continua em meio)
+    avisos = cs.avisos_da_operacao_servidor(RemoverPapeis(("r12",), "r10"), r, _conectar_falso())
+    sai = sorted((a.alvo, a.texto()) for a in _com(avisos, "chk.sai_do_grupo"))
+    assert [a for a, _ in sai] == ["r13", "r14"] and all("leitura" in x for _, x in sai)
+    assert all(a.nivel == "atencao" for a in _com(avisos, "chk.sai_do_grupo"))
+    # a pertença de ana em leitura foi dada só por app (16+): removido app, ana sai junto
+    m.papeis["r13"].concedido_por = {"r12": {"r11": (True, True)}}
+    avisos = cs.avisos_da_operacao_servidor(RemoverPapeis(("r11",), "r10"), RascunhoServidor(m), _conectar_falso())
+    sai, = _com(avisos, "chk.sai_do_grupo")
+    assert sai.alvo == "r13" and "ana" in sai.texto() and "leitura" in sai.texto()
+    # tirar do grupo é o pedido: não é aviso
+    assert not _com(cs.avisos_da_operacao_servidor(TirarDoGrupo("r13", "r12"), RascunhoServidor(m), _conectar_falso()),
+                    "chk.sai_do_grupo")

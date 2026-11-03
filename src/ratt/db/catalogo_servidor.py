@@ -7,7 +7,7 @@ nunca colados no SQL; o nome vira papel por `to_regrole(quote_ident(nome))`, exa
 """
 from __future__ import annotations
 
-from typing import Dict, List, NamedTuple, Tuple
+from typing import Dict, Iterable, List, NamedTuple, Tuple
 
 from ratt.db import catalogo
 from ratt.db.servidor import Banco, ModeloServidor, Papel
@@ -157,34 +157,87 @@ def posse_no_banco(conexao, papel_nomes: List[str], limite_ms: int = _LIMITE_MS)
 
 
 class Privilegios(NamedTuple):
-    """Os privilégios de um papel nas tabelas, views, sequências e schemas de um banco (cada privilégio de cada
-    objeto conta um)."""
+    """Os privilégios de um papel no banco desta conexão (cada privilégio de cada objeto conta um): em tabelas,
+    views, sequências e colunas, funções, tipos, schemas, no próprio banco (CONNECT/TEMP/CREATE), em large objects,
+    foreign data wrappers e foreign servers."""
     tem: int                # dados a ele por outro (o DROP OWNED os tira)
     deu_como_dono: int      # que ele deu no que é dele (o REASSIGN OWNED os passa ao novo dono, como concedente)
     deu_por_opcao: int      # que ele deu pelo GRANT OPTION no que não é dele (o DROP OWNED os tira, de quem recebeu)
 
 
-def privilegios_no_banco(conexao, papel_nomes: List[str], limite_ms: int = _LIMITE_MS) -> Dict[str, Privilegios]:
+def privilegios_no_banco(conexao, papel_nomes: List[str], limite_ms: int = _LIMITE_MS, *,
+                         nao_ficam: Iterable[str] = ()) -> Dict[str, Privilegios]:
     """Por papel, no banco desta conexão: os privilégios que ele tem e os que deu — como dono e pelo GRANT OPTION
-    (PUBLIC conta como quem recebe). Os do dono sobre o que é dele (de si para si) não contam."""
+    (PUBLIC conta como quem recebe). Os do dono sobre o que é dele (de si para si) não contam. Cobre todo `acl` que
+    vive no banco — `relacl`, `attacl`, `proacl`, `typacl`, `nspacl`, `lomacl`, `fdwacl`, `srvacl` — e o `datacl`
+    deste banco (é compartilhado, mas é dele). Só o que foi dado de fato: um `acl` NULL (o padrão) não conta.
+    `nao_ficam`: papéis (por nome) que também somem ou que viram o dono — o que foi dado a eles como dono não
+    "fica" (some com eles, ou o novo dono já tem tudo), então não entra em `deu_como_dono`."""
     with catalogo.somente_leitura(conexao, limite_ms):
         linhas = catalogo.executar(conexao, f"""
             WITH alvo AS ({_ALVO}),
+            sem AS (SELECT to_regrole(quote_ident(x))::oid AS papel FROM unnest(%s::text[]) AS x),
             acl AS (
                 SELECT c.relowner AS dono, x.grantor, x.grantee
                 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace, aclexplode(c.relacl) x
                 WHERE c.relacl IS NOT NULL AND n.nspname NOT IN {_SISTEMA}
                 UNION ALL
+                SELECT c.relowner, x.grantor, x.grantee
+                FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+                     JOIN pg_namespace n ON n.oid = c.relnamespace, aclexplode(a.attacl) x
+                WHERE a.attacl IS NOT NULL AND NOT a.attisdropped AND n.nspname NOT IN {_SISTEMA}
+                UNION ALL
+                SELECT p.proowner, x.grantor, x.grantee
+                FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, aclexplode(p.proacl) x
+                WHERE p.proacl IS NOT NULL AND n.nspname NOT IN {_SISTEMA}
+                UNION ALL
+                SELECT t.typowner, x.grantor, x.grantee
+                FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace, aclexplode(t.typacl) x
+                WHERE t.typacl IS NOT NULL AND n.nspname NOT IN {_SISTEMA}
+                UNION ALL
                 SELECT n.nspowner, x.grantor, x.grantee
                 FROM pg_namespace n, aclexplode(n.nspacl) x
-                WHERE n.nspacl IS NOT NULL AND n.nspname NOT IN {_SISTEMA})
+                WHERE n.nspacl IS NOT NULL AND n.nspname NOT IN {_SISTEMA}
+                UNION ALL
+                SELECT d.datdba, x.grantor, x.grantee
+                FROM pg_database d, aclexplode(d.datacl) x
+                WHERE d.datacl IS NOT NULL AND d.datname = current_database()
+                UNION ALL
+                SELECT l.lomowner, x.grantor, x.grantee
+                FROM pg_largeobject_metadata l, aclexplode(l.lomacl) x
+                WHERE l.lomacl IS NOT NULL
+                UNION ALL
+                SELECT w.fdwowner, x.grantor, x.grantee
+                FROM pg_foreign_data_wrapper w, aclexplode(w.fdwacl) x
+                WHERE w.fdwacl IS NOT NULL
+                UNION ALL
+                SELECT s.srvowner, x.grantor, x.grantee
+                FROM pg_foreign_server s, aclexplode(s.srvacl) x
+                WHERE s.srvacl IS NOT NULL)
             SELECT a.nome,
                    count(*) FILTER (WHERE acl.grantee = a.papel AND acl.grantor <> a.papel),
-                   count(*) FILTER (WHERE acl.grantor = a.papel AND acl.grantee <> a.papel AND acl.dono = a.papel),
+                   count(*) FILTER (WHERE acl.grantor = a.papel AND acl.grantee <> a.papel AND acl.dono = a.papel
+                                    AND acl.grantee NOT IN (SELECT papel FROM sem WHERE papel IS NOT NULL)),
                    count(*) FILTER (WHERE acl.grantor = a.papel AND acl.grantee <> a.papel AND acl.dono <> a.papel)
             FROM alvo a LEFT JOIN acl ON a.papel IN (acl.grantee, acl.grantor)
-            GROUP BY a.nome""", (_nomes(papel_nomes),)).fetchall()
+            GROUP BY a.nome""", (_nomes(papel_nomes), _nomes(nao_ficam))).fetchall()
     return {nome: Privilegios(int(tem), int(dono), int(opcao)) for nome, tem, dono, opcao in linhas}
+
+
+def dependencias_por_banco(conexao, papel_nomes: List[str], limite_ms: int = _LIMITE_MS) -> Dict[str, int]:
+    """Por banco (nome): quantas dependências dos papéis o `pg_shdepend` (compartilhado: lido de qualquer banco)
+    registra lá — objetos que eles possuem, privilégios dados a eles ou por eles, políticas. Só bancos com alguma;
+    o que é do servidor (bancos, tablespaces: `dbid` 0) não entra. Diz se um banco em que não dá para entrar tem
+    algo deles."""
+    with catalogo.somente_leitura(conexao, limite_ms):
+        linhas = catalogo.executar(conexao, f"""
+            WITH alvo AS ({_ALVO})
+            SELECT d.datname, count(*)
+            FROM pg_shdepend s JOIN pg_database d ON d.oid = s.dbid
+            WHERE s.refclassid = 'pg_authid'::regclass
+              AND s.refobjid IN (SELECT papel FROM alvo WHERE papel IS NOT NULL)
+            GROUP BY d.datname""", (_nomes(papel_nomes),)).fetchall()
+    return {nome: int(n) for nome, n in linhas}
 
 
 def permissoes_padrao(conexao, papel_nomes: List[str], limite_ms: int = _LIMITE_MS) -> Dict[str, int]:
