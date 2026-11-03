@@ -1496,7 +1496,7 @@ def test_tela_usuarios_cria_ana_e_aplica_pela_tela(servidor, banco_servidor, mon
 
 def test_sql_exportado_do_servidor_roda_inteiro_num_psql_so(servidor, banco_servidor, tmp_path):
     """O `.sql` exportado roda como está, com um `psql -f`: os `\\connect` trocam de banco (nomes hostis, um com
-    `=`), sem senha nenhuma no arquivo."""
+    `=`, um com `"` — que o psql tiraria de dentro das aspas simples), sem senha nenhuma no arquivo."""
     import shutil
     import subprocess
     import pytest
@@ -1506,7 +1506,7 @@ def test_sql_exportado_do_servidor_roda_inteiro_num_psql_so(servidor, banco_serv
     if not psql:
         pytest.skip("sem psql instalado")
     b1 = banco_servidor
-    hostis = ["z ;--'", "a=b \\x"]
+    hostis = ["z ;--'", "a=b \\x", 'q"q', 'w"=x']
     with servidor.conectar() as admin:
         for nome in hostis:
             admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(nome)))
@@ -1798,3 +1798,4 @@ def test_dica_dos_dependentes_so_no_erro_de_dependentes(servidor, banco_servidor
     finally:
         conexoes.fechar()
     assert codigo == 1 and indice == 0 and "lock" in msg and "CASCADE" not in msg, msg
+

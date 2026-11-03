@@ -607,10 +607,14 @@ def psql_connect(banco: str) -> str:
     """A linha `\\connect` do psql que entra em `banco`, citada como o psql pede: entre aspas simples (uma aspa
     vira duas; a barra invertida e as quebras de linha vão como escapes, que o psql desfaz). Um nome com `=` ou
     `://` (ou só `-`) o psql leria como texto de conexão (ou "o de antes"): vai como `dbname='…'`, citado do jeito
-    da libpq. `-reuse-previous=on`: servidor, porta e usuário continuam os da conexão de antes."""
+    da libpq. Depois das aspas simples o psql ainda tira as aspas duplas, como num identificador: um nome com `"`
+    vai também entre aspas duplas, com cada `"` dobrada. `-reuse-previous=on`: servidor, porta e usuário continuam
+    os da conexão de antes."""
     alvo = banco
     if "=" in banco or "://" in banco or banco == "-":
         alvo = "dbname='" + banco.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    if '"' in alvo:
+        alvo = '"' + alvo.replace('"', '""') + '"'
     citado = (alvo.replace("\\", "\\\\").replace("'", "''").replace("\n", "\\n").replace("\r", "\\r"))
     return f"\\connect -reuse-previous=on '{citado}'"
 
