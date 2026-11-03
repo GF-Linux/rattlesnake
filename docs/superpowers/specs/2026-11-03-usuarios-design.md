@@ -85,7 +85,8 @@ Escolhida **A**. *(Decisão minha: a pessoa delegou.)*
   + ana          entra                   leitura       C        —        —      ← pendente
   ┌ SQL ─────────────────────────────────────────────────────────────────────────┐
   │ -- 1. criar o usuário ana                                                    │
-  │ CREATE ROLE ana LOGIN PASSWORD '…';   -- a senha é pedida ao aplicar         │
+  │ CREATE ROLE ana LOGIN;                                                       │
+  │ -- a senha de ana é pedida ao aplicar (ou use \password ana no psql)         │
   └──────────────────────────────────────────────────────────────────────────────┘
   a novo · espaço poderes/senha · g grupos · c acesso ao banco · o dono do banco · x remover · P permissões · enter aplicar · e ensaio
   ```
@@ -119,7 +120,8 @@ Escolhida **A**. *(Decisão minha: a pessoa delegou.)*
   - `CriarPapel(nome, login, superusuario, cria_bancos, cria_papeis)` → `CREATE ROLE nome [LOGIN]
     [SUPERUSER] [CREATEDB] [CREATEROLE]`; com `LOGIN`, a senha é pedida na hora de aplicar.
   - `MudarPoderes(papel, …)` → `ALTER ROLE nome [NO]LOGIN [NO]SUPERUSER …`.
-  - `TrocarSenha(papel)` → `ALTER ROLE nome PASSWORD …`, senha pedida ao aplicar.
+  - `TrocarSenha(papel)` → no SQL mostrado e exportado, só um comentário; ao aplicar, `ALTER ROLE
+    nome PASSWORD '<hash>'` com a senha pedida na hora.
   - `PorNoGrupo(papel, grupo)` / `TirarDoGrupo` → `GRANT grupo TO papel` / `REVOKE grupo FROM papel`.
   - `DarAcesso(papel, banco)` / `TirarAcesso` → `GRANT CONNECT ON DATABASE banco TO papel` /
     `REVOKE …` (e o aviso de que `PUBLIC` também pode estar dando acesso: o ratt mostra e oferece
@@ -142,7 +144,8 @@ Escolhida **A**. *(Decisão minha: a pessoa delegou.)*
     Bancos que não aceitam conexão (`datallowconn = false`, como `template0`) ficam fora, e os
     bancos de que eles são donos passam por `ALTER DATABASE … OWNER TO` antes.
 - **Senhas:** nunca no rascunho, no `.sql` exportado nem no histórico de aplicados. O SQL mostrado e
-  exportado tem `PASSWORD '…'` e um comentário. Ao aplicar, na tela suspensa, o ratt pede a senha de
+  exportado **não tem cláusula de senha** (rodar o `.sql` noutro lugar cria o usuário sem senha; um
+  comentário diz para usar `\password`). Ao aplicar, na tela suspensa, o ratt pede a senha de
   cada usuário que precisa (com confirmação), transforma em hash SCRAM no próprio ratt (como o
   `ratt db user add`) e manda só o hash. Ensaio não pede senha (usa um hash descartável).
 - **Aplicar em vários bancos:** os comandos são agrupados por banco de destino, na ordem; cada
