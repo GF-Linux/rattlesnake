@@ -84,6 +84,8 @@ class SessaoRascunho:
         self._gravado: Optional[dict] = None    # o rascunho como está no disco, até onde a sessão sabe
         self._aberta = False                # já leu o disco uma vez?
         self._ouvintes: List[Callable[[], None]] = []
+        self._ao_aplicar: List[Callable[[Modelo, Dict[str, str]], None]] = []
+        self._criadas: Dict[str, str] = {}  # id provisório → nome das tabelas criadas pelo rascunho aplicado
         self._app = app
 
     # ── ouvintes e avisos ───────────────────────────────────────────────────
@@ -95,6 +97,16 @@ class SessaoRascunho:
     def parar(self, fn: Callable[[], None]) -> None:
         if fn in self._ouvintes:
             self._ouvintes.remove(fn)
+
+    def ao_aplicar(self, fn: Callable[[Modelo, Dict[str, str]], None]) -> None:
+        """`fn(catálogo novo, {id provisório: nome})` roda quando o catálogo de depois de um aplicar chega — venha o
+        aplicar de que tela vier (o canvas leva as posições das tabelas criadas para os ids do banco)."""
+        if fn not in self._ao_aplicar:
+            self._ao_aplicar.append(fn)
+
+    def parar_ao_aplicar(self, fn: Callable[[Modelo, Dict[str, str]], None]) -> None:
+        if fn in self._ao_aplicar:
+            self._ao_aplicar.remove(fn)
 
     def _avisar_ouvintes(self) -> None:
         for fn in list(self._ouvintes):
@@ -259,6 +271,8 @@ class SessaoRascunho:
             self._avisar(Aviso(t("canvas.aplicado", caminho=caminho)))
         except OSError as e:
             self._avisar(Aviso(t("canvas.erro_gravar", erro=e), "error"))
+        self._criadas = {i: tab.nome for i, tab in self.rascunho.vista().tabelas.items()
+                         if i.startswith("novo-t") and tab.estado != "apagado"}
         self.rascunho = _rascunho.Rascunho(self.rascunho.modelo())
         self.falha, self.mensagem_falha, self.contagens = None, None, {}
         self.persistir()
@@ -266,9 +280,13 @@ class SessaoRascunho:
         self._avisar_ouvintes()
 
     def aplicado(self, base: Modelo) -> None:
-        """Chegou o catálogo depois do aplicar: ele é a nova base."""
+        """Chegou o catálogo depois do aplicar: ele é a nova base. Quem pediu `ao_aplicar` fica sabendo (com as
+        tabelas que o rascunho criou) antes dos ouvintes."""
         self.aplicando = False
         self.rascunho = _rascunho.Rascunho(base)
+        criadas, self._criadas = self._criadas, {}
+        for fn in list(self._ao_aplicar):
+            fn(base, criadas)
         self._avisar_ouvintes()
 
 

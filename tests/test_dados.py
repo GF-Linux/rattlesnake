@@ -557,6 +557,20 @@ def test_descricoes_de_uma_linha():
         assert valida and desc and "\n" not in desc and "op." not in desc
 
 
+def test_painel_marca_where_escrito_a_mao():
+    """Uma operação com o filtro em texto: as colunas citadas nele não são acompanhadas — o painel diz isso."""
+    r = rascunho.Rascunho(modelo_pessoas())
+    texto = filtro.Filtro(texto="idade > 30")
+    r.acrescentar(rascunho.Alterar("t1", texto, {"t1.c2": rascunho.Mudanca("trim")}))
+    r.acrescentar(rascunho.Apagar("t1", texto))
+    r.acrescentar(rascunho.ApagarDuplicatas("t1", texto, ("t1.c4",)))
+    r.acrescentar(rascunho.Apagar("t1", filtro.Filtro([filtro.Condicao("t1.c3", "maior", ["30"])])))
+    descricoes = [desc for _, _, desc, _ in r.passos()]
+    marca = t("op.where_a_mao", texto="idade > 30")
+    assert all(marca in d for d in descricoes[:3]) and "idade > 30" in marca
+    assert t("op.where_a_mao", texto="").split(":")[0] not in descricoes[3]
+
+
 def test_json_das_operacoes_de_dados():
     r = rascunho.Rascunho(modelo_pessoas())
     f = filtro.Filtro([filtro.Condicao("t1.c2", "comeca", ["G"]), filtro.Condicao("t1.c3", "maior", ["1"])], conectivo="OU")
@@ -1217,6 +1231,47 @@ def test_contagem_logo_depois_de_aplicar_e_a_nova(monkeypatch, tmp_path):
     asyncio.run(roteiro())
 
 
+def test_aplicar_pela_tela_dados_leva_as_posicoes_das_tabelas_novas_no_canvas(monkeypatch, tmp_path):
+    """Uma tabela criada no rascunho tem posição no canvas pelo id provisório (novo-t…). Aplicado pela tela Dados
+    (com o canvas embaixo), a posição vai para o id do banco, pelo nome — na memória do canvas e no disco."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from ratt.db import modelo as _modelo, tela_dados
+    monkeypatch.setattr(tela_dados.TelaDados, "VIGIA_SEGUNDOS", 0)
+    fonte = FonteDadosFalsa()
+    _sem_suspender(monkeypatch, fonte)
+    fresco = modelo_pessoas()
+    fresco.tabelas["t9"] = Tabela("t9", "public", "pets", [Coluna("t9.c1", "id", "bigint", pk=True)])
+
+    def rodou(self, con, arq, ensaio, cab):
+        fonte.m = fresco                                          # o banco agora tem a tabela pets
+        return 0, None, None
+    monkeypatch.setattr(tela_dados.TelaDados, "_sessao", rodou)
+
+    async def roteiro():
+        app = AppTeste(fonte)
+        async with app.run_test(size=(140, 44)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            nova = Tabela(tela.rascunho.novo_id("t"), "public", "pets", [Coluna("x", "id", "bigint", pk=True)])
+            tela.sessao.acrescentar(rascunho.CriarTabela(nova))
+            await piloto.pause()
+            assert nova.id in tela._pos_todo
+            antes = tela._pos_todo[nova.id] = (77, 33)                 # a pessoa a pôs ali (longe da automática)
+            guardar.gravar_posicoes(5432, "teste", "public", tela._pos_todo)
+            dados = tela_dados.TelaDados(fonte, "public", "t1")
+            app.push_screen(dados)
+            await pronto_dados(app)
+            dados._rodar(False)
+            await pronto_dados(app)
+            assert dados.sessao.rascunho.operacoes == [] and "t9" in dados.sessao.rascunho.base.tabelas
+            assert tela._pos_todo.get("t9") == antes and nova.id not in tela._pos_todo
+            assert guardar.ler_posicoes(5432, "teste", "public").get("t9") == antes
+            app.pop_screen()
+            await pronto_dados(app)
+            assert tela.posicoes.get("t9") == antes
+    asyncio.run(roteiro())
+
+
 def test_pagina_que_estoura_o_tempo_nao_trava_a_paginacao(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     from ratt.db import tela_dados
@@ -1352,6 +1407,89 @@ def test_clicar_com_filtro_em_texto_pergunta_antes(monkeypatch, tmp_path):
             await pronto_dados(app)
             assert tela.filtro.condicoes == [filtro.Condicao("t1.c3", "igual", ["34"])]
     asyncio.run(roteiro())
+
+
+def test_limpar_com_filtro_em_texto_pergunta_antes(monkeypatch, tmp_path):
+    """F com um WHERE escrito à mão: pergunta antes de descartar o texto (o foco no não); sim limpa tudo."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from ratt.db import formularios
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 44)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            tela.filtro = filtro.Filtro([filtro.Condicao("t1.c3", "maior", ["30"])], texto="idade > 30")
+            tela._filtro_mudou()
+            await pronto_dados(app)
+            await piloto.press("F")
+            await esperar_que(piloto, lambda: isinstance(app.screen, formularios.Confirmar))
+            assert tela.filtro.texto == "idade > 30"
+            await piloto.press("enter")                       # o foco está no não: nada se perde
+            await esperar_que(piloto, lambda: app.screen is tela)
+            assert tela.filtro.texto == "idade > 30" and tela.filtro.condicoes
+            await piloto.press("F")
+            await esperar_que(piloto, lambda: isinstance(app.screen, formularios.Confirmar))
+            await esperar_tela(piloto, app.screen)
+            await piloto.click("#sim")
+            await esperar_que(piloto, lambda: app.screen is tela)
+            await pronto_dados(app)
+            assert tela.filtro == filtro.Filtro() and len(tela.linhas) == 5
+            await piloto.press("F")                           # sem texto: limpa sem perguntar
+            await piloto.pause()
+            assert app.screen is tela
+    asyncio.run(roteiro())
+
+
+def test_confirmacao_de_aplicar_lista_as_operacoes_de_dados_com_a_contagem_vista(monkeypatch, tmp_path):
+    """DELETE, duplicatas e UPDATE aparecem no alto da confirmação do aplicar, com quantas linhas a pessoa viu (ou
+    "não contado"); o INSERT não apaga nada e não aparece."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from ratt.db import formularios
+
+    async def roteiro():
+        app = AppDados(FonteDadosFalsa())
+        async with app.run_test(size=(140, 50)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            g = filtro.Filtro([filtro.Condicao("t1.c2", "comeca", ["G"])])
+            tela.sessao.acrescentar(rascunho.Inserir("t1", {"t1.c2": "Gil"}))
+            tela.sessao.acrescentar(rascunho.Apagar("t1", g, vista=2))
+            tela.sessao.acrescentar(rascunho.ApagarDuplicatas("t1", filtro.Filtro(), ("t1.c4",), vista=1))
+            tela.sessao.acrescentar(rascunho.Alterar("t1", g, {"t1.c2": rascunho.Mudanca("trim")}))
+            await piloto.press("enter")
+            await esperar_que(piloto, lambda: isinstance(app.screen, formularios.Confirmar))
+            conf = app.screen
+            itens = list(conf.itens)
+            vista = tela.sessao.rascunho.vista()
+            descricoes = [op.descricao(vista) for op in tela.sessao.rascunho.operacoes]
+            assert itens == [descricoes[1] + " — " + t("dados.d.vistas", n=2),
+                             descricoes[2] + " — " + t("dados.d.vista_uma"),
+                             descricoes[3] + " — " + t("canvas.d.nao_contado")]
+            assert t("dados.d.titulo") in conf.pergunta
+            await piloto.press("escape")
+            await esperar_que(piloto, lambda: app.screen is tela)
+            tela.sessao.tirar([3])                                 # sem o UPDATE: o título é o de sempre
+            await piloto.press("enter")
+            await esperar_que(piloto, lambda: isinstance(app.screen, formularios.Confirmar))
+            assert t("canvas.d.titulo") in app.screen.pergunta and len(app.screen.itens) == 2
+    asyncio.run(roteiro())
+
+
+def test_celula_de_real_double_ou_interval_e_recusada_com_o_motivo():
+    """O valor de um real/double precision/interval, como aparece na grade, não volta exato como "igual a": a
+    célula recusa (com o motivo), em vez de montar um filtro que não pegaria a própria linha."""
+    import datetime as dt
+    from ratt.db import grade_dados
+    for tipo, valor in (("real", 0.1), ("float4", 0.1), ("double precision", 1 / 3), ("float8", 2.5),
+                        ("interval", dt.timedelta(days=1, hours=2))):
+        with pytest.raises(ValueError) as e:
+            grade_dados.condicao_da_celula(Coluna("t1.c9", "medida", tipo), valor)
+        assert str(e.value) == t("dados.e.celula_aprox", coluna="medida", tipo=tipo)
+    assert grade_dados.condicao_da_celula(Coluna("t1.c9", "medida", "real"), None).operador == "vazio"
+    assert grade_dados.condicao_da_celula(Coluna("t1.c9", "v", "numeric(10,2)"), 2.5) == \
+        filtro.Condicao("t1.c9", "igual", ["2.5"])                                # numeric volta exato
 
 
 def test_celula_de_json_bytea_ou_lista_e_recusada():
@@ -1638,6 +1776,37 @@ def test_inserir_nome_vazio_avisa_e_nao_trava(monkeypatch, tmp_path):
             await pronto_dados(app)
             assert app.screen is tela
             assert tela.sessao.rascunho.operacoes[0].valores == {"t1.c3": "20"}
+    asyncio.run(roteiro())
+
+
+def test_escolher_linha_enter_durante_a_busca_espera_a_lista_nova(monkeypatch, tmp_path):
+    """Digitou e deu Enter antes de a busca sair (o atraso da digitação) ou chegar: o Enter espera a lista da busca
+    nova — nunca escolhe da lista velha que ainda está à vista."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.app import App
+    from textual.widgets import Input
+    from ratt.db import formularios_dados
+
+    fonte = FonteDadosFalsa()
+    escolhas = []
+
+    class A(App):
+        def on_mount(self):
+            self.push_screen(formularios_dados.EscolherLinha(fonte, "public", "pessoas", "id"), escolhas.append)
+
+    async def roteiro():
+        app = A()
+        async with app.run_test(size=(100, 30)) as piloto:
+            await esperar_workers(app)
+            tela = app.screen
+            assert len(tela.linhas) == 3                       # Gabriel, Ana, Giovana: Gabriel destacado
+            busca = tela.query_one("#busca", Input)
+            busca.focus()
+            await piloto.press(*"ana")
+            await piloto.press("enter")                         # dentro do atraso: a busca "ana" nem saiu
+            await esperar_que(piloto, lambda: escolhas, mensagem="não escolheu")
+            assert escolhas == ["2"] and tela.rotulo_escolhido == "Ana · ana@x.com"
+            assert ("linhas_pai", "public", "pessoas", "id", "ana") in fonte.chamadas
     asyncio.run(roteiro())
 
 

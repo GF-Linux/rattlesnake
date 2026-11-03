@@ -646,6 +646,7 @@ ratt db user passwd [name]            changes a password (no name: yours)
     "op.apagar_duplicatas": {"pt": "apagar duplicatas de {tabela} repetidas por {colunas} ({filtro})",
                              "en": "delete duplicates in {tabela} repeated by {colunas} ({filtro})"},
     "op.todas_as_linhas": {"pt": "todas as linhas", "en": "all rows"},
+    "op.where_a_mao": {"pt": "WHERE escrito à mão: {texto}", "en": "hand-written WHERE: {texto}"},
     "op.e.sem_valor": {"pt": "falta o valor para {coluna}", "en": "missing value for {coluna}"},
     "op.e.sem_coluna": {"pt": "falta a coluna de origem para {coluna}", "en": "missing source column for {coluna}"},
     "op.e.so_texto": {"pt": "{coluna} não é de texto: não dá para limpar", "en": "{coluna} is not text: cannot clean it"},
@@ -890,6 +891,10 @@ ratt db user passwd [name]            changes a password (no name: yours)
     "dados.e.outra_coluna": {"pt": "escolha a outra coluna", "en": "choose the other column"},
     "dados.e.celula": {"pt": "{coluna} é {tipo}: o valor mostrado não volta como filtro; use t (WHERE em texto)",
                        "en": "{coluna} is {tipo}: the shown value does not round-trip as a filter; use t (WHERE as text)"},
+    "dados.e.celula_aprox": {"pt": "{coluna} é {tipo}: o valor mostrado é aproximado e \"igual a\" não pegaria a "
+                                   "linha; use f com entre/maior/menor, ou t (WHERE em texto)",
+                             "en": "{coluna} is {tipo}: the shown value is approximate and \"equals\" would miss the "
+                                   "row; use f with between/greater/less, or t (WHERE as text)"},
     "dados.e.valor": {"pt": "«{valor}» não serve aqui", "en": "«{valor}» does not fit here"},
     "dados.sem_tempo_filtro": {"pt": "a leitura deste filtro demorou demais e foi cancelada: n tenta de novo",
                                "en": "reading this filter took too long and was cancelled: n tries again"},
@@ -924,6 +929,9 @@ ratt db user passwd [name]            changes a password (no name: yours)
     "dados.k.alterar": {"pt": "alterar", "en": "change"},
     "dados.k.apagar": {"pt": "apagar", "en": "delete"},
     "dados.k.duplicatas": {"pt": "duplicatas", "en": "duplicates"},
+    "dados.d.titulo": {"pt": "Isto apaga ou muda:", "en": "This deletes or changes:"},
+    "dados.d.vistas": {"pt": "{n} linhas (vistas)", "en": "{n} rows (seen)"},
+    "dados.d.vista_uma": {"pt": "1 linha (vista)", "en": "1 row (seen)"},
     "dados.todas": {"pt": "Não há filtro: isto vale para todas as {n} linhas de {tabela}. Continuar?",
                     "en": "There is no filter: this applies to all {n} rows of {tabela}. Continue?"},
     "dados.todas_sem_n": {"pt": "Não há filtro: isto vale para todas as linhas de {tabela} (não deu para contar quantas). Continuar?",

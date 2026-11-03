@@ -529,12 +529,16 @@ class TelaDados(AcoesRascunho, Screen):
     def _abrir_form(self, inicial: Optional[filtro.Condicao] = None) -> None:
         self.app.push_screen(FormCondicao(self._vista(), self._base(), self.tabela_id, inicial), self.acrescentar_condicao)
 
-    def _voltar_ao_montado(self, depois=None) -> None:
-        """Pergunta antes de descartar o WHERE escrito à mão; `depois` roda se a pessoa aceitar."""
+    def _voltar_ao_montado(self, depois=None, limpar: bool = False) -> None:
+        """Pergunta antes de descartar o WHERE escrito à mão; `depois` roda se a pessoa aceitar. `limpar`: o F —
+        sai do texto e tira as condições também."""
         def resposta(sim) -> None:
             if not sim:
                 return
-            self.filtro.texto = None
+            if limpar:
+                self.filtro = filtro.Filtro()
+            else:
+                self.filtro.texto = None
             self._filtro_mudou()
             if depois is not None:
                 depois()
@@ -550,6 +554,9 @@ class TelaDados(AcoesRascunho, Screen):
             self._abrir_form()
 
     def action_limpar(self) -> None:
+        if self._em_texto():
+            self._voltar_ao_montado(limpar=True)
+            return
         self.filtro = filtro.Filtro()
         self._filtro_mudou()
 

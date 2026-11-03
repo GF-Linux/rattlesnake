@@ -282,6 +282,18 @@ def aplicar_rascunho(r: _rascunho.Rascunho, conexao, arquivo: Path, ensaio: bool
 
 # ── a tela ──────────────────────────────────────────────────────────────────
 
+def _posicoes_remapeadas(posicoes: Dict[str, Tuple[int, int]], criadas: Dict[str, str],
+                         m: _modelo.Modelo) -> Dict[str, Tuple[int, int]]:
+    """As posições com os ids provisórios (novo-t…) das tabelas criadas trocados pelos do banco (pelo nome, em `m`);
+    as provisórias que sobram somem."""
+    por_nome = {tab.nome: tab.id for tab in m.tabelas.values()}
+    novas = dict(posicoes)
+    for velho, nome in criadas.items():
+        if velho in novas and nome in por_nome:
+            novas[por_nome[nome]] = novas.pop(velho)
+    return {i: xy for i, xy in novas.items() if not i.startswith("novo-")}
+
+
 class TelaCanvas(AcoesRascunho, Screen):
     AUTO_FOCUS = ""         # o foco só vai ao painel do SQL quando a pessoa pede (r ou clique): as setas são do quadro
     BINDINGS = [
@@ -371,6 +383,7 @@ class TelaCanvas(AcoesRascunho, Screen):
 
     def on_unmount(self):
         self.sessao.parar(self._rascunho_mudou)
+        self.sessao.parar_ao_aplicar(self._posicoes_do_aplicado)
         if self._relendo is not None:
             # a releitura do catálogo não vai mais chegar: a sessão não pode ficar travada em "aplicando"
             self._relendo.aplicando, self._relendo = False, None
@@ -398,8 +411,24 @@ class TelaCanvas(AcoesRascunho, Screen):
         """Passa a ouvir a sessão de `esquema` (e deixa de ouvir a do schema anterior)."""
         if self.sessao is not None:
             self.sessao.parar(self._rascunho_mudou)
+            self.sessao.parar_ao_aplicar(self._posicoes_do_aplicado)
         self.sessao = sessao.obter(self.app, self.fonte, esquema)
         self.sessao.ouvir(self._rascunho_mudou)
+        self.sessao.ao_aplicar(self._posicoes_do_aplicado)
+
+    def _posicoes_do_aplicado(self, m: _modelo.Modelo, criadas: Dict[str, str]) -> None:
+        """O catálogo de depois de um aplicar chegou (por esta tela ou por outra, como a tela Dados): as posições das
+        tabelas criadas pelo rascunho vão dos ids provisórios para os do banco, pelo nome — na memória e no disco."""
+        carregado = self.carregado
+        antes = self._pos_todo if carregado else guardar.ler_posicoes(self.fonte.porta, self.fonte.banco,
+                                                                          self.sessao.esquema)
+        posicoes = _posicoes_remapeadas(antes, criadas, m)
+        if carregado:
+            self._pos_todo = posicoes
+        try:
+            guardar.gravar_posicoes(self.fonte.porta, self.fonte.banco, self.sessao.esquema, posicoes)
+        except OSError as e:
+            self.notify(t("canvas.erro_gravar", erro=e), severity="error")
 
     def _rascunho_mudou(self) -> None:
         """A sessão mudou o rascunho (por esta tela ou por outra): refaz a vista e o painel. Antes do primeiro
@@ -988,20 +1017,14 @@ class TelaCanvas(AcoesRascunho, Screen):
                 self.marca = None               # o vigia traz o catálogo de verdade na próxima volta
                 self._falhou(esquema, erro)
             return
-        por_nome = {tab.nome: tab.id for tab in m.tabelas.values()}
-        posicoes = self._pos_todo if mesma else guardar.ler_posicoes(self.fonte.porta, self.fonte.banco, esquema)
-        for velho, nome in nomes.items():
-            if velho in posicoes and nome in por_nome:
-                posicoes[por_nome[nome]] = posicoes.pop(velho)
-        posicoes = {i: xy for i, xy in posicoes.items() if not i.startswith("novo-")}
-        try:
-            guardar.gravar_posicoes(self.fonte.porta, self.fonte.banco, esquema, posicoes)
-        except OSError as e:
-            self.notify(t("canvas.erro_gravar", erro=e), severity="error")
-        if not mesma:
+        if not mesma:               # a sessão desta tela já não é a do schema aplicado: só o disco
+            posicoes = _posicoes_remapeadas(guardar.ler_posicoes(self.fonte.porta, self.fonte.banco, esquema), nomes, m)
+            try:
+                guardar.gravar_posicoes(self.fonte.porta, self.fonte.banco, esquema, posicoes)
+            except OSError as e:
+                self.notify(t("canvas.erro_gravar", erro=e), severity="error")
             return
-        self._pos_todo = posicoes
-        self._calada((s or self.sessao).aplicado, m)
+        self._calada((s or self.sessao).aplicado, m)       # as posições vão pelo `_posicoes_do_aplicado`
         self._montar()
 
     # ── ler o banco (sempre fora da thread da tela) ─────────────────────────

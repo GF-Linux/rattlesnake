@@ -1,5 +1,5 @@
 """As operações de dados do rascunho contra um PostgreSQL de verdade (o fixture `banco` cria um banco descartável)."""
-from conftest import PESSOAS_SQL, esperar_workers
+from conftest import PESSOAS_SQL, esperar_workers, saida_presa
 import psycopg
 import pytest
 
@@ -754,6 +754,9 @@ def test_executar_sem_conferir_igual(banco, tmp_path, capsys):
 
 # ── a tela Dados (Task 7) ──
 
+_GRAVADO = t("run.gravado", n=0, total=0).split("·")[-1].strip()      # "gravado": o fim da saída que deu certo
+
+
 def _apps_isolados(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "dados"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
@@ -1080,10 +1083,11 @@ def test_inserir_pelo_formulario_e_aplicar(banco, tmp_path, monkeypatch):
             s = tela.sessao
             con = psycopg.connect(banco.info.dsn)
             try:
-                codigo, indice, msg = s.aplicar(con, tmp_path / "a.sql", ensaio=False)
+                with saida_presa() as saida:
+                    codigo, indice, msg = s.aplicar(con, tmp_path / "a.sql", ensaio=False)
             finally:
                 con.close()
-            assert (codigo, indice, msg) == (0, None, None)
+            assert (codigo, indice, msg) == (0, None, None) and _GRAVADO in saida.getvalue()
     asyncio.run(roteiro())
     assert banco.execute("SELECT nome, idade, email, nascimento::text, ativo FROM public.pessoas WHERE id = 6").fetchone() \
         == ("Zé d'Ávila", 33, "ze@x.com", "2001-02-03", True)
@@ -1161,9 +1165,11 @@ def test_identidade_by_default_e_opcional_no_formulario(banco, tmp_path, monkeyp
             await _pronto(app)
             con = psycopg.connect(banco.info.dsn)
             try:
-                assert tela.sessao.aplicar(con, tmp_path / "a.sql", ensaio=False) == (0, None, None)
+                with saida_presa() as saida:
+                    assert tela.sessao.aplicar(con, tmp_path / "a.sql", ensaio=False) == (0, None, None)
             finally:
                 con.close()
+            assert _GRAVADO in saida.getvalue()
     asyncio.run(roteiro())
     assert banco.execute("SELECT id, texto, dobro, s FROM public.nota ORDER BY s").fetchall() == \
         [(100, "com id", 12, 1), (1, "sem id", 12, 2)]
@@ -1208,9 +1214,11 @@ def test_apagar_gabriel_pela_tela_cascateia_os_pedidos(banco, tmp_path, monkeypa
             assert op.vista == 1
             con = psycopg.connect(banco.info.dsn)
             try:
-                assert tela.sessao.aplicar(con, tmp_path / "a.sql", ensaio=False) == (0, None, None)
+                with saida_presa() as saida:
+                    assert tela.sessao.aplicar(con, tmp_path / "a.sql", ensaio=False) == (0, None, None)
             finally:
                 con.close()
+            assert _GRAVADO in saida.getvalue()
     asyncio.run(roteiro())
     assert banco.execute("SELECT count(*) FROM public.pessoas").fetchone()[0] == 4          # a linha que se viu
     assert banco.execute("SELECT count(*) FROM public.pedidos").fetchone()[0] == 1          # e a cascata mostrada
@@ -1252,9 +1260,11 @@ def test_duplicatas_sem_chave_primaria_pela_tela(banco, tmp_path, monkeypatch):
             assert tela.sessao.rascunho.operacoes[0].vista == 1
             con = psycopg.connect(banco.info.dsn)
             try:
-                assert tela.sessao.aplicar(con, tmp_path / "a.sql", ensaio=False) == (0, None, None)
+                with saida_presa() as saida:
+                    assert tela.sessao.aplicar(con, tmp_path / "a.sql", ensaio=False) == (0, None, None)
             finally:
                 con.close()
+            assert _GRAVADO in saida.getvalue()
     asyncio.run(roteiro())
     assert banco.execute("SELECT nome FROM public.contatos ORDER BY nome").fetchall() == \
         [("a",), ("b",), ("sem",), ("sem2",)]                # fica a primeira (menor ctid); vazio não é repetido

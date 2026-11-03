@@ -253,20 +253,26 @@ class AcoesRascunho:
         pergunta = t("canvas.f.aplicar_pergunta", banco=self.fonte.banco, n=len(passos))
         destrutivas = self._destrutivas(passos)
         if destrutivas:
-            pergunta += "\n" + t("canvas.d.titulo")
+            muda = any(valida and isinstance(op, _rascunho.Alterar) for op, valida, _, _ in passos)
+            pergunta += "\n" + t("dados.d.titulo" if muda else "canvas.d.titulo")
         # foco em "cancelar": um Enter que sobrou no teclado nunca grava no banco
         self.app.push_screen(
             formularios.Confirmar(pergunta, destrutivas, t("canvas.f.aplicar"), foco="nao", sql=texto),
             lambda sim: self._rodar(False, texto) if sim else None)
 
     def _destrutivas(self, passos) -> List[str]:
-        """Uma linha por operação que apaga (tabela, coluna, restrição), no alto da confirmação: o que some junto,
-        com a contagem de linhas quando ela foi feita ao pôr a operação no rascunho."""
+        """Uma linha por operação que apaga (tabela, coluna, restrição, linhas, duplicatas) ou muda linhas (UPDATE),
+        no alto da confirmação: o que some junto, com a contagem de linhas quando ela foi feita ao pôr a operação no
+        rascunho (nas de dados, quantas a pessoa viu)."""
         linhas = []
         for op, valida, desc, _ in passos:
             if not valida:
                 continue
-            if isinstance(op, _rascunho.ApagarTabela):
+            if isinstance(op, (_rascunho.Apagar, _rascunho.ApagarDuplicatas, _rascunho.Alterar)):
+                n = op.vista
+                detalhe = (t("canvas.d.nao_contado") if n is None else
+                           t("dados.d.vista_uma") if n == 1 else t("dados.d.vistas", n=n))
+            elif isinstance(op, _rascunho.ApagarTabela):
                 n = self.sessao.contagens.get(op.tabela)
                 detalhe = t("canvas.d.tabela", n=n) if n is not None else t("canvas.d.nao_contado")
             elif isinstance(op, _rascunho.ApagarColuna):

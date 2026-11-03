@@ -567,8 +567,13 @@ def _refere_filtro(f, tabela_id: str) -> Set[str]:
 
 
 def _descricao_filtro(f, m: Modelo, tabela_id: str) -> str:
+    """O filtro em palavras; o texto livre vem marcado "WHERE escrito à mão" (as colunas dele não são acompanhadas)."""
     from . import filtro
-    return filtro.descricao(f, m, tabela_id) if not f.vazio() else t("op.todas_as_linhas")
+    if f.vazio():
+        return t("op.todas_as_linhas")
+    if f.texto is not None and f.texto.strip():
+        return t("op.where_a_mao", texto=f.texto.strip())
+    return filtro.descricao(f, m, tabela_id)
 
 
 def _chaves(tab: Tabela) -> List[str]:

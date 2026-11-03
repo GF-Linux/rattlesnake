@@ -168,3 +168,20 @@ async def esperar_tela(piloto, tela, limite=5.0):
     app = piloto.app
     await esperar_que(piloto, lambda: app.screen is tela and tela.is_mounted, limite, "a tela não abriu")
     await piloto.pause()
+
+
+def saida_presa():
+    """`with saida_presa() as saida:` — o que o `ratt db run` imprime dentro de `run_test` (o Textual troca o
+    stdout e a saída escaparia da captura do pytest, solta no meio dos pontinhos) fica em `saida.getvalue()`."""
+    import contextlib
+    import io
+
+    class _Presa(contextlib.redirect_stdout):
+        def __init__(self):
+            self.buffer = io.StringIO()
+            super().__init__(self.buffer)
+
+        def __enter__(self):
+            super().__enter__()
+            return self.buffer
+    return _Presa()

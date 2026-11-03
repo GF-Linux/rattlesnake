@@ -677,7 +677,9 @@ class EscolherLinha(ModalScreen):
         self.linhas: List[tuple] = []
         self.rotulo_escolhido: Optional[str] = None
         self._versao = 0
+        self._mostrada = -1                 # a versão da busca cuja lista está à vista
         self._timer = None
+        self._enter_esperando = False       # Enter antes da lista da busca nova: escolhe quando ela chegar
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -700,12 +702,21 @@ class EscolherLinha(ModalScreen):
 
     def on_input_changed(self, evento: Input.Changed) -> None:
         evento.stop()
+        self._enter_esperando = False       # voltou a digitar: o Enter de antes não vale para a busca nova
         if self._timer is not None:
             self._timer.stop()
         self._timer = self.set_timer(_ATRASO, self._buscar)
 
     def on_input_submitted(self, evento: Input.Submitted) -> None:
+        """Enter na busca. Com a busca nova ainda esperando a digitação parar (ou a caminho), a lista à vista é a
+        velha: o Enter espera a nova (e dispara a busca já, se ela ainda não saiu)."""
         evento.stop()
+        if self._timer is not None:
+            self._timer.stop()
+            self._buscar()
+        if self._mostrada != self._versao:
+            self._enter_esperando = True
+            return
         destacada = self.query_one(OptionList).highlighted
         self._escolher(destacada if destacada is not None else 0)
 
@@ -729,6 +740,8 @@ class EscolherLinha(ModalScreen):
     def _chegaram(self, versao: int, linhas) -> None:
         if not self.is_attached or versao != self._versao:
             return
+        self._mostrada = versao
+        esperando, self._enter_esperando = self._enter_esperando, False     # sem linhas ou com erro: não escolhe
         estado, lista = self.query_one("#estado", Static), self.query_one(OptionList)
         lista.clear_options()
         self.linhas = []
@@ -750,6 +763,8 @@ class EscolherLinha(ModalScreen):
             estado.update(Text(t("dados.f.primeiras", n=self.LIMITE), style=COR["cinza"]))
         else:
             estado.update("")
+        if esperando:
+            self._escolher(0)
 
     def on_option_list_option_selected(self, evento: OptionList.OptionSelected) -> None:
         evento.stop()

@@ -6,6 +6,7 @@ Tudo mora em `$XDG_DATA_HOME/ratt/canvas/{porta}-{banco}/` (ou `~/.local/share/r
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -14,9 +15,13 @@ from typing import Dict, Optional, Tuple
 
 
 def _seguro(nome: str) -> str:
-    """Nome de banco ou esquema como parte de nome de arquivo: nada de barras nem `..`."""
-    s = re.sub(r"[^\w.-]", "_", nome)
-    return s.replace("..", "_") or "_"
+    """Nome de banco ou esquema como parte de nome de arquivo: nada de barras nem `..`. Um nome que já é seguro fica
+    como está (os arquivos de antes continuam valendo); um que precisou de troca ganha `~` e um resumo estável do
+    nome original — "my schema" e "my_schema" nunca dividem arquivo (e `~` nunca aparece num nome que já era seguro)."""
+    s = re.sub(r"[^\w.-]", "_", nome).replace("..", "_") or "_"
+    if s == nome:
+        return s
+    return s + "~" + hashlib.sha1(nome.encode("utf-8", "surrogatepass")).hexdigest()[:12]
 
 
 def pasta(porta: int, banco: str) -> Path:

@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest
 
-from conftest import esperar_que, esperar_tela, esperar_workers
+from conftest import esperar_que, esperar_tela, esperar_workers, saida_presa
 from ratt.db import modelo, rascunho
 from ratt.db.modelo import Coluna, Ligacao, Modelo, Tabela
 
@@ -1926,8 +1926,9 @@ def test_ctrl_c_durante_o_aplicar_desfaz_e_nao_derruba(monkeypatch, tmp_path):
         async with app.run_test(size=(120, 40)) as piloto:
             await pronto(app)
             con = _ConCtx()
-            assert app.screen._sessao(con, tmp_path / "a.sql", False, "") == (1, None, None)
-            assert con.rollbacks == 1
+            with saida_presa() as saida:
+                assert app.screen._sessao(con, tmp_path / "a.sql", False, "") == (1, None, None)
+            assert con.rollbacks == 1 and t("canvas.interrompido") in saida.getvalue()
     asyncio.run(roteiro())
 
 
@@ -1948,9 +1949,10 @@ def test_ctrl_c_no_enter_para_voltar_vale_como_enter(monkeypatch, tmp_path):
         app = AppTeste(fonte)
         async with app.run_test(size=(120, 40)) as piloto:
             await pronto(app)
-            app.screen._rodar(False)
+            with saida_presa() as saida:
+                app.screen._rodar(False)
             await piloto.pause()
-            assert app.screen.rascunho.operacoes == []
+            assert app.screen.rascunho.operacoes == [] and "ratt db run" in saida.getvalue()
     asyncio.run(roteiro())
     assert guardar.ler_rascunho(5432, "teste", "public") is None          # o aplicado não fica pendente
 
@@ -2336,6 +2338,23 @@ def test_m2_nome_de_schema_hostil_nao_sai_da_pasta(monkeypatch, tmp_path):
     caminho = guardar.arquivo_aplicando(5432, "teste", "../../x")
     assert caminho.parent == guardar.pasta(5432, "teste") and ".." not in caminho.name and "/" not in caminho.name
     assert "/" not in guardar.nome_exportado("a/b", "../c") and ".." not in guardar.nome_exportado("a/b", "../c")
+
+
+def test_nomes_parecidos_de_schema_e_banco_nao_dividem_arquivo(monkeypatch, tmp_path):
+    """"my schema" e "my_schema" (e "a/b", "a.b"...) nunca caem no mesmo arquivo de rascunho; um nome que já era
+    seguro continua com o mesmo arquivo de antes (os rascunhos guardados seguem valendo)."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    nomes = ["my schema", "my_schema", "my-schema", "my/schema", "a..b", "a_b", "", "_", "ação", "ação!"]
+    arquivos = [guardar._arquivo_rascunho(5432, "teste", n) for n in nomes]
+    assert len(set(arquivos)) == len(nomes)
+    assert all(a.parent == guardar.pasta(5432, "teste") and "/" not in a.name for a in arquivos)
+    assert guardar._arquivo_rascunho(5432, "teste", "public").name == "rascunho-public.json"     # como antes
+    assert guardar._arquivo_rascunho(5432, "teste", "ação").name == "rascunho-ação.json"
+    assert guardar._seguro("my schema") == guardar._seguro("my schema")                            # estável
+    assert guardar.pasta(5432, "meu banco") != guardar.pasta(5432, "meu_banco")
+    assert guardar.pasta(5432, "teste").name == "5432-teste"
+    guardar.gravar_rascunho(5432, "teste", "my schema", {"operacoes": [], "proximo": 1})
+    assert guardar.ler_rascunho(5432, "teste", "my_schema") is None
 
 
 def test_m1_disco_cheio_ao_mover_avisa_uma_vez(monkeypatch, tmp_path):

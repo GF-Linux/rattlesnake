@@ -96,12 +96,18 @@ def _filtravel(tipo: str) -> bool:
     return not (normal.endswith("[]") or normal in ("bytea", "json", "jsonb"))
 
 
+# o valor mostrado não volta exato: ponto flutuante arredonda; o interval sai no formato do Python ("1 day, 2:00:00")
+_APROXIMADOS = ("real", "double precision", "interval")
+
+
 def condicao_da_celula(col: _modelo.Coluna, valor) -> filtro.Condicao:
     """"igual a este valor" para uma célula; ValueError (com o motivo) quando o valor não dá para filtrar assim."""
     if valor is None:
         return filtro.Condicao(col.id, "vazio")
     if not _filtravel(col.tipo) or isinstance(valor, (bytes, memoryview, list, dict)):
         raise ValueError(t("dados.e.celula", coluna=col.nome, tipo=col.tipo))
+    if filtro.tipo_normal(col.tipo) in _APROXIMADOS:
+        raise ValueError(t("dados.e.celula_aprox", coluna=col.nome, tipo=col.tipo))
     if filtro.familia(col.tipo) == "booleano":
         return filtro.Condicao(col.id, "verdadeiro" if valor else "falso")
     return filtro.Condicao(col.id, "igual", [str(valor)])       # data e hora saem em ISO, que o PostgreSQL lê de volta
