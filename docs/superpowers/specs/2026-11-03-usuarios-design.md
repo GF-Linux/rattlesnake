@@ -130,10 +130,12 @@ Escolhida **A**. *(Decisão minha: a pessoa delegou.)*
     ```
     -- no banco estudos
     REASSIGN OWNED BY ana, bruno TO jared;
-    DROP OWNED BY ana, bruno;
+    DROP OWNED BY ana;
+    DROP OWNED BY bruno;
     -- no banco sistema
     REASSIGN OWNED BY ana, bruno TO jared;
-    DROP OWNED BY ana, bruno;
+    DROP OWNED BY ana;
+    DROP OWNED BY bruno;
     -- no servidor
     DROP ROLE ana, bruno;
     ```
