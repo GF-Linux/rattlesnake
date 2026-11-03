@@ -49,7 +49,9 @@ def test_modelo_servidor_papeis_grupos_e_acesso(servidor, banco_servidor, monkey
     monkeypatch.setattr(catalogo, "executar", lambda alvo, q, params=None: consultas.append(q) or original(alvo, q, params))
     with servidor.conectar() as c:
         m = catalogo_servidor.modelo_servidor(c)
+        atual = c.info.dbname
     assert 1 <= len(consultas) <= 4
+    assert m.bancos[m.banco_atual].nome == atual                        # o banco desta conexão (para as travas)
     ana, leitura, eu = m.papel_por_nome("ana"), m.papel_por_nome("leitura"), m.papel_por_nome(servidor.usuario)
     assert m.eu == eu.id and eu.superusuario and eu.login and m.versao >= 130000
     assert ana.id.startswith("r") and ana.login and not ana.superusuario and ana.membro_de == (leitura.id,)

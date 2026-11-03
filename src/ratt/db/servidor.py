@@ -47,6 +47,7 @@ class ModeloServidor:
     bancos: Dict[str, Banco] = field(default_factory=dict)
     eu: str = ""                        # id do papel da conexão: o current_user (o ratt nunca faz SET ROLE)
     versao: int = 0                     # server_version_num (180000 = 18)
+    banco_atual: Optional[str] = None   # id do banco desta conexão: as travas olham se `eu` continua entrando nele
 
     def copia(self) -> "ModeloServidor":
         """Cópia profunda: o rascunho mexe nela sem tocar no que veio do servidor."""

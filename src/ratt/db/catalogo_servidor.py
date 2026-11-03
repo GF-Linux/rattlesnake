@@ -31,6 +31,7 @@ def modelo_servidor(conexao, limite_ms: int = _LIMITE_MS) -> ModeloServidor:
     CONNECT do `datacl` (sem `datacl`, o padrão: PUBLIC e o dono entram). Os papéis `pg_*` do PostgreSQL ficam no
     modelo, marcados `sistema` (um deles pode ter CONNECT e passá-lo a quem é membro); as telas os escondem.
     `eu` é o current_user da conexão (o ratt nunca faz SET ROLE, então é o usuário com que ele entrou).
+    `banco_atual` é o banco desta conexão (o current_database()), que as travas não deixam a pessoa perder.
     Herança: no 16+ cada pertença diz (`inherit_option`; `set_option` só para mostrar); até o 15 decide o
     `rolinherit` do membro, para todas as pertenças dele."""
     with catalogo.somente_leitura(conexao, limite_ms):
@@ -52,7 +53,7 @@ def modelo_servidor(conexao, limite_ms: int = _LIMITE_MS) -> ModeloServidor:
                 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member
                 ORDER BY m.member, m.roleid""").fetchall()
         bancos = catalogo.executar(conexao, """
-            SELECT d.oid, d.datname, d.datdba, d.datallowconn, d.datistemplate,
+            SELECT d.oid, d.datname, d.datdba, d.datallowconn, d.datistemplate, d.datname = current_database(),
                    coalesce(array_agg(DISTINCT a.grantee ORDER BY a.grantee)
                             FILTER (WHERE a.grantee <> 0 AND a.privilege_type = 'CONNECT'), '{}'),
                    coalesce(bool_or(a.grantee = 0 AND a.privilege_type = 'CONNECT'), false)
@@ -78,8 +79,9 @@ def modelo_servidor(conexao, limite_ms: int = _LIMITE_MS) -> ModeloServidor:
     modelo_bancos = {
         f"d{oid}": Banco(f"d{oid}", nome, f"r{dono}", aceita, tuple(f"r{g}" for g in diretos if f"r{g}" in papeis),
                          publico, template=template)
-        for oid, nome, dono, aceita, template, diretos, publico in bancos}
-    return ModeloServidor(papeis, modelo_bancos, eu, versao)
+        for oid, nome, dono, aceita, template, _, diretos, publico in bancos}
+    atual = next((f"d{linha[0]}" for linha in bancos if linha[5]), None)
+    return ModeloServidor(papeis, modelo_bancos, eu, versao, atual)
 
 
 def sessoes(conexao, papeis: List[str], limite_ms: int = _LIMITE_MS) -> Dict[str, int]:
