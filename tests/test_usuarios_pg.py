@@ -1748,7 +1748,8 @@ def test_ensaio_pelo_sudo_so_desculpa_o_drop_role_que_ainda_ve_objetos(servidor,
         with redirect_stdout(saida):
             codigo, indice, msg = s.aplicar(
                 _conectar_de(conexoes, b1), True, lambda nome: SENHA, como_postgres=True,
-                runner=_psql_no_descartavel(servidor, trocar=lambda e: e.replace("DROP ROLE ana;", "DROP ROLE ninguem_x;")))
+                runner=_psql_no_descartavel(servidor, trocar=lambda e: e.replace("DROP ROLE ana;",
+                                                                                 "DROP ROLE ninguem_x;")))
     finally:
         conexoes.fechar()
     assert codigo == 1 and indice == 0 and "ninguem_x" in msg, saida.getvalue()
