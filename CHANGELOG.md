@@ -3,6 +3,61 @@
 O `ratt check-update` e o `ratt upgrade` leem este arquivo: cada `## versão` é o que você
 vê antes de responder `[s/N]`.
 
+## 0.11.0
+
+- **usuários e permissões pela tela**: duas telas novas no `ratt db`, para mexer em quem entra
+  onde e em quem pode o quê sem escrever `CREATE ROLE`, `GRANT` ou `REVOKE`. Como nas outras
+  telas, o que você faz vira um rascunho com o SQL à vista; `enter` aplica, `e` ensaia, `w` salva
+  num `.sql`, `u` desfaz e `r` leva o foco ao painel do SQL.
+  - **Usuários** (`u` na tela do banco): uma grade com os papéis nas linhas — a linha `PUBLIC`
+    (todo mundo) em cima, fixa — e, nas colunas, o que cada um pode fazer, os grupos de que faz
+    parte e o acesso a cada banco. Na célula do banco, `D` é dono, `C` é o `CONNECT` dado direto,
+    `c` é o acesso que vem de outro lugar (ser superusuário, o `PUBLIC` ou um grupo) e `—` é sem
+    acesso. `a` cria um usuário, `espaço` muda os poderes (entra, superusuário, cria bancos, cria
+    papéis) e a senha, `g` os grupos, `c` dá ou tira o acesso a um banco (num `c`, a tela explica
+    de onde ele vem e oferece tirar de lá), `o` troca o dono do banco da coluna, `m` marca vários
+    e `x` remove.
+  - **O rascunho do servidor** é um só, guardado à parte dos rascunhos dos bancos
+    (`canvas/{porta}-servidor/`). Ao aplicar, cada banco roda numa transação, na ordem, e para no
+    primeiro erro: o que já foi feito sai do rascunho, a operação que parou fica marcada
+    "parcial" e o que falta continua lá — é só aplicar de novo.
+  - **A senha só aparece ao aplicar.** O SQL mostrado, o `.sql` salvo e o histórico de aplicados
+    nunca têm senha: no lugar vai um comentário. Ao aplicar, o ratt pede a senha duas vezes, na
+    parte do terminal que a tela deixa, e manda ao servidor só o hash (SCRAM), calculado aqui; o
+    ensaio não pede senha. Atenção: com `log_statement` ligado no servidor, o log dele pode
+    guardar esse **hash** (nunca a senha).
+  - **Remover do jeito certo**: remover um ou vários usuários mostra antes, banco a banco, o que
+    passa para o novo dono (você, ou quem escolher) e o que some junto — os privilégios que
+    outros deram a ele, os que ele repassou, as permissões padrão. Antes de mudar qualquer coisa
+    o ratt confere o servidor de agora e **recusa** se o papel tem sessão aberta, se um banco que
+    não aceita conexão ainda depende dele, ou se há banco que aceita conexão e ficou fora da
+    remoção.
+  - **Travas contra se trancar para fora**: o botão fica desligado, com o motivo, quando a
+    operação tiraria o seu acesso — remover a si mesmo ou o `postgres`, tirar de si o `LOGIN` ou
+    o `SUPERUSER`, deixar o servidor sem superusuário que entra, e também pelo caminho indireto:
+    sair do grupo que dá o `CONNECT`, tirar o `CONNECT` do `PUBLIC` quando é por ele que você
+    entra, trocar o dono do banco em que você está.
+  - **`PUBLIC`**: dar ou tirar o `CONNECT` do `PUBLIC` avisa o que muda para todo mundo; e
+    quando um `REVOKE` não tira o acesso porque outro o concedeu, o ratt diz quem concedeu em
+    vez de fingir que deu certo.
+  - **Falta poder? `sudo`**: remover papéis exige superusuário. Se você não é, ou se o servidor
+    recusa por falta de poder, o ratt mostra o que falta e pergunta `[s/N]` se roda como
+    `postgres` pelo `sudo`, banco por banco; o SQL vai pela entrada do `psql`.
+- **permissões das tabelas pela tela** (`P` no canvas, na tela Dados e na Usuários — nesta, ele
+  pergunta de qual schema): uma grade de papéis por tabelas com as sete letras `S I U D T R t`
+  (select, insert, update, delete, truncate, references, trigger), `dono` para quem é dono, e a
+  linha `PUBLIC` em cima. Só tabelas entram; views e tabelas estrangeiras ficam de fora.
+  - `espaço` abre o formulário de privilégios da célula ou da seleção (conceder e revogar); `l`
+    seleciona a linha do papel, `k` a coluna da tabela e `*` tudo. "Todas" gera a lista das
+    tabelas, nunca `ALL TABLES IN SCHEMA`.
+  - **"Também as tabelas criadas depois"** gera o `ALTER DEFAULT PRIVILEGES FOR ROLE` de quem
+    você é: vale só para as tabelas que **você** criar naquele schema, e a tela avisa.
+  - `s` dá ou tira `USAGE` e `CREATE` do schema. Falta `USAGE`? Um aviso diz que o papel ainda
+    não vai ver as tabelas e oferece dar junto.
+  - O rascunho é o mesmo do canvas e da tela Dados. A grade relê sozinha quando alguém faz
+    `GRANT` ou `REVOKE` por fora. Um papel criado no rascunho do servidor só aparece nela depois
+    de aplicado.
+
 ## 0.10.0
 
 - **os dados pela tela**: `e` no `ratt db` (com a tabela escolhida na árvore) e `v` no canvas

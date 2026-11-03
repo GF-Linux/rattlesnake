@@ -187,6 +187,67 @@ As leituras e checagens da tela (contagens, avisos, a grade) usam comandos prepa
 (*prepared statements*): atrás de um pgbouncer em modo `transaction` elas não funcionam —
 conecte direto no PostgreSQL, ou use o pgbouncer em modo `session`.
 
+### Usuários e permissões (as telas Usuários e Permissões)
+
+Na tela do banco, `u` abre os **usuários do servidor**: quem existe, o que pode fazer, de que
+grupos faz parte e em que bancos entra. Criar, mudar poderes, pôr em grupo, dar ou tirar o acesso
+a um banco, trocar o dono de um banco e remover — tudo sem escrever `CREATE ROLE` nem `GRANT`,
+vendo o SQL que sai.
+
+```
+ ratt db · localhost:5999 › Usuários · rascunho: 0
+ usuário  poderes                  grupos   estudos  fechado (fechado)  sistema
+ PUBLIC                                     —        —                  C
+ ana      entra                    leitura  c        —                  c
+ app      entra                    —        —        D                  D
+ bruno    entra                    meio     c        —                  c
+ carla    entra                    —        —        —                  c
+ jared ●  superusuário             —        D        c                  c
+ leitura  não entra (grupo)        —        C        —                  c
+ meio     não entra (grupo)        leitura  c        —                  c
+ velho    superusuário, não entra  —        c        c                  c
+
+ · todo mundo pode entrar em sistema (PUBLIC) — c numa célula da linha PUBLIC tira
+ · fechado não aceita(m) conexão agora (ALLOW_CONNECTIONS false): ninguém entra, seja qual for a célula
+```
+
+Em cada banco: `D` é o dono, `C` é o `CONNECT` dado direto, `c` é o acesso que vem de outro lugar
+(ser superusuário, o `PUBLIC` ou um grupo) e `—` é sem acesso. A linha `PUBLIC` (todo mundo) e a
+coluna dos nomes ficam à vista quando a grade rola; `●` marca você. As teclas: `a` novo usuário, `espaço` poderes e
+senha, `g` grupos, `c` acesso ao banco (num `c`, explica de onde vem e oferece tirar de lá), `o` dono
+do banco, `m` marca, `x` remove (as marcadas, ou a da linha), `P` as permissões das tabelas,
+`u` desfaz (aqui dentro; na tela do banco ele abre esta), `enter` aplica, `e` ensaia, `w` salva num
+`.sql`, `r` leva o foco ao painel do SQL e `Esc` volta.
+
+`P` (no canvas, na tela Dados e na Usuários) abre as **permissões das tabelas** de um schema: os
+papéis nas linhas, as tabelas nas colunas e as letras `S I U D T R t` (select, insert, update,
+delete, truncate, references, trigger); `dono` marca quem é dono.
+
+```
+ ratt db · estudos › public › Permissões · rascunho: 0
+ schema public: PUBLIC USAGE · app USAGE · jared USAGE, CREATE
+ papel    itens    pedidos  pessoas
+ PUBLIC   ·······  ·······  ·······
+ app      SIUD···  SIUD···  SIUD···
+ jared ●  dono     dono     dono
+ leitura  ·······  ·······  S······
+ S I U D T R t: select insert update delete truncate references trigger
+```
+
+As teclas: `espaço` privilégios (conceder e revogar, na célula ou na seleção; com a opção "também as
+tabelas criadas depois", que vale só para as que **você** criar), `s` `USAGE` e `CREATE` do schema,
+`l` seleciona a linha, `k` a coluna, `*` tudo, `u` desfaz, `enter` aplica, `e` ensaia, `w` salva,
+`r` painel do SQL e `Esc` volta (com uma seleção, o primeiro `Esc` a desfaz). O rascunho é o mesmo
+do canvas e da tela Dados; a tela Usuários tem um rascunho próprio, o do servidor.
+
+**A senha nunca fica no SQL.** O que aparece na tela, no `.sql` salvo e no histórico de aplicados
+tem um comentário no lugar; ao aplicar, o ratt pede a senha (duas vezes) e manda ao servidor só o
+hash SCRAM; o ensaio não pede senha. Com `log_statement` ligado no servidor, o log dele pode
+guardar o **hash** (nunca a senha). As travas impedem o que o deixaria sem entrar no banco (o
+botão fica desligado, com o motivo); remover usuários mostra o que passa ao novo dono e o que
+some, e recusa se o papel tem sessão aberta; se falta poder, o ratt oferece rodar como `postgres`
+pelo `sudo`.
+
 Funciona nas famílias Debian/Ubuntu, Fedora/RHEL e Arch; `ratt db status` diz o que falta e
 `ratt db reset` volta ao antes do setup (com backup e a trava do nome da máquina).
 
