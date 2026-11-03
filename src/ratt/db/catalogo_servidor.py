@@ -31,6 +31,8 @@ def modelo_servidor(conexao, limite_ms: int = _LIMITE_MS) -> ModeloServidor:
     CONNECT do `datacl` (sem `datacl`, o padrão: PUBLIC e o dono entram). Os papéis `pg_*` do PostgreSQL ficam no
     modelo, marcados `sistema` (um deles pode ter CONNECT e passá-lo a quem é membro); as telas os escondem.
     `eu` é o current_user da conexão (o ratt nunca faz SET ROLE, então é o usuário com que ele entrou).
+    Quem deu cada CONNECT (o grantor do `datacl`) e, no 16+, cada pertença (`pg_auth_members.grantor`) vai em
+    `concedido_por`: o rascunho usa para saber o que cai junto quando quem deu é removido.
     `banco_atual` é o banco desta conexão (o current_database()), que as travas não deixam a pessoa perder.
     Herança: no 16+ cada pertença diz (`inherit_option`; `set_option` só para mostrar); até o 15 decide o
     `rolinherit` do membro, para todas as pertenças dele."""
@@ -43,20 +45,25 @@ def modelo_servidor(conexao, limite_ms: int = _LIMITE_MS) -> ModeloServidor:
         versao = linhas[0][-1] if linhas else 0
         if versao >= 160000:
             membros = catalogo.executar(conexao, """
-                SELECT m.member, m.roleid, bool_or(m.inherit_option), bool_or(m.set_option)
+                SELECT m.member, m.roleid, bool_or(m.inherit_option), bool_or(m.set_option),
+                       array_agg(DISTINCT m.grantor ORDER BY m.grantor)
                 FROM pg_auth_members m
                 GROUP BY m.member, m.roleid
                 ORDER BY m.member, m.roleid""").fetchall()
         else:
             membros = catalogo.executar(conexao, """
-                SELECT DISTINCT m.member, m.roleid, r.rolinherit, true
+                SELECT DISTINCT m.member, m.roleid, r.rolinherit, true, '{}'::oid[]
                 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member
                 ORDER BY m.member, m.roleid""").fetchall()
         bancos = catalogo.executar(conexao, """
             SELECT d.oid, d.datname, d.datdba, d.datallowconn, d.datistemplate, d.datname = current_database(),
                    coalesce(array_agg(DISTINCT a.grantee ORDER BY a.grantee)
                             FILTER (WHERE a.grantee <> 0 AND a.privilege_type = 'CONNECT'), '{}'),
-                   coalesce(bool_or(a.grantee = 0 AND a.privilege_type = 'CONNECT'), false)
+                   coalesce(bool_or(a.grantee = 0 AND a.privilege_type = 'CONNECT'), false),
+                   coalesce(array_agg(a.grantee ORDER BY a.grantee, a.grantor)
+                            FILTER (WHERE a.privilege_type = 'CONNECT'), '{}'),
+                   coalesce(array_agg(a.grantor ORDER BY a.grantee, a.grantor)
+                            FILTER (WHERE a.privilege_type = 'CONNECT'), '{}')
             FROM pg_database d
             LEFT JOIN LATERAL aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) a ON true
             GROUP BY d.oid, d.datname, d.datdba, d.datallowconn, d.datistemplate
@@ -68,18 +75,25 @@ def modelo_servidor(conexao, limite_ms: int = _LIMITE_MS) -> ModeloServidor:
                                   sistema=nome.startswith("pg_"))
         if sou_eu:
             eu = f"r{oid}"
-    pertencas: Dict[str, List[Tuple[str, bool, bool]]] = {}
-    for membro, grupo, herda, set_ in membros:
+    pertencas: Dict[str, List[Tuple[str, bool, bool, Tuple[str, ...]]]] = {}
+    for membro, grupo, herda, set_, quem in membros:
         if f"r{membro}" in papeis and f"r{grupo}" in papeis:
-            pertencas.setdefault(f"r{membro}", []).append((f"r{grupo}", herda, set_))
+            pertencas.setdefault(f"r{membro}", []).append((f"r{grupo}", herda, set_, tuple(f"r{x}" for x in quem)))
     for id, ps in pertencas.items():
-        papeis[id].membro_de = tuple(g for g, _, _ in ps)
-        papeis[id].nao_herda = tuple(g for g, herda, _ in ps if not herda)
-        papeis[id].sem_set = tuple(g for g, _, set_ in ps if not set_)
-    modelo_bancos = {
-        f"d{oid}": Banco(f"d{oid}", nome, f"r{dono}", aceita, tuple(f"r{g}" for g in diretos if f"r{g}" in papeis),
-                         publico, template=template)
-        for oid, nome, dono, aceita, template, _, diretos, publico in bancos}
+        papeis[id].membro_de = tuple(g for g, _, _, _ in ps)
+        papeis[id].nao_herda = tuple(g for g, herda, _, _ in ps if not herda)
+        papeis[id].sem_set = tuple(g for g, _, set_, _ in ps if not set_)
+        papeis[id].concedido_por = {g: quem for g, _, _, quem in ps if quem}
+    modelo_bancos = {}
+    for oid, nome, dono, aceita, template, _, diretos, publico, quem_tem, quem_deu in bancos:
+        concedido: Dict[str, Tuple[str, ...]] = {}
+        for tem, deu in zip(quem_tem, quem_deu):
+            chave = "PUBLIC" if tem == 0 else f"r{tem}"
+            if (tem == 0 or chave in papeis) and f"r{deu}" not in concedido.get(chave, ()):
+                concedido[chave] = concedido.get(chave, ()) + (f"r{deu}",)
+        modelo_bancos[f"d{oid}"] = Banco(f"d{oid}", nome, f"r{dono}", aceita,
+                                         tuple(f"r{g}" for g in diretos if f"r{g}" in papeis), publico,
+                                         template=template, concedido_por=concedido)
     atual = next((f"d{linha[0]}" for linha in bancos if linha[5]), None)
     return ModeloServidor(papeis, modelo_bancos, eu, versao, atual)
 

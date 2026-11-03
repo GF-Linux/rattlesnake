@@ -127,11 +127,11 @@ def _sql(op, m):
 def test_sql_de_cada_operacao_com_nomes_citados():
     m = modelo_exemplo()
     novo = Papel("novo-p1", "Ana Maria", True, False, True, False)
-    assert _sql(CriarPapel(novo), m) == [(None, "CREATE ROLE \"Ana Maria\" LOGIN CREATEDB PASSWORD '…'")]
+    assert _sql(CriarPapel(novo), m) == [(None, "CREATE ROLE \"Ana Maria\" LOGIN CREATEDB")]   # nunca senha provisória
     grupo = Papel("novo-p2", "leitores", False, False, False, True, membro_de=("r12",))
     assert _sql(CriarPapel(grupo), m) == [(None, "CREATE ROLE leitores CREATEROLE IN ROLE leitura")]
     assert _sql(MudarPoderes("r16", False, True, False, False), m) == [(None, "ALTER ROLE carla NOLOGIN SUPERUSER")]
-    assert _sql(TrocarSenha("r16"), m) == [(None, "ALTER ROLE carla PASSWORD '…'")]
+    assert _sql(TrocarSenha("r16"), m) == []                        # só em grupos(senhas=…)
     assert _sql(PorNoGrupo("r16", "r12"), m) == [(None, "GRANT leitura TO carla")]
     assert _sql(TirarDoGrupo("r13", "r12"), m) == [(None, "REVOKE leitura FROM ana")]
     assert _sql(DarAcesso("r16", "d1"), m) == [(None, "GRANT CONNECT ON DATABASE estudos TO carla")]
@@ -200,14 +200,17 @@ def test_remover_dois_papeis_em_dois_bancos_gera_as_secoes_da_spec():
     r.acrescentar(MudarPoderes("r16", True, False, True, False))
     op = RemoverPapeis(("r13", "r16"), "r11", ("estudos", "sistema"))
     r.acrescentar(op)
+    # um DROP OWNED por papel: `DROP OWNED BY a, b` falha quando a permissão padrão de um dá algo ao outro
     assert op.comandos(r.base) == [
-        ("estudos", "REASSIGN OWNED BY ana, carla TO app"), ("estudos", "DROP OWNED BY ana, carla"),
-        ("sistema", "REASSIGN OWNED BY ana, carla TO app"), ("sistema", "DROP OWNED BY ana, carla"),
+        ("estudos", "REASSIGN OWNED BY ana, carla TO app"), ("estudos", "DROP OWNED BY ana"),
+        ("estudos", "DROP OWNED BY carla"),
+        ("sistema", "REASSIGN OWNED BY ana, carla TO app"), ("sistema", "DROP OWNED BY ana"),
+        ("sistema", "DROP OWNED BY carla"),
         (None, "ALTER DATABASE da_carla OWNER TO app"), (None, "DROP ROLE ana, carla")]
     assert r.grupos() == [
         (None, "ALTER ROLE carla CREATEDB;"),
-        ("estudos", "REASSIGN OWNED BY ana, carla TO app;\nDROP OWNED BY ana, carla;"),
-        ("sistema", "REASSIGN OWNED BY ana, carla TO app;\nDROP OWNED BY ana, carla;"),
+        ("estudos", "REASSIGN OWNED BY ana, carla TO app;\nDROP OWNED BY ana;\nDROP OWNED BY carla;"),
+        ("sistema", "REASSIGN OWNED BY ana, carla TO app;\nDROP OWNED BY ana;\nDROP OWNED BY carla;"),
         (None, "ALTER DATABASE da_carla OWNER TO app;\nDROP ROLE ana, carla;")]
     texto = r.sql_texto()
     assert texto.index("-- 1.") < texto.index("-- 2.")
@@ -245,7 +248,7 @@ def test_papel_criado_no_rascunho_e_referido_pelo_id():
     r.acrescentar(DarAcesso(i, "d1"))
     assert r.invalidas == set() and r.dependentes(0) == [1, 2]
     assert r.vista().papeis[i].estado == "novo" and r.vista().papeis[i].membro_de == ("r12",)
-    assert r.grupos(senhas={i: HASH})[0][1].startswith("CREATE ROLE ana2 LOGIN PASSWORD 'SCRAM-SHA-256$4096")
+    assert r.grupos(senhas={i: HASH})[0][1].startswith(f"CREATE ROLE ana2 LOGIN;\nALTER ROLE ana2 PASSWORD '{HASH}';")
     r.tirar([0])
     assert r.invalidas == {0, 1}
 
@@ -286,12 +289,15 @@ def test_senha_so_no_aplicar_nunca_no_texto_nem_no_json():
     r.acrescentar(TrocarSenha("r16"))
     r.acrescentar(CriarPapel(Papel(r.novo_id("p"), "grupo2", False, False, False, False)))   # sem LOGIN: sem senha
     texto = r.sql_texto()
-    assert texto.count("PASSWORD '…'") == 2 and texto.count("-- " + rs.t("usu.senha_ao_aplicar")) == 2
+    assert "PASSWORD" not in texto and "…" not in texto              # nem senha provisória, nem marcador
+    assert texto.splitlines()[1:3] == ["CREATE ROLE ana2 LOGIN;", "-- " + rs.t("usu.senha_ao_aplicar", papel="ana2")]
+    assert "\\password carla" in texto and texto.count("\\password") == 2
     g = r.grupos(senhas={i: HASH, "r16": "SCRAM-SHA-256$4096:b3V0cm8=$x:y"})
-    assert g == [(None, f"CREATE ROLE ana2 LOGIN PASSWORD '{HASH}';\n"
+    assert g == [(None, f"CREATE ROLE ana2 LOGIN;\nALTER ROLE ana2 PASSWORD '{HASH}';\n"
                         "ALTER ROLE carla PASSWORD 'SCRAM-SHA-256$4096:b3V0cm8=$x:y';\nCREATE ROLE grupo2;")]
-    assert "…" in r.grupos()[0][1]                                  # sem senhas: o marcador (o ensaio)
     assert HASH not in r.sql_texto() and HASH not in json.dumps(r.para_dict())
+    with pytest.raises(ValueError):
+        r.grupos()                                                  # sem senhas, com papel que pede senha
     with pytest.raises(ValueError):
         r.grupos(senhas={i: HASH})                                  # falta a de carla
     with pytest.raises(ValueError):
@@ -315,7 +321,8 @@ def test_json_ida_e_volta_e_corrompido():
     r.acrescentar(RemoverPapeis(("r15",), "r11", ("estudos", "sistema")))
     d = json.loads(json.dumps(r.para_dict()))
     volta = RascunhoServidor.de_dict(d, m)
-    assert volta.sql_texto() == r.sql_texto() and volta.grupos() == r.grupos()
+    senhas = {i: HASH, "r16": HASH}
+    assert volta.sql_texto() == r.sql_texto() and volta.grupos(senhas) == r.grupos(senhas)
     assert volta.proximo == r.proximo == 2 and volta.invalidas == set()
     assert volta.operacoes[0].papel.membro_de == ("r12",) and volta.operacoes[-1].papeis == ("r15",)
     estragados = [
@@ -474,3 +481,104 @@ def test_trocar_dono_depois_da_remocao_vale_como_roda():
     assert r.grupos() == [(None, "ALTER DATABASE da_carla OWNER TO ana;"),
                           ("da_carla", "REASSIGN OWNED BY carla TO app;\nDROP OWNED BY carla;"),
                           (None, "DROP ROLE carla;")]
+
+
+def test_senha_de_nome_hostil_vai_citada_no_alter_role_e_no_comentario():
+    m = modelo_exemplo()
+    m.papeis["r16"].nome = "c'x\n; DROP ROLE jared; --"
+    r = RascunhoServidor(m)
+    r.acrescentar(TrocarSenha("r16"))
+    assert r.passos()[0][3] == []
+    texto = r.sql_texto()
+    assert len(texto.splitlines()) == 2 and all(ln.startswith("--") for ln in texto.splitlines())
+    g = r.grupos(senhas={"r16": HASH})
+    assert g == [(None, f'ALTER ROLE "c\'x\n; DROP ROLE jared; --" PASSWORD \'{HASH}\';')]
+
+
+def test_por_no_grupo_de_quem_nao_herda_nao_da_o_acesso_do_grupo():
+    """NOINHERIT: a pertença nova não herda (16+: o padrão vem do rolinherit; até o 15, o rolinherit decide)."""
+    m = modelo_exemplo()
+    m.eu, m.banco_atual = "r16", "d2"                               # carla entra em sistema pelo PUBLIC
+    m.papeis["r16"].herda = False
+    m.bancos["d2"].acesso_direto = ("r11", "r12")                   # leitura tem CONNECT em sistema
+    r = RascunhoServidor(m)
+    r.acrescentar(PorNoGrupo("r16", "r12"))
+    assert r.vista().papeis["r16"].nao_herda == ("r12",)
+    with pytest.raises(ValueError) as e:
+        r.acrescentar(TirarAcesso("PUBLIC", "d2"))
+    assert "sistema" in str(e.value)
+    m.papeis["r16"].herda = True                                    # quem herda pode
+    r = RascunhoServidor(m)
+    r.acrescentar(PorNoGrupo("r16", "r12"))
+    r.acrescentar(TirarAcesso("PUBLIC", "d2"))
+
+
+def test_remover_quem_deu_o_connect_tira_o_que_ele_deu_e_a_trava_ve():
+    """adm2 tinha CONNECT com opção de conceder e deu a eu2 (e ao PUBLIC): o DROP OWNED BY adm2 revoga em cascata."""
+    m = modelo_exemplo()
+    m.papeis["r20"] = _papel("r20", "adm2")
+    m.papeis["r21"] = _papel("r21", "eu2")
+    m.bancos["d5"] = Banco("d5", "x2", "r10", True, ("r10", "r20", "r21"), True,
+                           concedido_por={"r10": ("r10",), "r20": ("r10",), "r21": ("r20",), "PUBLIC": ("r20",)})
+    m.eu, m.banco_atual = "r21", "d5"
+    texto = _recusa(m, RemoverPapeis(("r20",), "r10", ("x2",)))
+    assert "x2" in texto
+    m.eu, m.banco_atual = "r10", None
+    r = RascunhoServidor(m)
+    r.acrescentar(RemoverPapeis(("r20",), "r10", ("x2",)))
+    b = r.vista().bancos["d5"]
+    assert b.acesso_direto == ("r10",) and b.publico is False and b.concedido_por == {"r10": ("r10",)}
+    assert servidor.acesso(r.modelo(), "r21", "d5") == "nenhum" and servidor.acesso(r.modelo(), "r16", "d5") == "nenhum"
+
+
+def test_cascata_transitiva_e_quem_tem_outro_concedente_fica():
+    m = modelo_exemplo()
+    m.bancos["d5"] = Banco("d5", "x2", "r10", True, ("r10", "r13", "r15", "r16", "r11"), False,
+                           concedido_por={"r13": ("r16",), "r15": ("r13",), "r11": ("r16", "r10")})
+    r = RascunhoServidor(m)
+    r.acrescentar(RemoverPapeis(("r16",), "r10"))                   # carla deu a ana, que deu a bruno
+    b = r.vista().bancos["d5"]
+    assert b.acesso_direto == ("r10", "r11") and b.concedido_por == {"r11": ("r10",)}   # app tinha também do dono
+
+
+def test_dono_removido_passa_o_que_deu_ao_novo_dono():
+    m = modelo_exemplo()
+    m.bancos["d5"] = Banco("d5", "x2", "r16", True, ("r16", "r13"), False,
+                           concedido_por={"r16": ("r16",), "r13": ("r16",)})
+    r = RascunhoServidor(m)
+    r.acrescentar(RemoverPapeis(("r16",), "r11"))
+    b = r.vista().bancos["d5"]
+    assert b.dono == "r11" and b.acesso_direto == ("r11", "r13") and b.concedido_por == {"r11": ("r11",),
+                                                                                         "r13": ("r11",)}
+
+
+def test_remover_quem_deu_a_pertenca_tira_a_pertenca():
+    """16+: a pertença dada por um papel removido cai (e, em cascata, a que dependia dela)."""
+    m = modelo_exemplo()
+    m.papeis["r16"].membro_de, m.papeis["r16"].concedido_por = ("r12",), {"r12": ("r11",)}   # app deu a carla
+    m.papeis["r11"].membro_de, m.papeis["r11"].concedido_por = ("r12",), {"r12": ("r10",)}
+    m.papeis["r15"].membro_de = ("r14", "r12")
+    m.papeis["r15"].concedido_por = {"r12": ("r16",), "r14": ("r10",)}                       # carla deu a bruno
+    m.eu, m.banco_atual = "r15", "d1"
+    m.papeis["r14"].membro_de = ()                                  # bruno entra em estudos só pela pertença direta
+    texto = _recusa(m, RemoverPapeis(("r11",), "r10"))
+    assert "estudos" in texto
+    m.eu, m.banco_atual = "r10", None
+    r = RascunhoServidor(m)
+    r.acrescentar(RemoverPapeis(("r11",), "r10"))
+    v = r.vista()
+    assert v.papeis["r16"].membro_de == () and v.papeis["r15"].membro_de == ("r14",)
+    assert v.papeis["r15"].concedido_por == {"r14": ("r10",)}
+    assert v.papeis["r13"].membro_de == ("r12",)                    # sem concedido_por: não cai
+
+
+def test_de_dict_avanca_o_proximo_e_acrescentar_recusado_nao_mexe_nos_nomes():
+    d = {"operacoes": [{"tipo": "criar_papel", "papel": {"id": "novo-p5", "nome": "x", "login": False,
+                                                         "superusuario": False, "cria_bancos": False,
+                                                         "cria_papeis": False}}], "proximo": 1}
+    r = RascunhoServidor.de_dict(d, modelo_exemplo())
+    assert r.proximo == 6 and r.novo_id("p") == "novo-p6"
+    op = PorNoGrupo("r13", "r12")                                   # já é membro: recusada
+    with pytest.raises(ValueError):
+        r.acrescentar(op)
+    assert op.nomes == {}

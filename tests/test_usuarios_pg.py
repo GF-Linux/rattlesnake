@@ -225,3 +225,129 @@ def test_banco_servidor_limpa_o_que_o_teste_criou(servidor, banco_servidor):
         assert c.execute("SELECT count(*) FROM pg_database WHERE datname = 'ratt_b2'").fetchone()[0] == 0
         if _ANTES:                                          # o que o teste de cima mudou voltou ao que era
             assert c.execute(_BANCOS_QUE_JA_EXISTIAM).fetchall() == _ANTES
+
+
+# ── o rascunho do servidor aplicado de verdade (grupos) ──
+
+def _conectar_como(servidor, usuario, banco):
+    import psycopg
+    return psycopg.connect(host=servidor.socket_dir, port=servidor.porta, user=usuario, dbname=banco,
+                           autocommit=True, connect_timeout=5)
+
+
+def _aplicar(servidor, r, banco, senhas=None):
+    """Roda `r.grupos(senhas)` como o aplicar fará: cada grupo numa transação, no banco de destino (None: `banco`)."""
+    for destino, texto in r.grupos(senhas):
+        with servidor.conectar(destino or banco) as c:
+            with c.transaction():
+                c.execute(texto)
+
+
+def _por_nome(m):
+    """O modelo por nomes (os ids de papéis novos não batem com os `r{oid}` relidos): papéis com poderes e grupos,
+    bancos com dono, PUBLIC e quem tem CONNECT direto. Sem os `pg_*`."""
+    papeis = {p.nome: (p.login, p.superusuario, p.cria_bancos, p.cria_papeis,
+                       frozenset(m.papeis[g].nome for g in p.membro_de),
+                       frozenset(m.papeis[g].nome for g in p.nao_herda))
+              for p in m.papeis.values() if not p.sistema}
+    bancos = {b.nome: (m.papeis[b.dono].nome, b.publico, frozenset(m.papeis[i].nome for i in b.acesso_direto))
+              for b in m.bancos.values()}
+    return papeis, bancos
+
+
+def test_remover_quem_deu_connect_e_pertenca_igual_ao_postgresql(servidor, banco_servidor):
+    """adm tem CONNECT com opção de conceder e ADMIN em grp; deu CONNECT a eu2 e ao PUBLIC e grp a outro. Remover
+    adm leva tudo isso junto (DROP OWNED em cascata) — o rascunho prevê, a trava vê e o PostgreSQL confirma."""
+    b = banco_servidor
+    with servidor.conectar() as c:
+        for cmd in ("CREATE ROLE adm LOGIN", "CREATE ROLE eu2 LOGIN", "CREATE ROLE grp NOLOGIN",
+                    "CREATE ROLE outro LOGIN", f"REVOKE CONNECT ON DATABASE {b} FROM PUBLIC",
+                    f"GRANT CONNECT ON DATABASE {b} TO adm WITH GRANT OPTION", "GRANT grp TO adm WITH ADMIN OPTION"):
+            c.execute(cmd)
+        c.execute("SET ROLE adm")
+        c.execute(f"GRANT CONNECT ON DATABASE {b} TO eu2")
+        c.execute(f"GRANT CONNECT ON DATABASE {b} TO PUBLIC")
+        c.execute("GRANT grp TO outro")
+        c.execute("RESET ROLE")
+    from ratt.db.rascunho_servidor import RascunhoServidor, RemoverPapeis
+    with _conectar_como(servidor, "eu2", b) as c:              # eu2 entra só pelo que adm deu: a trava recusa
+        m = catalogo_servidor.modelo_servidor(c)
+    adm = m.papel_por_nome("adm")
+    assert m.bancos[m.banco_atual].concedido_por[m.eu] == (adm.id,)
+    bancos = tuple(x.nome for x in m.bancos.values() if x.aceita_conexao)
+    import pytest
+    with pytest.raises(ValueError):
+        RascunhoServidor(m).acrescentar(RemoverPapeis((adm.id,), m.papel_por_nome(servidor.usuario).id, bancos))
+    with servidor.conectar(b) as c:
+        m = catalogo_servidor.modelo_servidor(c)
+    if m.versao >= 160000:
+        assert m.papel_por_nome("outro").concedido_por == {m.papel_por_nome("grp").id: (adm.id,)}
+    r = RascunhoServidor(m)
+    r.acrescentar(RemoverPapeis((adm.id,), m.eu, bancos))
+    previsto = r.modelo()
+    _aplicar(servidor, r, b)
+    with servidor.conectar(b) as c:
+        depois = catalogo_servidor.modelo_servidor(c)
+        for papel in previsto.papeis.values():
+            for banco in previsto.bancos.values():
+                pode = c.execute("SELECT has_database_privilege(%s, %s, 'CONNECT')",
+                                 (papel.nome, banco.nome)).fetchone()[0]
+                assert (_servidor.acesso(previsto, papel.id, banco.id) != "nenhum") == pode, (papel.nome, banco.nome)
+    assert _por_nome(previsto) == _por_nome(depois)
+    assert _servidor.acesso(previsto, previsto.papel_por_nome("eu2").id, previsto.banco_atual) == "nenhum"
+
+
+def test_grupos_de_cada_operacao_aplicados_no_servidor(servidor, banco_servidor):
+    """Cada tipo de operação, com nomes hostis, e uma remoção de dois papéis — um com permissão padrão que dá algo
+    ao outro (`DROP OWNED BY a, b` falharia) — rodados pelo `grupos(senhas=…)`: o catálogo fica como a vista."""
+    b = banco_servidor
+    with servidor.conectar() as c:
+        for cmd in ('CREATE DATABASE "z ;--\'"', 'CREATE ROLE "c""x; --" LOGIN', 'CREATE ROLE "PUBLIC" NOLOGIN',
+                    "CREATE ROLE da LOGIN", "CREATE ROLE db LOGIN", "CREATE ROLE herdeiro LOGIN",
+                    "CREATE DATABASE da_banco OWNER da"):
+            c.execute(cmd)
+    with servidor.conectar(b) as c:
+        for cmd in ("CREATE TABLE public.de_da (i int)", "ALTER TABLE public.de_da OWNER TO da",
+                    "CREATE TABLE public.de_db (i int)", "ALTER TABLE public.de_db OWNER TO db",
+                    "ALTER DEFAULT PRIVILEGES FOR ROLE da GRANT SELECT ON TABLES TO db",
+                    "GRANT SELECT ON public.de_da TO db"):
+            c.execute(cmd)
+    from ratt.db.rascunho_servidor import (CriarPapel, DarAcesso, MudarPoderes, PorNoGrupo, RascunhoServidor,
+                                           RemoverPapeis, TirarAcesso, TirarDoGrupo, TrocarDonoDoBanco, TrocarSenha)
+    with servidor.conectar(b) as c:
+        m = catalogo_servidor.modelo_servidor(c)
+        h1 = c.pgconn.encrypt_password(b"segredo1", 'nó"vo'.encode(), b"scram-sha-256").decode()
+        h2 = c.pgconn.encrypt_password(b"segredo2", 'c"x; --'.encode(), b"scram-sha-256").decode()
+    p = {n: m.papel_por_nome(n).id for n in ('c"x; --', "PUBLIC", "da", "db", "herdeiro")}
+    z = m.banco_por_nome("z ;--'").id
+    r = RascunhoServidor(m)
+    n1, n2 = r.novo_id("p"), r.novo_id("p")
+    cx = p['c"x; --']
+    for op in (CriarPapel(_servidor.Papel(n1, 'nó"vo', True, False, True, True, membro_de=(p["PUBLIC"],))),
+               CriarPapel(_servidor.Papel(n2, "grupo novo", False, False, False, False)),
+               MudarPoderes(cx, True, False, True, False), TrocarSenha(cx), PorNoGrupo(cx, p["PUBLIC"]),
+               PorNoGrupo(n1, n2), TirarDoGrupo(n1, p["PUBLIC"]), DarAcesso(cx, z), DarAcesso(n1, z),
+               TirarAcesso("PUBLIC", z), TirarAcesso(cx, z), TrocarDonoDoBanco(z, n1),
+               RemoverPapeis((p["da"], p["db"]), p["herdeiro"],
+                             tuple(x.nome for x in m.bancos.values() if x.aceita_conexao))):
+        r.acrescentar(op)
+    assert r.invalidas == set()
+    previsto = r.modelo()
+    _aplicar(servidor, r, b, senhas={n1: h1, cx: h2})
+    with servidor.conectar(b) as c:
+        depois = catalogo_servidor.modelo_servidor(c)
+        senhas = dict(c.execute("SELECT rolname, rolpassword FROM pg_authid WHERE rolname = ANY(%s)",
+                                (['nó"vo', 'c"x; --'],)).fetchall())
+        donos = dict(c.execute("SELECT relname, relowner::regrole::text FROM pg_class "
+                               "WHERE relname IN ('de_da', 'de_db')").fetchall())
+        padrao = c.execute("SELECT count(*) FROM pg_default_acl").fetchone()[0]
+    assert senhas == {'nó"vo': h1, 'c"x; --': h2}
+    assert _por_nome(previsto) == _por_nome(depois)
+    assert depois.papel_por_nome("da") is None and depois.papel_por_nome("db") is None
+    assert depois.banco_por_nome("da_banco").dono == depois.papel_por_nome("herdeiro").id
+    assert donos == {"de_da": "herdeiro", "de_db": "herdeiro"} and padrao == 0
+    zz = depois.banco_por_nome("z ;--'")
+    novo = depois.papel_por_nome('nó"vo')
+    assert zz.dono == novo.id and not zz.publico and depois.papel_por_nome('c"x; --').id not in zz.acesso_direto
+    assert novo.login and novo.cria_bancos and novo.cria_papeis
+    assert novo.membro_de == (depois.papel_por_nome("grupo novo").id,)
