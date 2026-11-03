@@ -771,6 +771,8 @@ ratt db user passwd [name]            changes a password (no name: yours)
     "usu.interrompido": {"pt": "interrompido (Ctrl+C)", "en": "interrupted (Ctrl+C)"},
     "usu.ensaio_drop_role": {"pt": "esperado no ensaio: os bancos anteriores foram desfeitos, então o papel ainda tem objetos ({erro})",
                              "en": "expected in a dry run: the previous databases were rolled back, so the role still owns objects ({erro})"},
+    "usu.ensaio_papel_novo": {"pt": "esperado no ensaio: {papel} só existe depois de aplicar (a criação foi desfeita); aqui não deu para conferir o resto ({erro})",
+                              "en": "expected in a dry run: {papel} only exists after applying (its creation was rolled back); the rest could not be checked here ({erro})"},
     "usu.ensaio_fim": {"pt": "ensaio terminado: nada foi gravado", "en": "dry run finished: nothing was written"},
     "usu.gravado_tudo": {"pt": "rascunho do servidor aplicado", "en": "server draft applied"},
     "usu.r.feito": {"pt": "feito em {lotes}", "en": "done in {lotes}"},

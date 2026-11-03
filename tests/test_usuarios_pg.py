@@ -1676,6 +1676,51 @@ def _antes_de(chave, **valores):
     return t(chave, erro="\x00", **valores).split("\x00")[0]
 
 
+def test_ensaio_remover_passando_a_um_papel_criado_no_rascunho(servidor, banco_servidor, monkeypatch, tmp_path):
+    """Criar carlos e remover ana passando tudo a carlos: no ensaio a criação é desfeita, então o REASSIGN … TO carlos
+    de cada banco não acha carlos. É o esperado do ensaio (uma nota por banco), não uma falha, e os bancos seguintes
+    continuam sendo ensaiados — pela conexão e pelo sudo (com o psql de verdade). Nada muda."""
+    import io
+    from contextlib import redirect_stdout
+    from ratt.db.idioma import t
+    from ratt.db.rascunho_servidor import CriarPapel, RemoverPapeis
+    b1 = banco_servidor
+    with servidor.conectar() as c:
+        c.execute("CREATE ROLE ana LOGIN")
+        c.execute("CREATE DATABASE ratt_x1")
+    _objetos_em(servidor, b1, "ana")
+    _objetos_em(servidor, "ratt_x1", "ana")
+    s = _sessao_servidor(servidor, b1, monkeypatch, tmp_path)
+    n = s.rascunho.novo_id("p")
+    s.acrescentar(CriarPapel(_servidor.Papel(n, "carlos", True, False, False, False)))
+    s.acrescentar(RemoverPapeis((s.rascunho.base.papel_por_nome("ana").id,), n, ()))
+    _reabrir(s, servidor, b1)
+    bancos = s.rascunho.operacoes[1].bancos
+    assert {b1, "ratt_x1"} <= set(bancos)
+    antes = s.rascunho.sql_texto(s.cabecalho())
+    nota = _antes_de("usu.ensaio_papel_novo", papel="carlos")
+    conexoes = _Conexoes(servidor)
+    chamadas = []
+    try:
+        for sudo in (False, True):
+            saida = io.StringIO()
+            with redirect_stdout(saida):
+                r = s.aplicar(_conectar_de(conexoes, b1), True, lambda nome: SENHA, como_postgres=sudo,
+                              runner=_psql_no_descartavel(servidor, chamadas) if sudo else None)
+            texto = saida.getvalue()
+            assert r == (0, None, None), texto
+            assert texto.count(nota) == len(bancos), texto              # um por banco: todos foram ensaiados
+            assert _antes_de("usu.ensaio_drop_role") in texto and t("usu.ensaio_fim") in texto
+            assert s.falha is None
+    finally:
+        conexoes.fechar()
+    assert len(chamadas) == 1 + len(bancos) + 1                          # o comum, cada banco e o DROP ROLE
+    assert s.rascunho.sql_texto(s.cabecalho()) == antes
+    assert _donos(servidor, b1) == {"t_ana": "ana"} and _donos(servidor, "ratt_x1") == {"t_ana": "ana"}
+    with servidor.conectar() as c:
+        assert c.execute("SELECT count(*) FROM pg_roles WHERE rolname = 'carlos'").fetchone()[0] == 0
+
+
 def test_ensaio_pelo_sudo_so_desculpa_o_drop_role_que_ainda_ve_objetos(servidor, banco_servidor, monkeypatch,
                                                                        tmp_path):
     """Pelo sudo, o DROP ROLE do fim do ensaio só é "esperado" com o erro de objetos que dependem do papel

@@ -468,6 +468,7 @@ def _sem_segredos(texto: str, segredos: List[str]) -> str:
 
 
 _OBJETOS_DEPENDEM = "2BP01"     # dependent_objects_still_exist: o DROP ROLE que vê objetos; o REVOKE com dependentes
+_NAO_EXISTE = "42704"           # undefined_object: o papel não existe
 
 
 def _erro_pg(erro) -> str:
@@ -737,6 +738,8 @@ class SessaoServidor(_SessaoComDisco):
         rotulos = [destino or t("usu.lote_servidor") for destino, _ in lotes]
         if ensaio:
             print(c(t("usu.ensaio_por_banco"), "cinza"))
+        vista = self.rascunho.vista()
+        criados = {o.papel.id for o in self.rascunho.operacoes if isinstance(o, _rs.CriarPapel)}
         feitos: List[int] = []
         falhou: Optional[Tuple[int, int, str, object]] = None   # (lote, operação, erro, exceção)
         for k, (destino, cmds) in enumerate(lotes):
@@ -760,6 +763,14 @@ class SessaoServidor(_SessaoComDisco):
             if (ensaio and isinstance(op, _rs.RemoverPapeis) and op.bancos and cmds[j][1].startswith("DROP ROLE")
                     and estado == _OBJETOS_DEPENDEM):
                 print(c(f"   ~ {t('usu.ensaio_drop_role', erro=texto_erro)}", "amarelo"))
+                feitos.append(k)
+                continue
+            if (ensaio and isinstance(op, _rs.RemoverPapeis) and estado == _NAO_EXISTE
+                    and op.novo_dono in criados):
+                # o novo dono é criado no próprio rascunho, e o ensaio desfez a criação: o REASSIGN … TO (ou o
+                # ALTER DATABASE … OWNER TO) não o acha. Esperado; segue para os bancos seguintes.
+                print(c(f"   ~ {t('usu.ensaio_papel_novo', papel=vista.papeis[op.novo_dono].nome, erro=texto_erro)}",
+                        "amarelo"))
                 feitos.append(k)
                 continue
             if isinstance(op, (_rs.TirarAcesso, _rs.TirarDoGrupo)) and estado == _OBJETOS_DEPENDEM:
