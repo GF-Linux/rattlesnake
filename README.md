@@ -183,6 +183,10 @@ rascunho é o mesmo do canvas, e o aplicar confere: se um alterar ou apagar pega
 linhas diferente do que você viu, tudo é desfeito e a operação é marcada — salvo quando uma
 operação anterior do próprio rascunho mexe na mesma tabela (aí só mostra "pegou X, você viu Y").
 
+As leituras e checagens da tela (contagens, avisos, a grade) usam comandos preparados
+(*prepared statements*): atrás de um pgbouncer em modo `transaction` elas não funcionam —
+conecte direto no PostgreSQL, ou use o pgbouncer em modo `session`.
+
 Funciona nas famílias Debian/Ubuntu, Fedora/RHEL e Arch; `ratt db status` diz o que falta e
 `ratt db reset` volta ao antes do setup (com backup e a trava do nome da máquina).
 

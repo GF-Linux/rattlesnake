@@ -22,16 +22,19 @@ vê antes de responder `[s/N]`.
   - **WHERE em texto**: `t` abre o `WHERE` para você escrever, começando pelo que o filtro
     montado já gera. Ele precisa ser uma expressão só: é recusado se tiver `;`, comentário ou
     uma barra invertida dentro de `'…'`. Enquanto o filtro está em texto, as condições montadas
-    ficam de lado; voltar a elas pergunta antes.
+    ficam de lado; voltar a elas (ou limpar tudo com `F`) pergunta antes. No painel do SQL, a
+    operação com o filtro em texto vem marcada "WHERE escrito à mão".
   - **Avisos do filtro**: o vazio não é "igual" nem "diferente" de nada, então quem tem vazio
     fica de fora de `=`, `<` e companhia — a tela conta quantas linhas e avisa; "não está na
-    lista" com vazio na lista não pega nada; "contém" em texto com espaço sobrando nas pontas
-    diz quantas linhas não casam por isso.
+    lista" com vazio na lista não pega nada (já "está na lista" com o vazio, `∅`, pega as linhas
+    vazias); "contém" em texto com espaço sobrando nas pontas diz quantas linhas não casam por
+    isso. Clicar numa célula filtra "igual a este valor" — menos em `real`, `double precision` e
+    `interval`, cujo valor mostrado não volta exato (a tela diz por quê).
   - **Inserir**: `i` abre um formulário com um campo por coluna. A chave estrangeira é
     escolhida numa lista das linhas da tabela pai (com busca), sem digitar o número. Coluna
     com valor padrão ou identidade `BY DEFAULT` é opcional: vazio deixa o banco preencher.
     O que não serve para o tipo, o obrigatório vazio e o valor repetido numa coluna única
-    impedem antes de ir para o rascunho. Cada linha inserida é um `INSERT`.
+    avisam (✖) antes de ir para o rascunho. Cada linha inserida é um `INSERT`.
   - **Alterar**: `m` muda as linhas filtradas — para um valor, para vazio, por uma limpeza da
     própria coluna (sem espaços nas pontas, minúsculas, maiúsculas, texto em branco vira vazio)
     ou para o valor de outra coluna. Antes de entrar no rascunho, mostra quantas linhas mudam e
@@ -55,6 +58,8 @@ vê antes de responder `[s/N]`.
     No ensaio, cada um mostra "pegou X, você viu Y". No aplicar, se o número for outro, tudo é
     desfeito e a operação fica marcada: o banco mudou desde que você olhou — salvo quando uma
     operação anterior do próprio rascunho mexe na mesma tabela; aí só mostra "pegou X (você viu Y)".
+    A confirmação do aplicar lista no alto, com o que apaga, cada alterar, apagar e duplicatas
+    com quantas linhas você viu (ou "não contado").
 - corrigido (da 0.9.0): ligar uma coluna nova ou criar um N:N com uma chave primária de tipo
   próprio (enum, domínio) agora funciona; mover uma caixa no modo foco guarda a posição; `F`,
   num schema grande, pergunta antes e desenha em segundo plano, sem travar a tela.
