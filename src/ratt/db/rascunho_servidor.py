@@ -603,6 +603,18 @@ def linhas_dos_comandos(cmds: Comandos) -> List[str]:
     return linhas
 
 
+def psql_connect(banco: str) -> str:
+    """A linha `\\connect` do psql que entra em `banco`, citada como o psql pede: entre aspas simples (uma aspa
+    vira duas; a barra invertida e as quebras de linha vão como escapes, que o psql desfaz). Um nome com `=` ou
+    `://` (ou só `-`) o psql leria como texto de conexão (ou "o de antes"): vai como `dbname='…'`, citado do jeito
+    da libpq. `-reuse-previous=on`: servidor, porta e usuário continuam os da conexão de antes."""
+    alvo = banco
+    if "=" in banco or "://" in banco or banco == "-":
+        alvo = "dbname='" + banco.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    citado = (alvo.replace("\\", "\\\\").replace("'", "''").replace("\n", "\\n").replace("\r", "\\r"))
+    return f"\\connect -reuse-previous=on '{citado}'"
+
+
 # ── de e para o disco ──
 
 def _tipo_certo(valor, tipo: str) -> bool:
@@ -902,6 +914,46 @@ class RascunhoServidor:
 
     def sql_texto(self, cabecalho: str = "") -> str:
         linhas, _ = self._linhas(cabecalho)
+        return "\n".join(linhas) + ("\n" if linhas else "")
+
+    def notas(self) -> List[Optional[str]]:
+        """Para cada operação, na ordem do rascunho, a linha de comentário que vai depois dos comandos dela (sem o
+        `-- `): a da senha pedida ao aplicar. None: nenhuma. O painel mostra o mesmo que o texto SQL."""
+        _, _, _, de_quem = self._percorrer()
+        return [None if quem is None else _linha(t("usu.senha_ao_aplicar", papel=ident(quem))) for quem in de_quem]
+
+    def sql_psql(self, cabecalho: str, banco_atual: str) -> str:
+        """O texto SQL para rodar inteiro com um `psql -f`: o mesmo de `sql_texto`, com um `\\connect` antes de cada
+        grupo de comandos que roda noutro banco (os do servidor, de qualquer banco, rodam em `banco_atual`, o da
+        tela). Sem senha nenhuma, como o resto."""
+        linhas: List[str] = []
+        if cabecalho:
+            cab = _linha(cabecalho)
+            linhas.append(cab if cab.startswith("--") else "-- " + cab)
+        _, passos, _, de_quem = self._percorrer()
+        conectado: Optional[str] = None
+        vazio = True
+        for i in self._ordem():
+            op, valida, desc, cmds = passos[i]
+            if not valida:
+                continue
+            if not vazio:
+                linhas.append("")
+            vazio = False
+            linhas.append(f"-- {i + 1}. {desc}")
+            por_banco = any(destino is not None for destino, _ in cmds)
+            for destino, grupo in _agrupar(cmds):
+                alvo = destino if destino is not None else banco_atual
+                if alvo != conectado:
+                    linhas.append(psql_connect(alvo))
+                    conectado = alvo
+                if por_banco:
+                    onde = t("usu.no_servidor") if destino is None else t("usu.no_banco", banco=destino)
+                    linhas.append("-- " + _linha(onde))
+                for cmd in grupo:
+                    linhas.extend((cmd + ";").split("\n"))
+            if de_quem[i] is not None:
+                linhas.append("-- " + _linha(t("usu.senha_ao_aplicar", papel=ident(de_quem[i]))))
         return "\n".join(linhas) + ("\n" if linhas else "")
 
     def linhas_das_operacoes(self, cabecalho: str = "") -> List[int]:

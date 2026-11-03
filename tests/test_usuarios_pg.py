@@ -1341,3 +1341,194 @@ def test_papel_removido_no_servidor_invalida_a_operacao_no_rebase(servidor, banc
     assert r.rebase(catalogo.modelo(c, "public")) == {0, 1}
     admin.close()
     c.close()
+
+
+# ── Task 6: a tela Usuários ──
+
+def _entrar_no_descartavel(monkeypatch, servidor):
+    """`acesso.entrar` vai SÓ ao servidor descartável (pelo socket da pasta dele): nada da tela toca o PostgreSQL
+    da pessoa."""
+    from ratt.db import acesso
+
+    def entrar(porta, usuario, banco="postgres"):
+        assert porta == servidor.porta
+        try:
+            return servidor.conectar(banco), "s.como_socket"
+        except Exception:
+            return None, None
+    monkeypatch.setattr(acesso, "entrar", entrar)
+
+
+def test_assinatura_do_servidor_muda_com_papel_pertenca_e_banco(servidor, banco_servidor):
+    b1 = banco_servidor
+    with servidor.conectar(b1) as c:
+        a0 = catalogo_servidor.assinatura(c)
+        assert catalogo_servidor.assinatura(c) == a0
+        with servidor.conectar() as admin:
+            admin.execute("CREATE ROLE ratt_sig_a LOGIN")
+        a1 = catalogo_servidor.assinatura(c)
+        with servidor.conectar() as admin:
+            admin.execute("CREATE ROLE ratt_sig_g; GRANT ratt_sig_g TO ratt_sig_a")
+        a2 = catalogo_servidor.assinatura(c)
+        with servidor.conectar() as admin:
+            admin.execute(sql.SQL("REVOKE CONNECT ON DATABASE {} FROM PUBLIC").format(sql.Identifier(b1)))
+        a3 = catalogo_servidor.assinatura(c)
+        assert len({a0, a1, a2, a3}) == 4
+
+
+def test_assinatura_do_banco_sem_papeis_nao_muda_com_um_papel_novo(servidor, banco_servidor):
+    """A tela do `ratt db` não relê nem avisa "o banco mudou" quando só os papéis mudam (o canvas e a tela Dados
+    continuam vendo: um papel renomeado invalida permissões no rascunho do schema)."""
+    with servidor.conectar(banco_servidor) as c:
+        sem, com = catalogo.assinatura(c, papeis=False), catalogo.assinatura(c)
+        with servidor.conectar() as admin:
+            admin.execute("CREATE ROLE ratt_sig_b")
+        assert catalogo.assinatura(c, papeis=False) == sem and catalogo.assinatura(c) != com
+
+
+def test_u_na_tela_do_banco_abre_usuarios_e_papel_novo_nao_avisa(servidor, banco_servidor, monkeypatch, tmp_path):
+    import asyncio
+    from conftest import esperar_que, esperar_workers
+    from ratt.db import tela_usuarios
+    from ratt.db.tela import TelaBanco
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "dados"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    _entrar_no_descartavel(monkeypatch, servidor)
+    with servidor.conectar() as admin:
+        admin.execute("CREATE ROLE ratt_u_ana LOGIN")
+
+    async def roteiro():
+        app = TelaBanco(servidor.porta, servidor.usuario, banco_servidor)
+        async with app.run_test(size=(140, 44)) as piloto:
+            await esperar_que(piloto, lambda: app.marca is not None)
+            await esperar_workers(app)
+            marca = app.marca
+            with servidor.conectar() as admin:
+                admin.execute("CREATE ROLE ratt_u_bruno")
+            app.vigiar()
+            await esperar_workers(app)
+            assert app.marca == marca                   # um papel novo não é "o banco mudou"
+            await piloto.press("u")
+            await esperar_que(piloto, lambda: isinstance(app.screen, tela_usuarios.TelaUsuarios) and app.screen.carregado)
+            tela = app.screen
+            await esperar_workers(app)
+            nomes = [tela.linha_id(i) for i in range(tela.query_one("#usu_grade").row_count)]
+            m = tela.sessao.rascunho.base
+            assert m.papel_por_nome("ratt_u_ana").id in nomes and m.papel_por_nome("ratt_u_bruno").id in nomes
+            assert nomes[0] == "PUBLIC"
+            await piloto.press("u")                     # dentro da tela, u é desfazer: não abre outra
+            await piloto.pause()
+            assert sum(isinstance(s, tela_usuarios.TelaUsuarios) for s in app.screen_stack) == 1
+            await piloto.press("escape")
+            await esperar_que(piloto, lambda: app.screen is app.screen_stack[0])
+    asyncio.run(roteiro())
+
+
+def test_tela_usuarios_cria_ana_e_aplica_pela_tela(servidor, banco_servidor, monkeypatch, tmp_path):
+    """Pela tela: a cria ana no formulário, Enter abre a confirmação, sim aplica (a parte suspensa trocada por uma
+    sem terminal, com a senha falsa); ana existe no servidor e a grade passa a mostrá-la como papel de verdade."""
+    import asyncio
+    from contextlib import contextmanager
+    from textual.app import App
+    from conftest import esperar_que, esperar_tela, esperar_workers, saida_presa
+    from ratt.db import formularios, formularios_usuarios as fu, painel, tela_usuarios
+    b1 = banco_servidor
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "dados"))
+    _entrar_no_descartavel(monkeypatch, servidor)
+    pedidas = []
+
+    def sessao_sem_terminal(self, conectar, ensaio, cabecalho, confirmado):
+        def senha(nome):
+            pedidas.append(nome)
+            return SENHA
+        return painel.aplicar_servidor(self.sessao, conectar, ensaio, senha, lambda p: False,
+                                       confirmado=confirmado, cabecalho=cabecalho)
+
+    @contextmanager
+    def sem_suspender(self):
+        yield
+
+    monkeypatch.setattr(App, "suspend", sem_suspender)
+    monkeypatch.setattr(tela_usuarios.TelaUsuarios, "_sessao_servidor", sessao_sem_terminal)
+
+    class AppTeste(App):
+        def on_mount(self):
+            tela = tela_usuarios.TelaUsuarios(tela_usuarios.FonteServidor(servidor.porta, servidor.usuario, b1))
+            tela.VIGIA_SEGUNDOS = 0
+            self.push_screen(tela)
+
+    async def roteiro():
+        app = AppTeste()
+        async with app.run_test(size=(140, 44)) as piloto:
+            await esperar_que(piloto, lambda: isinstance(app.screen, tela_usuarios.TelaUsuarios) and app.screen.carregado)
+            tela = app.screen
+            await esperar_workers(app)
+            await piloto.press("a")
+            await esperar_que(piloto, lambda: isinstance(app.screen, fu.FormNovoUsuario))
+            await esperar_tela(piloto, app.screen)
+            for tecla in "ana":
+                await piloto.press(tecla)
+            await esperar_workers(app)
+            await piloto.click("#por_no_rascunho")
+            await esperar_que(piloto, lambda: app.screen is tela)
+            plano = tela.query_one(painel.PainelSQL).texto_plano()
+            assert "CREATE ROLE ana LOGIN;" in plano and "PASSWORD" not in plano
+            await piloto.press("enter")
+            await esperar_que(piloto, lambda: isinstance(app.screen, formularios.Confirmar))
+            await esperar_tela(piloto, app.screen)
+            with saida_presa():
+                await piloto.click("#sim")
+                await esperar_que(piloto, lambda: not tela.sessao.aplicando and tela.sessao.rascunho.operacoes == []
+                                  and tela.sessao.rascunho.base.papel_por_nome("ana") is not None, limite=10)
+            await esperar_workers(app)
+            ana = tela.sessao.rascunho.base.papel_por_nome("ana")
+            assert ana.id.startswith("r")
+            i = [tela.linha_id(k) for k in range(tela.query_one("#usu_grade").row_count)].index(ana.id)
+            rotulo = tela.query_one("#usu_grade").get_row_at(i)[0].plain
+            assert "ana" in rotulo and not rotulo.startswith("+")
+            assert pedidas == ["ana"]
+    asyncio.run(roteiro())
+    with servidor.conectar() as c:
+        assert c.execute("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'ana'").fetchone() == (True,)
+    _sem_segredo_no_disco(tmp_path / "dados")
+
+
+def test_sql_exportado_do_servidor_roda_inteiro_num_psql_so(servidor, banco_servidor, tmp_path):
+    """O `.sql` exportado roda como está, com um `psql -f`: os `\\connect` trocam de banco (nomes hostis, um com
+    `=`), sem senha nenhuma no arquivo."""
+    import shutil
+    import subprocess
+    import pytest
+    from conftest import _binario_pg
+    from ratt.db.rascunho_servidor import CriarPapel, RascunhoServidor, RemoverPapeis
+    psql = _binario_pg("psql")
+    if not psql:
+        pytest.skip("sem psql instalado")
+    b1 = banco_servidor
+    hostis = ["z ;--'", "a=b \\x"]
+    with servidor.conectar() as admin:
+        for nome in hostis:
+            admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(nome)))
+        admin.execute("CREATE ROLE bruno LOGIN")
+    for nome in hostis + [b1]:
+        _objetos_em(servidor, nome, "bruno")
+    with servidor.conectar(b1) as c:
+        m = catalogo_servidor.modelo_servidor(c)
+    r = RascunhoServidor(m)
+    n = r.novo_id("p")
+    r.acrescentar(CriarPapel(_servidor.Papel(n, "ana", True, False, False, False)))
+    bancos = tuple(b.nome for b in m.bancos.values() if b.aceita_conexao)
+    r.acrescentar(RemoverPapeis((m.papel_por_nome("bruno").id,), m.eu, bancos))
+    texto = r.sql_psql("-- teste", b1)
+    assert "PASSWORD" not in texto
+    arquivo = tmp_path / "servidor.sql"
+    arquivo.write_text(texto, encoding="utf-8")
+    p = subprocess.run([psql, "-X", "-q", "-h", servidor.socket_dir, "-p", str(servidor.porta), "-U", servidor.usuario,
+                        "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-f", str(arquivo)],
+                       capture_output=True, text=True, timeout=60)
+    assert p.returncode == 0, p.stderr
+    with servidor.conectar() as c:
+        assert c.execute("SELECT count(*) FROM pg_roles WHERE rolname IN ('ana', 'bruno')").fetchone()[0] == 1
+        assert c.execute("SELECT rolname FROM pg_roles WHERE rolname = 'ana'").fetchone() == ("ana",)
+    for nome in hostis + [b1]:
+        assert _donos(servidor, nome) == {"t_bruno": servidor.usuario}

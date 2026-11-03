@@ -1276,3 +1276,382 @@ def test_aviso_revogar_de_si_mesmo_ou_do_public_quando_e_por_ele():
     assert _chaves(avisos) == [("atencao", "chk.perm_revogar_si", "PUBLIC")]
     avisos = _checagem.avisos_da_operacao(PermissaoNoSchema("r1", None, False), r, c)
     assert _chaves(avisos) == [("atencao", "chk.perm_revogar_si", "r1")]
+
+
+# ── Task 6: a tela Usuários (fonte falsa: o modelo do servidor fixo) ──
+
+import asyncio
+import threading
+
+from conftest import esperar_que, esperar_tela, esperar_workers
+
+from ratt.db.idioma import t
+
+
+class FonteServidorFalsa:
+    """O servidor de mentira da tela Usuários: o modelo fixo, a assinatura que o teste muda, os avisos pela
+    checagem de verdade sem entrar em banco nenhum (`conectar` dá None: "não verificado"). `segurar` faz os avisos
+    esperarem o teste soltar."""
+
+    def __init__(self, m):
+        self.m = m
+        self.porta, self.usuario, self.banco = 5999, "jared", "estudos"
+        self.sig = 1
+        self.segurar = None             # threading.Event: os avisos só voltam quando ele é posto
+        self.fechada = False
+
+    def assinatura(self):
+        return self.sig
+
+    def modelo(self):
+        return self.m.copia()
+
+    def avisos(self, op, r):
+        if self.segurar is not None:
+            self.segurar.wait(5)
+        return cs.avisos_da_operacao_servidor(op, r, lambda nome: None)
+
+    def fechar(self):
+        self.fechada = True
+
+
+def _app_usuarios(fonte):
+    from textual.app import App
+    from ratt.db import tela_usuarios
+
+    class AppUsuarios(App):
+        def on_mount(self):
+            tela = tela_usuarios.TelaUsuarios(fonte)
+            tela.VIGIA_SEGUNDOS = 0
+            self.push_screen(tela)
+    return AppUsuarios()
+
+
+async def _usuarios_pronta(app):
+    from ratt.db import tela_usuarios
+    await esperar_que(app._piloto, lambda: isinstance(app.screen, tela_usuarios.TelaUsuarios) and app.screen.carregado)
+    await esperar_workers(app)
+
+
+def _grade_texto(tela):
+    """A grade como texto: {nome da linha: [células]} (o nome sem as marcas da frente)."""
+    from ratt.db.grade_dados import Grade
+    grade = tela.query_one(Grade)
+    linhas = {}
+    for i in range(grade.row_count):
+        celulas = [c.plain if hasattr(c, "plain") else str(c) for c in grade.get_row_at(i)]
+        linhas[celulas[0].lstrip("+−▪● ").split(" ")[0]] = celulas
+    return linhas
+
+
+def _texto(widget):
+    """O texto de um Static: Text, Syntax (o SQL) ou o que for."""
+    c = widget.content
+    return getattr(c, "plain", None) or getattr(c, "code", None) or str(c)
+
+
+def _modelo_com_banco_atual():
+    m = modelo_exemplo()
+    m.banco_atual = "d1"
+    return m
+
+
+def test_tela_usuarios_grade_mostra_d_c_c_traco_e_a_linha_public(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    fonte = FonteServidorFalsa(_modelo_com_banco_atual())
+
+    async def roteiro():
+        app = _app_usuarios(fonte)
+        async with app.run_test(size=(140, 40)) as piloto:
+            app._piloto = piloto
+            await _usuarios_pronta(app)
+            tela = app.screen
+            g = _grade_texto(tela)
+            bancos = [tela.query_one("#usu_grade").ordered_columns[k].label.plain.split()[0] for k in range(3, 6)]
+            assert bancos == ["estudos", "fechado", "sistema"]
+            assert g["PUBLIC"][3:] == ["—", "—", "C"]
+            assert g["jared"][3:] == ["D", "c", "c"]          # dono de estudos; nos outros, por ser superusuário
+            assert g["app"][3:] == ["—", "D", "D"]
+            assert g["leitura"][3:] == ["C", "—", "c"]        # CONNECT direto em estudos; PUBLIC em sistema
+            assert g["ana"][3:] == ["c", "—", "c"]            # pelo grupo leitura
+            assert g["bruno"][3:] == ["c", "—", "c"]          # bruno → meio → leitura
+            assert g["carla"][3:] == ["—", "—", "c"]
+            assert g["jared"][1] == t("usu.p.super") and g["leitura"][1] == t("usu.p.nao_entra_grupo")
+            assert g["ana"][2] == "leitura" and g["carla"][2] == "—"
+            assert "●" in tela.query_one("#usu_grade").get_row_at(
+                list(g).index("jared"))[0].plain                # a pessoa
+            assert list(g)[0] == "PUBLIC" and tela.query_one("#usu_grade").fixed_rows == 1
+            assert "sistema" in _texto(tela.query_one("#usu_avisos"))    # PUBLIC entra em sistema
+            titulo = _texto(tela.query_one("#usu_titulo"))
+            assert "localhost:5999" in titulo and t("usu.titulo") in titulo
+    asyncio.run(roteiro())
+
+
+def test_tela_usuarios_criar_usuario_pelo_formulario_sem_senha_no_sql(monkeypatch, tmp_path):
+    from ratt.db import formularios_usuarios as fu
+    from ratt.db.painel import PainelSQL
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    fonte = FonteServidorFalsa(_modelo_com_banco_atual())
+
+    async def roteiro():
+        app = _app_usuarios(fonte)
+        async with app.run_test(size=(140, 44)) as piloto:
+            app._piloto = piloto
+            await _usuarios_pronta(app)
+            tela = app.screen
+            await piloto.press("a")
+            await esperar_que(piloto, lambda: isinstance(app.screen, fu.FormNovoUsuario))
+            form = app.screen
+            await esperar_tela(piloto, form)
+            for tecla in "dora":
+                await piloto.press(tecla)
+            await esperar_workers(app)
+            assert "CREATE ROLE dora LOGIN;" in _texto(form.query_one("#form_sql"))
+            await piloto.click("#por_no_rascunho")
+            await esperar_que(piloto, lambda: app.screen is tela)
+            ops = tela.sessao.rascunho.operacoes
+            assert len(ops) == 1 and isinstance(ops[0], CriarPapel) and ops[0].papel.nome == "dora" and ops[0].papel.login
+            plano = tela.query_one(PainelSQL).texto_plano()
+            assert "CREATE ROLE dora LOGIN;" in plano
+            assert t("usu.senha_ao_aplicar", papel="dora") in plano and "PASSWORD" not in plano
+            g = _grade_texto(tela)
+            assert "dora" in g and tela.query_one("#usu_grade").get_row_at(list(g).index("dora"))[0].plain.startswith("+")
+            caminho = tmp_path / "srv.sql"
+            tela._gravar_exportado(caminho)
+            texto = caminho.read_text(encoding="utf-8")
+            assert "CREATE ROLE dora LOGIN;" in texto and "PASSWORD" not in texto and "\\connect -reuse-previous=on 'estudos'" in texto
+    asyncio.run(roteiro())
+
+
+def test_tela_usuarios_trava_deixa_o_botao_desligado_com_o_motivo(monkeypatch, tmp_path):
+    from textual.widgets import Button
+    from ratt.db import formularios_usuarios as fu
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    fonte = FonteServidorFalsa(_modelo_com_banco_atual())
+
+    async def roteiro():
+        app = _app_usuarios(fonte)
+        async with app.run_test(size=(140, 44)) as piloto:
+            app._piloto = piloto
+            await _usuarios_pronta(app)
+            tela = app.screen
+            tela.ir_para("r10")                             # a própria linha (jared)
+            await piloto.press("x")
+            await esperar_que(piloto, lambda: isinstance(app.screen, fu.ConfirmarRemocao))
+            form = app.screen
+            await esperar_tela(piloto, form)
+            await esperar_workers(app)
+            assert form.query_one("#por_no_rascunho", Button).disabled
+            assert t("usu.trava.remover_si") in _texto(form.query_one("#erro"))
+            await piloto.click("#por_no_rascunho")
+            assert app.screen is form and tela.sessao.rascunho.operacoes == []
+            await piloto.press("escape")
+            # tirar de si o SUPERUSER pelo formulário de poderes: também recusa, com o motivo
+            await esperar_que(piloto, lambda: app.screen is tela)
+            await piloto.press("space")
+            await esperar_que(piloto, lambda: isinstance(app.screen, fu.FormPoderes))
+            form = app.screen
+            await esperar_tela(piloto, form)
+            form.query_one("#super").value = False
+            await esperar_workers(app)
+            await piloto.pause()
+            assert form.query_one("#por_no_rascunho", Button).disabled
+            assert t("usu.trava.proprio_super") in _texto(form.query_one("#erro"))
+    asyncio.run(roteiro())
+
+
+def test_tela_usuarios_remover_dois_marcados_confirma_com_foco_no_cancelar(monkeypatch, tmp_path):
+    from textual.widgets import Button
+    from ratt.db import formularios_usuarios as fu
+    from ratt.db.rascunho_servidor import RemoverPapeis
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    fonte = FonteServidorFalsa(_modelo_com_banco_atual())
+    fonte.segurar = threading.Event()
+
+    async def roteiro():
+        app = _app_usuarios(fonte)
+        async with app.run_test(size=(140, 44)) as piloto:
+            app._piloto = piloto
+            await _usuarios_pronta(app)
+            tela = app.screen
+            tela.ir_para("r13")
+            await piloto.press("m")
+            tela.ir_para("r16")
+            await piloto.press("m")
+            assert tela.marcados == {"r13", "r16"}
+            await piloto.press("x")
+            await esperar_que(piloto, lambda: isinstance(app.screen, fu.ConfirmarRemocao))
+            form = app.screen
+            await esperar_tela(piloto, form)
+            assert app.focused is form.query_one("#cancelar", Button)
+            assert form.query_one("#por_no_rascunho", Button).disabled      # os avisos ainda não chegaram
+            fonte.segurar.set()
+            await esperar_que(piloto, lambda: not form.contando)
+            await esperar_workers(app)
+            assert not form.query_one("#por_no_rascunho", Button).disabled
+            assert t("chk.nao_verificado", banco="estudos") in _texto(form.query_one("#form_avisos"))
+            await piloto.click("#por_no_rascunho")
+            await esperar_que(piloto, lambda: app.screen is tela)
+            ops = tela.sessao.rascunho.operacoes
+            assert len(ops) == 1 and isinstance(ops[0], RemoverPapeis)
+            assert set(ops[0].papeis) == {"r13", "r16"} and ops[0].novo_dono == "r10"      # o padrão: a pessoa
+            assert tela.marcados == set()
+    asyncio.run(roteiro())
+
+
+def test_tela_usuarios_c_herdado_explica_e_oferece_tirar_do_public_ou_do_grupo(monkeypatch, tmp_path):
+    from ratt.db import formularios_usuarios as fu
+    from ratt.db.rascunho_servidor import TirarAcesso, TirarDoGrupo
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    fonte = FonteServidorFalsa(_modelo_com_banco_atual())
+
+    async def roteiro():
+        app = _app_usuarios(fonte)
+        async with app.run_test(size=(140, 44)) as piloto:
+            app._piloto = piloto
+            await _usuarios_pronta(app)
+            tela = app.screen
+            # ana entra em estudos pelo grupo leitura: c explica e oferece tirá-la do grupo
+            tela.ir_para("r13", "d1")
+            await piloto.press("c")
+            await esperar_que(piloto, lambda: isinstance(app.screen, fu.ExplicarAcesso))
+            form = app.screen
+            await esperar_tela(piloto, form)
+            assert "leitura" in _texto(form.query_one("#explica_origens"))
+            await piloto.click("#oferta_0")
+            await esperar_que(piloto, lambda: app.screen is tela)
+            ops = tela.sessao.rascunho.operacoes
+            assert len(ops) == 1 and isinstance(ops[0], TirarDoGrupo) and (ops[0].papel, ops[0].grupo) == ("r13", "r12")
+            # carla entra em sistema pelo PUBLIC: a oferta é tirar do PUBLIC
+            tela.ir_para("r16", "d2")
+            await piloto.press("c")
+            await esperar_que(piloto, lambda: isinstance(app.screen, fu.ExplicarAcesso))
+            form = app.screen
+            await esperar_tela(piloto, form)
+            assert "PUBLIC" in _texto(form.query_one("#explica_origens"))
+            await piloto.click("#oferta_0")
+            await esperar_que(piloto, lambda: app.screen is tela)
+            assert isinstance(tela.sessao.rascunho.operacoes[-1], TirarAcesso)
+            assert tela.sessao.rascunho.operacoes[-1].alvo == "PUBLIC"
+            # C (direto) tira na hora; — dá na hora; D só explica
+            tela.ir_para("r12", "d1")
+            await piloto.press("c")
+            assert isinstance(tela.sessao.rascunho.operacoes[-1], TirarAcesso)
+            n = len(tela.sessao.rascunho.operacoes)
+            tela.ir_para("r10", "d1")
+            await piloto.press("c")
+            assert len(tela.sessao.rascunho.operacoes) == n and app.screen is tela
+            await piloto.press("u")                         # dentro da tela, u desfaz
+            assert len(tela.sessao.rascunho.operacoes) == n - 1
+    asyncio.run(roteiro())
+
+
+def test_tela_usuarios_c_que_trancaria_a_pessoa_e_recusado_com_o_motivo(monkeypatch, tmp_path):
+    """jared deixa de ser superusuário no modelo e entra em sistema só pelo PUBLIC (banco atual): tirar o PUBLIC
+    pela explicação tem o botão desligado, com o motivo."""
+    from textual.widgets import Button
+    from ratt.db import formularios_usuarios as fu
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    m = modelo_exemplo()
+    m.papeis["r10"].superusuario = False
+    m.banco_atual = "d2"
+    fonte = FonteServidorFalsa(m)
+
+    async def roteiro():
+        app = _app_usuarios(fonte)
+        async with app.run_test(size=(140, 44)) as piloto:
+            app._piloto = piloto
+            await _usuarios_pronta(app)
+            tela = app.screen
+            tela.ir_para("r10", "d2")
+            await piloto.press("c")
+            await esperar_que(piloto, lambda: isinstance(app.screen, fu.ExplicarAcesso))
+            form = app.screen
+            await esperar_tela(piloto, form)
+            assert form.query_one("#oferta_0", Button).disabled
+            assert t("usu.trava.sem_entrar", banco="sistema") in _texto(form.query_one("#explica_origens"))
+    asyncio.run(roteiro())
+
+
+def test_tela_usuarios_80x24_com_15_bancos_rola_e_mostra_public_e_painel(monkeypatch, tmp_path):
+    from textual.geometry import Region
+    from ratt.db.grade_dados import Grade
+    from ratt.db.painel import PainelSQL
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    m = modelo_exemplo()
+    for k in range(4, 19):                              # 15 bancos a mais
+        m.bancos[f"d{k}"] = Banco(f"d{k}", f"banco_{k:02d}", "r11", True, ("r11",), k % 2 == 0)
+    for k in range(30, 42):                             # e mais papéis que cabem na altura
+        m.papeis[f"r{k}"] = _papel(f"r{k}", f"pessoa_{k}")
+    m.banco_atual = "d1"
+    fonte = FonteServidorFalsa(m)
+
+    def visivel(grade):
+        return "\n".join("".join(s.text for s in linha)
+                         for linha in grade.render_lines(Region(0, 0, grade.size.width, grade.size.height)))
+
+    async def roteiro():
+        app = _app_usuarios(fonte)
+        async with app.run_test(size=(80, 24)) as piloto:
+            app._piloto = piloto
+            await _usuarios_pronta(app)
+            tela = app.screen
+            tela.ir_para("r10")
+            await piloto.press("o")                         # sem coluna de banco: só avisa
+            await piloto.pause()
+            grade = tela.query_one(Grade)
+            painel = tela.query_one(PainelSQL)
+            assert grade.size.height >= 4 and painel.region.height >= 1
+            assert painel.region.bottom <= 23               # acima do rodapé
+            assert grade.max_scroll_x > 0 and grade.max_scroll_y > 0
+            grade.move_cursor(row=grade.row_count - 1, column=len(grade.columns) - 1)
+            await piloto.pause()
+            await piloto.pause()
+            assert grade.scroll_x > 0 and grade.scroll_y > 0
+            texto = visivel(grade)
+            assert "PUBLIC" in texto                        # a linha fixa no alto
+            assert "velho" in texto                         # a última linha; o nome fica (coluna fixa) rolado à direita
+            assert "banco_18" in texto
+    asyncio.run(roteiro())
+
+
+def test_tela_usuarios_vigia_rebase_quando_o_servidor_muda(monkeypatch, tmp_path):
+    from ratt.db.rascunho_servidor import DarAcesso
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    fonte = FonteServidorFalsa(_modelo_com_banco_atual())
+
+    async def roteiro():
+        app = _app_usuarios(fonte)
+        async with app.run_test(size=(140, 40)) as piloto:
+            app._piloto = piloto
+            await _usuarios_pronta(app)
+            tela = app.screen
+            tela.ir_para("r16", "d1")
+            await piloto.press("c")                         # — em estudos: dá o CONNECT a carla
+            assert isinstance(tela.sessao.rascunho.operacoes[-1], DarAcesso)
+            m2 = _modelo_com_banco_atual()
+            del m2.papeis["r16"]                            # alguém removeu carla por fora
+            fonte.m, fonte.sig = m2, 2
+            tela.vigiar()
+            await esperar_workers(app)
+            await esperar_que(piloto, lambda: tela.sessao.rascunho.invalidas == {0})
+            assert "carla" not in _grade_texto(tela)
+    asyncio.run(roteiro())
+
+
+def test_rascunho_servidor_sql_para_psql_com_connect_por_banco():
+    base = modelo_exemplo()
+    base.bancos["d5"] = Banco("d5", "a=b 'x'\\y", "r11", True, ("r11",), True)
+    r = RascunhoServidor(base)
+    n = r.novo_id("p")
+    r.acrescentar(CriarPapel(Papel(n, "dora", True, False, False, False)))
+    r.acrescentar(RemoverPapeis(("r15",), "r10", ("estudos", "sistema", "a=b 'x'\\y")))
+    texto = r.sql_psql("-- cabeçalho", "estudos")
+    linhas = texto.splitlines()
+    conecta = [l for l in linhas if l.startswith("\\connect")]
+    assert conecta == ["\\connect -reuse-previous=on 'estudos'", "\\connect -reuse-previous=on 'sistema'",
+                       "\\connect -reuse-previous=on 'dbname=''a=b \\\\''x\\\\''\\\\\\\\y'''",
+                       "\\connect -reuse-previous=on 'estudos'"]
+    assert "PASSWORD" not in texto and "CREATE ROLE dora LOGIN;" in texto
+    assert linhas.index(conecta[0]) < linhas.index("CREATE ROLE dora LOGIN;")
+    assert linhas.index(conecta[3]) < linhas.index("DROP ROLE bruno;")

@@ -257,3 +257,20 @@ def password_encryption(conexao, limite_ms: int = _LIMITE_MS) -> str:
     """Como o servidor guarda senhas novas: "scram-sha-256" ou "md5" (o ratt sempre manda SCRAM; md5 pede aviso)."""
     with catalogo.somente_leitura(conexao, limite_ms):
         return catalogo.executar(conexao, "SELECT current_setting('password_encryption')").fetchone()[0]
+
+
+def assinatura(conexao, limite_ms: int = _LIMITE_MS) -> Tuple[str, str, str]:
+    """Um resumo do que a tela Usuários mostra — papéis (nome e poderes), quem é membro de quem (com as opções e
+    quem deu) e os bancos (dono, se aceitam conexão, o `datacl`). Mudou entre uma olhada e outra: alguém (outro
+    ratt, o psql) mexeu no servidor, e a tela relê o modelo e refaz o rascunho por cima. Uma consulta só."""
+    with catalogo.somente_leitura(conexao, limite_ms):
+        linha = catalogo.executar(conexao, """
+            SELECT
+              (SELECT md5(coalesce(string_agg(concat_ws(':', r.oid, r.rolname, r.rolcanlogin, r.rolsuper,
+                                                        r.rolcreatedb, r.rolcreaterole, r.rolinherit),
+                                              ',' ORDER BY r.oid), '')) FROM pg_roles r),
+              (SELECT md5(coalesce(string_agg(m::text, ',' ORDER BY m::text), '')) FROM pg_auth_members m),
+              (SELECT md5(coalesce(string_agg(concat_ws(':', d.oid, d.datname, d.datdba, d.datallowconn,
+                                                        d.datistemplate, d.datacl::text),
+                                              ',' ORDER BY d.oid), '')) FROM pg_database d)""").fetchone()
+    return tuple(linha)

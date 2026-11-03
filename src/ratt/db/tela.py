@@ -103,6 +103,7 @@ class TelaBanco(App):
         Binding("p", "psql", "psql"),
         Binding("d", "diagrama", t("canvas.diagrama")),
         Binding("e", "dados", t("dados.abrir")),
+        Binding("u", "usuarios", t("usu.k.abrir")),
         Binding("b", "trocar_banco", t("tui.banco")),
         Binding("n", "pagina(1)", t("tui.proxima")),
         Binding("N,shift+n", "pagina(-1)", t("tui.anterior")),
@@ -114,7 +115,9 @@ class TelaBanco(App):
 
     # teclas que só valem na tela do banco: com o canvas ou uma pergunta por cima, `d` abriria outro canvas,
     # `q` fecharia o ratt no meio de um formulário, `b` trocaria o banco debaixo do rascunho
-    SO_NA_BASE = frozenset({"sair", "recarregar", "psql", "diagrama", "dados", "trocar_banco", "pagina", "aba"})
+    # (`u` também: dentro do canvas, da tela Dados e da própria Usuários, `u` é desfazer)
+    SO_NA_BASE = frozenset({"sair", "recarregar", "psql", "diagrama", "dados", "usuarios", "trocar_banco", "pagina",
+                            "aba"})
 
     def __init__(self, porta, usuario, banco):
         super().__init__()
@@ -366,7 +369,7 @@ class TelaBanco(App):
         if not self.conexao:
             return
         try:
-            marca = catalogo.assinatura(self.conexao)
+            marca = catalogo.assinatura(self.conexao, papeis=False)    # papéis: a tela Usuários
             if marca == self.marca:
                 return
             esquemas = catalogo.esquemas(self.conexao)
@@ -436,6 +439,14 @@ class TelaBanco(App):
         tela = tela_dados.TelaDados(fonte, objeto.esquema, f"t{objeto.oid}", so_ver=objeto.tipo == "view",
                                     nome=objeto.nome, view=objeto.tipo == "view")
         self.push_screen(tela)
+
+    def action_usuarios(self):
+        """A tela Usuários do servidor (com a sua própria conexão ao banco desta tela; o rascunho é do servidor,
+        não do banco)."""
+        if not self.conexao:
+            return
+        from ratt.db import tela_usuarios
+        self.push_screen(tela_usuarios.TelaUsuarios(tela_usuarios.FonteServidor(self.porta, self.usuario, self.banco)))
 
     def action_trocar_banco(self):
         conexao, _ = acesso.entrar(self.porta, self.usuario)

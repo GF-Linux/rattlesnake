@@ -62,6 +62,7 @@ class PainelSQL(VerticalScroll):
         self._linhas: List[int] = []        # linha em que cada operação começa no texto desenhado
         self._plano = ""
         self.topo: Optional[str] = None     # o SELECT do filtro (tela Dados), acima do rascunho
+        self.notas: List[Optional[str]] = []    # um comentário depois dos comandos de cada passo (a senha)
 
     def compose(self) -> ComposeResult:
         yield Static(id="sql_conteudo")
@@ -70,8 +71,11 @@ class PainelSQL(VerticalScroll):
         return self._plano
 
     def atualizar(self, passos, falhou: Optional[int] = None, mensagem: Optional[str] = None,
-                  topo: Optional[str] = None) -> None:
+                  topo: Optional[str] = None, notas: Optional[List[Optional[str]]] = None) -> None:
+        """`notas`: para cada passo, uma linha de comentário depois dos comandos (o rascunho do servidor diz ali que
+        a senha é pedida ao aplicar), ou None."""
         self.passos = passos
+        self.notas = list(notas or [])
         self.falhou = falhou
         self.mensagem = mensagem
         self.topo = topo
@@ -103,6 +107,8 @@ class PainelSQL(VerticalScroll):
             self._linhas.append(y)
             if valida:
                 codigo = f"-- {n + 1}. {desc}\n" + "\n".join(_linhas_comandos(comandos))
+                if n < len(self.notas) and self.notas[n]:
+                    codigo += "\n-- " + self.notas[n]
                 partes.append(Syntax(codigo, "sql", theme="ansi_dark", background_color=fundo or "default", word_wrap=True))
             else:
                 codigo = f"-- {n + 1}. {t('canvas.invalida')}"
@@ -395,6 +401,9 @@ class AcoesRascunho:
     def _dica_exportado(self, arquivo: str) -> str:
         return t("canvas.dica_exportado", arquivo=arquivo)
 
+    def _texto_exportado(self) -> str:
+        return self.sessao.rascunho.sql_texto(self._cabecalho())
+
     def _gravar_exportado(self, caminho: Path) -> None:
         if not self._pode_enviar():             # o banco pode ter mudado enquanto a pergunta estava aberta
             return
@@ -402,7 +411,7 @@ class AcoesRascunho:
         # diz como rodar tudo de uma vez fora do ratt
         dica = "".join("-- " + linha + "\n" for linha in self._dica_exportado(caminho.name).splitlines())
         try:
-            caminho.write_text(dica + self.sessao.rascunho.sql_texto(self._cabecalho()), encoding="utf-8")
+            caminho.write_text(dica + self._texto_exportado(), encoding="utf-8")
         except OSError as erro:
             self.notify(t("canvas.erro_exportar", caminho=caminho, erro=erro), severity="error")
             return
@@ -592,3 +601,7 @@ class AcoesRascunhoServidor(AcoesRascunho):
 
     def _dica_exportado(self, arquivo: str) -> str:
         return t("usu.dica_exportado", arquivo=arquivo)
+
+    def _texto_exportado(self) -> str:
+        """Roda inteiro com um `psql -f`: um `\\connect` antes de cada grupo que vai a outro banco. Sem senha."""
+        return self.sessao.rascunho.sql_psql(self._cabecalho(), self.fonte.banco)
