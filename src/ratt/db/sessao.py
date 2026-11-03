@@ -238,7 +238,8 @@ class SessaoRascunho:
             if dono == "duvida":
                 if antigo not in self._avisados:
                     self._avisados.add(antigo)
-                    avisos.append(Aviso(t("canvas.rascunho_antigo", caminho=antigo), "warning", 15))
+                    chave = "canvas.rascunho_outro_banco" if outra_pasta else "canvas.rascunho_antigo"
+                    avisos.append(Aviso(t(chave, caminho=antigo), "warning", 15))
                 continue
             limpo = {k: v for k, v in dados.items() if k not in ("banco", "esquema")}
             try:

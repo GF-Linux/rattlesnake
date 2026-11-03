@@ -686,6 +686,8 @@ ratt db user passwd [name]            changes a password (no name: yours)
                                 "en": "Found this schema's draft under the old file name and brought it over; the old one is now {caminho}."},
     "canvas.rascunho_antigo": {"pt": "Há um rascunho antigo em {caminho} que pode ser deste schema ou de outro de nome parecido; deixei como está.",
                                "en": "There is an old draft at {caminho} that may belong to this schema or to one with a similar name; left as is."},
+    "canvas.rascunho_outro_banco": {"pt": "Há um rascunho antigo em {caminho} que pode ser deste banco ou de outro de nome parecido; deixei como está.",
+                                    "en": "There is an old draft at {caminho} that may belong to this database or to one with a similar name; left as is."},
     "canvas.corrompido": {"pt": "O rascunho salvo estava ilegível; guardei a cópia em {caminho} e comecei vazio.",
                           "en": "The saved draft was unreadable; I kept a copy at {caminho} and started empty."},
     "canvas.erro_gravar": {"pt": "Não consegui gravar o rascunho: {erro}", "en": "Could not save the draft: {erro}"},

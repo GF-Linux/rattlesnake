@@ -238,36 +238,49 @@ _bancos_servidor = itertools.count(1)
 
 
 def _restaurar_servidor(servidor, papeis_antes, bancos_antes):
-    """Volta o cluster ao que era antes do teste: apaga os bancos novos e, em cada banco que sobrou, passa ao
-    superusuário o que os papéis novos possuem e tira o que lhes foi dado; então apaga os papéis novos."""
+    """Volta o cluster ao que era antes do teste: os bancos que já existiam voltam a aceitar (ou não) conexão como
+    antes; os bancos novos são apagados; em cada banco que sobrou, o que os papéis novos possuem passa ao
+    superusuário e o que lhes foi dado sai; o `datacl` dos bancos que já existiam volta ao de antes; e os papéis
+    novos são apagados. `bancos_antes`: {nome: (datacl em texto, datallowconn)}."""
     from psycopg import sql
     with servidor.conectar() as admin:
-        for (nome,) in admin.execute("SELECT datname FROM pg_database").fetchall():
-            if nome not in bancos_antes:
+        agora = {n: (acl, aceita) for n, acl, aceita in admin.execute(
+            "SELECT datname, datacl::text, datallowconn FROM pg_database").fetchall()}
+        for nome, (_, aceita) in agora.items():
+            if nome in bancos_antes and bancos_antes[nome][1] != aceita:
+                admin.execute(sql.SQL("ALTER DATABASE {} ALLOW_CONNECTIONS {}").format(
+                    sql.Identifier(nome), sql.SQL("true" if bancos_antes[nome][1] else "false")))
+            elif nome not in bancos_antes:
                 admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(nome)))
         novos = [n for (n,) in admin.execute("SELECT rolname FROM pg_roles").fetchall() if n not in papeis_antes]
-        if not novos:
-            return
-        admin.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = ANY(%s)", (novos,))
-        lista = sql.SQL(", ").join(map(sql.Identifier, novos))
         bancos = [n for (n,) in admin.execute("SELECT datname FROM pg_database WHERE datallowconn").fetchall()]
-    for banco in bancos:
-        with servidor.conectar(banco) as c:
-            c.execute(sql.SQL("REASSIGN OWNED BY {} TO {}").format(lista, sql.Identifier(servidor.usuario)))
-            c.execute(sql.SQL("DROP OWNED BY {}").format(lista))
+    if novos:
+        lista = sql.SQL(", ").join(map(sql.Identifier, novos))
+        with servidor.conectar() as admin:
+            admin.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = ANY(%s)", (novos,))
+        for banco in bancos:
+            with servidor.conectar(banco) as c:
+                c.execute(sql.SQL("REASSIGN OWNED BY {} TO {}").format(lista, sql.Identifier(servidor.usuario)))
+                c.execute(sql.SQL("DROP OWNED BY {}").format(lista))
     with servidor.conectar() as admin:
-        admin.execute(sql.SQL("DROP ROLE {}").format(lista))
+        # o datacl de antes só cita papéis que já existiam (os novos já saíram pelo DROP OWNED): basta regravá-lo
+        for nome, (acl, _) in bancos_antes.items():
+            admin.execute("UPDATE pg_database SET datacl = %s::aclitem[] WHERE datname = %s "
+                          "AND datacl::text IS DISTINCT FROM %s", (acl, nome, acl))
+        if novos:
+            admin.execute(sql.SQL("DROP ROLE {}").format(lista))
 
 
 @pytest.fixture
 def banco_servidor(servidor):
     """Um banco novo no servidor descartável (devolve o nome). No fim, o cluster volta ao que era: somem esse banco
-    e todo papel ou banco que o teste criou."""
+    e todo papel ou banco que o teste criou, e os bancos que já existiam voltam ao `datacl`/`datallowconn` de antes."""
     from psycopg import sql
     nome = "ratt_srv_%d" % next(_bancos_servidor)
     with servidor.conectar() as admin:
         papeis_antes = {n for (n,) in admin.execute("SELECT rolname FROM pg_roles")}
-        bancos_antes = {n for (n,) in admin.execute("SELECT datname FROM pg_database")}
+        bancos_antes = {n: (acl, aceita) for n, acl, aceita in admin.execute(
+            "SELECT datname, datacl::text, datallowconn FROM pg_database")}
         admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(nome)))
     try:
         yield nome

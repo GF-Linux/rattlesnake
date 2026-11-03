@@ -50,13 +50,33 @@ def test_acesso_dono_direto_herdado_nenhum_e_super():
     assert servidor.acesso(m, "r11", "d3") == "dono" and servidor.acesso(m, "r16", "d3") == "nenhum"
 
 
-def test_acesso_herdado_de_grupo_dono_e_ciclo_nao_trava():
+def test_acesso_dono_so_com_connect_e_grupo_que_tem_connect():
+    """Ser dono não dá CONNECT por si: o dono entra pelo CONNECT que o `datacl` (ou o padrão) lhe dá, como qualquer
+    um. Dono que tirou o próprio CONNECT não entra (salvo pelo PUBLIC ou por um grupo); membro de um grupo dono
+    só entra se o grupo tem o CONNECT."""
     m = modelo_exemplo()
-    m.bancos["d3"] = Banco("d3", "fechado", "r14", False, (), False)        # o dono é o grupo meio
+    m.bancos["d3"] = Banco("d3", "fechado", "r14", False, ("r14",), False)   # o dono é o grupo meio, com CONNECT
     assert servidor.acesso(m, "r14", "d3") == "dono"
     assert servidor.acesso(m, "r15", "d3") == "herdado"
     assert servidor.acesso(m, "r13", "d3") == "nenhum"
-    # um grupo que some do modelo (um pg_* filtrado) ou um ciclo não quebram a busca
+    m.bancos["d3"] = Banco("d3", "fechado", "r14", False, (), False)        # o dono tirou de si o CONNECT
+    assert servidor.acesso(m, "r14", "d3") == "nenhum" and servidor.acesso(m, "r15", "d3") == "nenhum"
+    m.bancos["d3"] = Banco("d3", "fechado", "r14", False, (), True)         # mas o PUBLIC entra
+    assert servidor.acesso(m, "r14", "d3") == "herdado"
+
+
+def test_acesso_so_segue_pertencas_que_herdam_e_ciclo_nao_trava():
+    m = modelo_exemplo()
+    m.papeis["r13"].nao_herda = ("r12",)                    # ana está em leitura sem herdar (NOINHERIT / INHERIT FALSE)
+    assert servidor.acesso(m, "r13", "d1") == "nenhum"
+    assert servidor.acesso(m, "r15", "d1") == "herdado"
+    m.papeis["r14"].nao_herda = ("r12",)                    # o meio da corrente não herda: bruno também não
+    assert servidor.acesso(m, "r15", "d1") == "nenhum"
+    assert servidor.grupos(m, "r15") == {"r14", "r12"} and servidor.grupos(m, "r15", herdados=True) == {"r14"}
+    m.papeis["r14"].nao_herda = ()
+    m.papeis["r15"].sem_set = ("r14",)                      # SET FALSE não muda o acesso (só se lê)
+    assert servidor.acesso(m, "r15", "d1") == "herdado"
+    # um grupo que some do modelo ou um ciclo não quebram a busca
     m.papeis["r12"] = _papel("r12", "leitura", login=False, membro_de=("r15", "r999"))
     assert servidor.acesso(m, "r16", "d1") == "nenhum"
     assert servidor.acesso(m, "r15", "d1") == "herdado"
@@ -82,3 +102,5 @@ def test_modelo_copia_e_busca_por_nome():
     assert m.banco_por_nome("sistema").id == "d2" and m.banco_por_nome("nada") is None
     assert m.eu == "r10" and m.versao == 180000
     assert m.bancos["d1"].template is False
+    p = m.papeis["r13"]
+    assert p.herda is True and p.nao_herda == () and p.sem_set == () and p.sistema is False

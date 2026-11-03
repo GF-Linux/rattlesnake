@@ -120,7 +120,7 @@ def test_rascunho_na_pasta_de_outro_banco_nunca_e_levado(monkeypatch, tmp_path):
         conteudo = antigo.read_text(encoding="utf-8")
         s = sessao.SessaoRascunho(5432, "meu banco", "public")
         avisos = s.abrir(base)
-        assert [str(a) for a in avisos] == [t("canvas.rascunho_antigo", caminho=antigo)]
+        assert [str(a) for a in avisos] == [t("canvas.rascunho_outro_banco", caminho=antigo)]
         assert s.rascunho.operacoes == [] and antigo.read_text(encoding="utf-8") == conteudo
         assert not guardar._arquivo_rascunho(5432, "meu banco", "public").exists()
         assert sorted(p.name for p in pasta_antiga.iterdir()) == ["rascunho-public.json"]     # nada de .migrado
@@ -131,12 +131,16 @@ def test_rascunho_na_pasta_de_outro_banco_nunca_e_levado(monkeypatch, tmp_path):
         assert dono.abrir(_schema_de_uma_tabela("public", "t10", "pessoas")) == []
         assert [o.tipo for o in dono.rascunho.operacoes] == [op.tipo]
 
+    from ratt.db import idioma
+    assert "banco" in idioma.TEXTOS["canvas.rascunho_outro_banco"]["pt"]
+    assert "database" in idioma.TEXTOS["canvas.rascunho_outro_banco"]["en"]
+
     # schema também de nome trocado, arquivo na pasta antiga: o mesmo
     guardar.gravar_rascunho(5432, "meu banco", "my schema", None)
     antigo = _rascunho_antigo(pasta_antiga, "rascunho-my_schema.json", rascunho.Renomear("t10", None, "gente"))
     s = sessao.SessaoRascunho(5432, "meu banco", "my schema")
     assert [str(a) for a in s.abrir(_schema_de_uma_tabela("my schema", "t10", "pessoas"))] == [
-        t("canvas.rascunho_antigo", caminho=antigo)]
+        t("canvas.rascunho_outro_banco", caminho=antigo)]
     assert s.rascunho.operacoes == [] and antigo.exists()
 
     # com identidade gravada de meu_banco: é dele, sem dúvida — calado

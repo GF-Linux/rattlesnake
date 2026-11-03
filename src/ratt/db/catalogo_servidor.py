@@ -7,7 +7,7 @@ nunca colados no SQL; o nome vira papel por `to_regrole(quote_ident(nome))`, exa
 """
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, NamedTuple, Tuple
 
 from ratt.db import catalogo
 from ratt.db.servidor import Banco, ModeloServidor, Papel
@@ -27,19 +27,30 @@ def _nomes(nomes) -> List[str]:
 
 
 def modelo_servidor(conexao, limite_ms: int = _LIMITE_MS) -> ModeloServidor:
-    """O servidor inteiro em 3 consultas: papéis (sem os `pg_*`), quem é membro de quem e os bancos com o CONNECT
-    do `datacl` (sem `datacl`, o padrão: PUBLIC e o dono entram). `eu` é o papel da conexão."""
+    """O servidor inteiro em 3 consultas: papéis, quem é membro de quem (e se a pertença herda) e os bancos com o
+    CONNECT do `datacl` (sem `datacl`, o padrão: PUBLIC e o dono entram). Os papéis `pg_*` do PostgreSQL ficam no
+    modelo, marcados `sistema` (um deles pode ter CONNECT e passá-lo a quem é membro); as telas os escondem.
+    `eu` é o current_user da conexão (o ratt nunca faz SET ROLE, então é o usuário com que ele entrou).
+    Herança: no 16+ cada pertença diz (`inherit_option`; `set_option` só para mostrar); até o 15 decide o
+    `rolinherit` do membro, para todas as pertenças dele."""
     with catalogo.somente_leitura(conexao, limite_ms):
         linhas = catalogo.executar(conexao, """
-            SELECT r.oid, r.rolname, r.rolcanlogin, r.rolsuper, r.rolcreatedb, r.rolcreaterole,
+            SELECT r.oid, r.rolname, r.rolcanlogin, r.rolsuper, r.rolcreatedb, r.rolcreaterole, r.rolinherit,
                    r.rolname = current_user, current_setting('server_version_num')::int
             FROM pg_roles r
-            WHERE r.rolname !~ '^pg_'
             ORDER BY r.rolname""").fetchall()
-        membros = catalogo.executar(conexao, """
-            SELECT DISTINCT m.member, m.roleid
-            FROM pg_auth_members m
-            ORDER BY m.member, m.roleid""").fetchall()
+        versao = linhas[0][-1] if linhas else 0
+        if versao >= 160000:
+            membros = catalogo.executar(conexao, """
+                SELECT m.member, m.roleid, bool_or(m.inherit_option), bool_or(m.set_option)
+                FROM pg_auth_members m
+                GROUP BY m.member, m.roleid
+                ORDER BY m.member, m.roleid""").fetchall()
+        else:
+            membros = catalogo.executar(conexao, """
+                SELECT DISTINCT m.member, m.roleid, r.rolinherit, true
+                FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member
+                ORDER BY m.member, m.roleid""").fetchall()
         bancos = catalogo.executar(conexao, """
             SELECT d.oid, d.datname, d.datdba, d.datallowconn, d.datistemplate,
                    coalesce(array_agg(DISTINCT a.grantee ORDER BY a.grantee)
@@ -50,17 +61,20 @@ def modelo_servidor(conexao, limite_ms: int = _LIMITE_MS) -> ModeloServidor:
             GROUP BY d.oid, d.datname, d.datdba, d.datallowconn, d.datistemplate
             ORDER BY d.datname""").fetchall()
     papeis: Dict[str, Papel] = {}
-    eu, versao = "", 0
-    for oid, nome, login, super_, cria_bancos, cria_papeis, sou_eu, versao in linhas:
-        papeis[f"r{oid}"] = Papel(f"r{oid}", nome, login, super_, cria_bancos, cria_papeis)
+    eu = ""
+    for oid, nome, login, super_, cria_bancos, cria_papeis, herda, sou_eu, _ in linhas:
+        papeis[f"r{oid}"] = Papel(f"r{oid}", nome, login, super_, cria_bancos, cria_papeis, herda=herda,
+                                  sistema=nome.startswith("pg_"))
         if sou_eu:
             eu = f"r{oid}"
-    grupos: Dict[str, List[str]] = {}
-    for membro, grupo in membros:
+    pertencas: Dict[str, List[Tuple[str, bool, bool]]] = {}
+    for membro, grupo, herda, set_ in membros:
         if f"r{membro}" in papeis and f"r{grupo}" in papeis:
-            grupos.setdefault(f"r{membro}", []).append(f"r{grupo}")
-    for id, gs in grupos.items():
-        papeis[id].membro_de = tuple(gs)
+            pertencas.setdefault(f"r{membro}", []).append((f"r{grupo}", herda, set_))
+    for id, ps in pertencas.items():
+        papeis[id].membro_de = tuple(g for g, _, _ in ps)
+        papeis[id].nao_herda = tuple(g for g, herda, _ in ps if not herda)
+        papeis[id].sem_set = tuple(g for g, _, set_ in ps if not set_)
     modelo_bancos = {
         f"d{oid}": Banco(f"d{oid}", nome, f"r{dono}", aceita, tuple(f"r{g}" for g in diretos if f"r{g}" in papeis),
                          publico, template=template)
@@ -121,25 +135,35 @@ def posse_no_banco(conexao, papel_nomes: List[str], limite_ms: int = _LIMITE_MS)
     return posse
 
 
-def privilegios_no_banco(conexao, papel_nomes: List[str], limite_ms: int = _LIMITE_MS) -> Dict[str, Tuple[int, int]]:
-    """Por papel: (quantos privilégios ele TEM, dados por outro; quantos ele DEU a outros, PUBLIC incluído) nas
-    tabelas, views, sequências e schemas do banco desta conexão — cada privilégio de cada objeto conta um. Os do
-    dono sobre o que é dele (de si para si) não contam."""
+class Privilegios(NamedTuple):
+    """Os privilégios de um papel nas tabelas, views, sequências e schemas de um banco (cada privilégio de cada
+    objeto conta um)."""
+    tem: int                # dados a ele por outro (o DROP OWNED os tira)
+    deu_como_dono: int      # que ele deu no que é dele (o REASSIGN OWNED os passa ao novo dono, como concedente)
+    deu_por_opcao: int      # que ele deu pelo GRANT OPTION no que não é dele (o DROP OWNED os tira, de quem recebeu)
+
+
+def privilegios_no_banco(conexao, papel_nomes: List[str], limite_ms: int = _LIMITE_MS) -> Dict[str, Privilegios]:
+    """Por papel, no banco desta conexão: os privilégios que ele tem e os que deu — como dono e pelo GRANT OPTION
+    (PUBLIC conta como quem recebe). Os do dono sobre o que é dele (de si para si) não contam."""
     with catalogo.somente_leitura(conexao, limite_ms):
         linhas = catalogo.executar(conexao, f"""
             WITH alvo AS ({_ALVO}),
             acl AS (
-                SELECT (aclexplode(c.relacl)).* FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                SELECT c.relowner AS dono, x.grantor, x.grantee
+                FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace, aclexplode(c.relacl) x
                 WHERE c.relacl IS NOT NULL AND n.nspname NOT IN {_SISTEMA}
                 UNION ALL
-                SELECT (aclexplode(n.nspacl)).* FROM pg_namespace n
+                SELECT n.nspowner, x.grantor, x.grantee
+                FROM pg_namespace n, aclexplode(n.nspacl) x
                 WHERE n.nspacl IS NOT NULL AND n.nspname NOT IN {_SISTEMA})
             SELECT a.nome,
                    count(*) FILTER (WHERE acl.grantee = a.papel AND acl.grantor <> a.papel),
-                   count(*) FILTER (WHERE acl.grantor = a.papel AND acl.grantee <> a.papel)
+                   count(*) FILTER (WHERE acl.grantor = a.papel AND acl.grantee <> a.papel AND acl.dono = a.papel),
+                   count(*) FILTER (WHERE acl.grantor = a.papel AND acl.grantee <> a.papel AND acl.dono <> a.papel)
             FROM alvo a LEFT JOIN acl ON a.papel IN (acl.grantee, acl.grantor)
             GROUP BY a.nome""", (_nomes(papel_nomes),)).fetchall()
-    return {nome: (int(tem), int(deu)) for nome, tem, deu in linhas}
+    return {nome: Privilegios(int(tem), int(dono), int(opcao)) for nome, tem, dono, opcao in linhas}
 
 
 def permissoes_padrao(conexao, papel_nomes: List[str], limite_ms: int = _LIMITE_MS) -> Dict[str, int]:

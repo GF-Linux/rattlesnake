@@ -22,6 +22,11 @@ class Papel:
     cria_papeis: bool                   # CREATEROLE
     membro_de: Tuple[str, ...] = ()     # ids dos grupos de que é membro direto
     estado: str = ""                    # "", "novo", "apagado" ou "mudado" (a vista do rascunho)
+    nao_herda: Tuple[str, ...] = ()     # dos `membro_de`, os que NÃO passam os privilégios do grupo: papel NOINHERIT
+                                        # (até o 15) ou pertença com INHERIT FALSE (16+). O padrão: tudo herda
+    sem_set: Tuple[str, ...] = ()       # dos `membro_de`, os sem SET (16+: não pode `SET ROLE` para o grupo); só se lê
+    herda: bool = True                  # rolinherit (16+: só o padrão das pertenças novas)
+    sistema: bool = False               # papel do próprio PostgreSQL (`pg_*`): conta no acesso, as telas escondem
 
 
 @dataclass
@@ -40,7 +45,7 @@ class Banco:
 class ModeloServidor:
     papeis: Dict[str, Papel] = field(default_factory=dict)
     bancos: Dict[str, Banco] = field(default_factory=dict)
-    eu: str = ""                        # id do papel da conexão (current_user)
+    eu: str = ""                        # id do papel da conexão: o current_user (o ratt nunca faz SET ROLE)
     versao: int = 0                     # server_version_num (180000 = 18)
 
     def copia(self) -> "ModeloServidor":
@@ -55,14 +60,19 @@ class ModeloServidor:
         return next((b for b in self.bancos.values() if b.nome == nome), None)
 
 
-def grupos(m: ModeloServidor, papel_id: str) -> Set[str]:
+def grupos(m: ModeloServidor, papel_id: str, herdados: bool = False) -> Set[str]:
     """Todos os grupos de que `papel_id` é membro, direto ou por outro grupo (transitivo; um id que não está no
-    modelo, como um `pg_*` deixado de fora, é ignorado; um ciclo não trava)."""
+    modelo é ignorado; um ciclo não trava). `herdados`: só pelas pertenças que passam os privilégios (fora as de
+    `nao_herda`, em cada passo da corrente) — os grupos cujos privilégios o papel tem sem `SET ROLE`."""
     vistos: Set[str] = set()
     borda = [papel_id]
     while borda:
         papel = m.papeis.get(borda.pop())
-        for g in papel.membro_de if papel is not None else ():
+        if papel is None:
+            continue
+        for g in papel.membro_de:
+            if herdados and g in papel.nao_herda:
+                continue
             if g not in vistos and g != papel_id and g in m.papeis:
                 vistos.add(g)
                 borda.append(g)
@@ -70,20 +80,20 @@ def grupos(m: ModeloServidor, papel_id: str) -> Set[str]:
 
 
 def acesso(m: ModeloServidor, papel_id: str, banco_id: str) -> str:
-    """Como `papel_id` entra em `banco_id`: "super" (superusuário entra em qualquer um), "dono", "direto" (CONNECT
-    dado a ele), "herdado" (pelo PUBLIC, ou por um grupo de que é membro — mesmo por outro grupo — que tem o CONNECT
-    ou é o dono) ou "nenhum". Um banco que não aceita conexão (`aceita_conexao=False`) dá o mesmo valor: o das
-    permissões; quem mostra marca à parte que ninguém entra nele agora."""
+    """Como `papel_id` entra em `banco_id` — o mesmo que o `has_database_privilege(…, 'CONNECT')` do PostgreSQL:
+    "super" (superusuário entra em qualquer um), "dono" (o dono, com o CONNECT dele), "direto" (CONNECT dado a ele),
+    "herdado" (pelo PUBLIC, ou por um grupo com CONNECT de que é membro — mesmo por outro grupo — por pertenças que
+    herdam) ou "nenhum". Ser dono não dá CONNECT por si: o dono entra pela entrada dele no `datacl` (no padrão, ele
+    está lá), e um dono que tirou de si o CONNECT não entra por ser dono. Um banco que não aceita conexão
+    (`aceita_conexao=False`) dá o mesmo valor: o das permissões; quem mostra marca à parte que ninguém entra agora."""
     papel, banco = m.papeis.get(papel_id), m.bancos.get(banco_id)
     if papel is None or banco is None:
         return "nenhum"
     if papel.superusuario:
         return "super"
-    if banco.dono == papel_id:
-        return "dono"
     if papel_id in banco.acesso_direto:
-        return "direto"
-    if banco.publico or any(g == banco.dono or g in banco.acesso_direto for g in grupos(m, papel_id)):
+        return "dono" if banco.dono == papel_id else "direto"
+    if banco.publico or any(g in banco.acesso_direto for g in grupos(m, papel_id, herdados=True)):
         return "herdado"
     return "nenhum"
 
