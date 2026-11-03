@@ -14,6 +14,12 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 
+def _seguro_antigo(nome: str) -> str:
+    """O `_seguro` de antes (0.9.0 e o começo da 0.10.0): não era injetivo ("my schema" e "my_schema" davam no mesmo
+    nome). Só serve para achar os arquivos gravados assim."""
+    return re.sub(r"[^\w.-]", "_", nome).replace("..", "_") or "_"
+
+
 def _seguro(nome: str) -> str:
     """Nome de banco ou esquema como parte de nome de arquivo: nada de barras nem `..`. Um nome que já é seguro fica
     como está (os arquivos de antes continuam valendo); um que precisou de troca ganha `~` e um resumo estável do
@@ -24,9 +30,12 @@ def _seguro(nome: str) -> str:
     return s + "~" + hashlib.sha1(nome.encode("utf-8", "surrogatepass")).hexdigest()[:12]
 
 
+def _raiz() -> Path:
+    return Path(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")) / "ratt" / "canvas"
+
+
 def pasta(porta: int, banco: str) -> Path:
-    base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
-    return Path(base) / "ratt" / "canvas" / f"{porta}-{_seguro(banco)}"
+    return _raiz() / f"{porta}-{_seguro(banco)}"
 
 
 def _escrever(caminho: Path, texto: str) -> None:
@@ -67,12 +76,24 @@ def _arquivo_rascunho(porta: int, banco: str, esquema: str) -> Path:
     return pasta(porta, banco) / f"rascunho-{_seguro(esquema)}.json"
 
 
+_IDENTIDADE = ("banco", "esquema")      # gravados junto do rascunho: de quem ele é (para achar o dono sem dúvida)
+
+
 def ler_rascunho(porta: int, banco: str, esquema: str) -> Optional[dict]:
-    """O rascunho gravado, ou None se não há arquivo. Arquivo que existe mas não é um objeto JSON legível levanta
-    `RascunhoCorrompido`: quem chama o põe de lado, em vez de tratá-lo como vazio e depois apagá-lo. Qualquer outro
-    erro de disco (permissão, E/S) sobe como `OSError`: "não consegui ler" nunca vira "não há rascunho"."""
+    """O rascunho gravado (sem os campos de identidade), ou None se não há arquivo. Arquivo que existe mas não é um
+    objeto JSON legível levanta `RascunhoCorrompido`: quem chama o põe de lado, em vez de tratá-lo como vazio e depois
+    apagá-lo. Qualquer outro erro de disco (permissão, E/S) sobe como `OSError`: "não consegui ler" nunca vira "não há
+    rascunho"."""
+    dados = ler_rascunho_em(_arquivo_rascunho(porta, banco, esquema))
+    if dados is not None:
+        for chave in _IDENTIDADE:
+            dados.pop(chave, None)
+    return dados
+
+
+def ler_rascunho_em(arquivo: Path) -> Optional[dict]:
+    """O JSON de um arquivo de rascunho como está (com a identidade, se tiver); mesmos erros de `ler_rascunho`."""
     from ratt.db.rascunho import RascunhoCorrompido
-    arquivo = _arquivo_rascunho(porta, banco, esquema)
     try:
         texto = arquivo.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -96,7 +117,44 @@ def gravar_rascunho(porta: int, banco: str, esquema: str, dados: Optional[dict])
         except FileNotFoundError:
             pass
         return
-    _escrever(arquivo, json.dumps(dados, ensure_ascii=False, indent=1))
+    com_dono = {"banco": banco, "esquema": esquema}
+    com_dono.update({k: v for k, v in dados.items() if k not in _IDENTIDADE})
+    _escrever(arquivo, json.dumps(com_dono, ensure_ascii=False, indent=1))
+
+
+def rascunhos_de_antes(porta: int, banco: str, esquema: str) -> list:
+    """Os arquivos que o `_seguro` de antes (não injetivo) teria usado para este rascunho e que ainda existem — só
+    quando o nome do banco ou do schema precisou de troca (nome seguro sempre teve o mesmo arquivo) e o arquivo de
+    agora ainda não existe. Podem ser deste schema ou de outro de nome parecido: quem chama confere o dono."""
+    atual = _arquivo_rascunho(porta, banco, esquema)
+    if atual.exists() or (_seguro_antigo(banco) == banco and _seguro_antigo(esquema) == esquema):
+        return []
+    pastas = [pasta(porta, banco), _raiz() / f"{porta}-{_seguro_antigo(banco)}"]
+    nomes = [atual.name, f"rascunho-{_seguro_antigo(esquema)}.json"]
+    achados = []
+    for p in pastas:
+        for n in nomes:
+            caminho = p / n
+            if caminho != atual and caminho not in achados and caminho.is_file():
+                achados.append(caminho)
+    return achados
+
+
+def migrar_rascunho(antigo: Path, porta: int, banco: str, esquema: str, dados: dict) -> Path:
+    """Leva um rascunho gravado com o nome de antes para o nome de agora: grava o novo (atômico, com a identidade) e
+    só então renomeia o antigo para `….migrado` (nunca o apaga). Não grava por cima de um rascunho que já exista no
+    nome novo (FileExistsError). Devolve o caminho em que o antigo ficou."""
+    novo = _arquivo_rascunho(porta, banco, esquema)
+    if novo.exists():
+        raise FileExistsError(str(novo))
+    gravar_rascunho(porta, banco, esquema, dados)
+    destino = antigo.with_name(antigo.name + ".migrado")
+    n = 1
+    while destino.exists():
+        n += 1
+        destino = antigo.with_name(f"{antigo.name}.migrado-{n}")
+    os.replace(antigo, destino)
+    return destino
 
 
 def separar_rascunho(porta: int, banco: str, esquema: str) -> Path:

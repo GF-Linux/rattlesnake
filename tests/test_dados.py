@@ -35,6 +35,74 @@ def test_ouvintes_e_disco(monkeypatch, tmp_path):
     s.desfazer(); assert chamadas == [1, 1] and guardar.ler_rascunho(5432, "teste", "public") is None
 
 
+def _schema_de_uma_tabela(esquema, tid, nome):
+    return Modelo(esquema, {tid: Tabela(tid, esquema, nome, [Coluna(tid + ".c1", "id", "bigint", pk=True)])})
+
+
+def _rascunho_antigo(pasta, nome_arquivo, *ops):
+    """Um rascunho como a 0.9.0 o gravava: sem identidade, no nome do `_seguro` não injetivo."""
+    pasta.mkdir(parents=True, exist_ok=True)
+    caminho = pasta / nome_arquivo
+    caminho.write_text(json.dumps(rascunho.Rascunho(Modelo("x")).para_dict() | {"operacoes": [
+        rascunho._op_para_dict(op) for op in ops]}), encoding="utf-8")
+    return caminho
+
+
+def test_rascunho_gravado_no_nome_antigo_vai_para_o_dono_certo(monkeypatch, tmp_path):
+    """Um rascunho nunca se perde com a troca de nome dos arquivos: o de "my schema", gravado no nome antigo
+    (rascunho-my_schema.json), é achado e levado para o nome novo (o antigo fica como .migrado); o de "my_schema", no
+    mesmo nome, fica com "my_schema" — "my schema" não o toma."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    pasta = guardar.pasta(5432, "teste")
+    meu = _schema_de_uma_tabela("my schema", "t10", "pessoas")
+    deles = _schema_de_uma_tabela("my_schema", "t20", "carros")
+    antigo = _rascunho_antigo(pasta, "rascunho-my_schema.json", rascunho.Renomear("t10", None, "gente"))
+    s = sessao.SessaoRascunho(5432, "teste", "my schema")
+    avisos = s.abrir(meu)
+    assert [op.tipo for op in s.rascunho.operacoes] == ["renomear"] and s.rascunho.invalidas == set()
+    assert not antigo.exists() and (pasta / "rascunho-my_schema.json.migrado").exists()
+    assert [str(a) for a in avisos] == [t("canvas.rascunho_migrado", caminho=pasta / "rascunho-my_schema.json.migrado")]
+    gravado = json.loads(guardar._arquivo_rascunho(5432, "teste", "my schema").read_text(encoding="utf-8"))
+    assert gravado["esquema"] == "my schema" and len(gravado["operacoes"]) == 1
+    assert guardar.ler_rascunho(5432, "teste", "my schema")["operacoes"] == gravado["operacoes"]
+    s.persistir()                                         # gravar de novo não muda nada (a identidade não conta)
+    assert s.reler(meu) is None
+
+    # o de "my_schema" no mesmo nome antigo: "my schema" (sem rascunho no nome novo) não o toma, e calado
+    guardar.gravar_rascunho(5432, "teste", "my schema", None)
+    antigo = _rascunho_antigo(pasta, "rascunho-my_schema.json", rascunho.Renomear("t20", None, "autos"))
+    s2 = sessao.SessaoRascunho(5432, "teste", "my schema")
+    assert s2.abrir(meu) == [] and s2.rascunho.operacoes == [] and antigo.exists()
+    s3 = sessao.SessaoRascunho(5432, "teste", "my_schema")
+    s3.abrir(deles)
+    assert [op.tipo for op in s3.rascunho.operacoes] == ["renomear"] and s3.rascunho.invalidas == set()
+    assert antigo.exists()                                # o nome dele é o mesmo de sempre: nada a migrar
+
+    # com identidade gravada, ela decide; sem dono certo (só cria tabela em outro schema), fica e avisa uma vez
+    guardar.gravar_rascunho(5432, "teste", "my_schema", {"operacoes": [], "proximo": 1})
+    s4 = sessao.SessaoRascunho(5432, "teste", "my schema")
+    assert s4.abrir(meu) == [] and antigo.exists()
+    nova = Tabela("novo-t1", "outro", "x", [Coluna("novo-c1", "id", "bigint", pk=True)])
+    _rascunho_antigo(pasta, "rascunho-my_schema.json", rascunho.CriarTabela(nova))
+    s5 = sessao.SessaoRascunho(5432, "teste", "my schema")
+    avisos = s5.abrir(meu)
+    assert [str(a) for a in avisos] == [t("canvas.rascunho_antigo", caminho=antigo)] and antigo.exists()
+    assert s5.rascunho.operacoes == [] and s5.reler(meu) is None
+
+
+def test_rascunho_de_banco_com_nome_trocado_e_achado_na_pasta_antiga(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    pasta_antiga = guardar._raiz() / "5432-meu_banco"
+    assert guardar.pasta(5432, "meu banco") != pasta_antiga
+    antigo = _rascunho_antigo(pasta_antiga, "rascunho-public.json", rascunho.Renomear("t10", None, "gente"))
+    s = sessao.SessaoRascunho(5432, "meu banco", "public")
+    s.abrir(_schema_de_uma_tabela("public", "t10", "pessoas"))
+    assert len(s.rascunho.operacoes) == 1 and not antigo.exists()
+    assert guardar.ler_rascunho(5432, "meu banco", "public") is not None
+    # banco de nome seguro: nunca olha outra pasta
+    assert guardar.rascunhos_de_antes(5432, "teste", "public") == []
+
+
 def test_canvas_e_outra_tela_dividem_o_rascunho(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
 

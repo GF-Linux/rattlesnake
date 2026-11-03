@@ -72,6 +72,28 @@ def executar_rascunho(r: _rascunho.Rascunho, conexao, arquivo: Path, ensaio: boo
     return codigo, (falhou[0] if falhou else None)
 
 
+def _dono(dados: dict, banco: str, esquema: str, base: Modelo) -> str:
+    """De quem é um rascunho gravado com o nome de antes: "meu", "outro" ou "duvida".
+    Com identidade gravada (banco, esquema), ela decide. Sem ela (rascunho antigo), decide o conteúdo: os ids das
+    tabelas da base são os oids, únicos no banco — se toda operação vale sobre a base DESTE schema e alguma se apoia
+    nela (refere uma tabela dela) ou cria tabela neste schema, é dele; se alguma refere o que não existe aqui, é de
+    outro schema; senão (vazio, ou ilegível como rascunho), dúvida."""
+    if "esquema" in dados or "banco" in dados:
+        return "meu" if dados.get("esquema") == esquema and dados.get("banco", banco) == banco else "outro"
+    try:
+        r = _rascunho.Rascunho.de_dict(dados, base)
+    except _rascunho.RascunhoCorrompido:
+        return "duvida"
+    if not r.operacoes:
+        return "duvida"
+    if r.invalidas:
+        return "outro"
+    apoio = any(o.refere() & set(base.tabelas) for o in r.operacoes) or any(
+        isinstance(o, _rascunho.CriarTabela) and o.tabela.esquema == esquema for o in r.operacoes)
+    criadas_aqui = all(o.tabela.esquema == esquema for o in r.operacoes if isinstance(o, _rascunho.CriarTabela))
+    return "meu" if apoio and criadas_aqui else "duvida"
+
+
 class SessaoRascunho:
     def __init__(self, porta: int, banco: str, esquema: str, app=None):
         self.porta, self.banco, self.esquema = porta, banco, esquema
@@ -85,6 +107,7 @@ class SessaoRascunho:
         self._aberta = False                # já leu o disco uma vez?
         self._ouvintes: List[Callable[[], None]] = []
         self._ao_aplicar: List[Callable[[Modelo, Dict[str, str]], None]] = []
+        self._avisados: Set[Path] = set()   # rascunhos de antes sem dono certo, já avisados nesta sessão
         self._criadas: Dict[str, str] = {}  # id provisório → nome das tabelas criadas pelo rascunho aplicado
         self._app = app
 
@@ -168,6 +191,8 @@ class SessaoRascunho:
                 self.rascunho = _rascunho.Rascunho(base)
                 return avisos
             if dados is None:
+                dados = self._migrar_de_antes(base, avisos)
+            if dados is None:
                 self.rascunho = _rascunho.Rascunho(base)
                 return avisos
             r = _rascunho.Rascunho.de_dict(dados, base)
@@ -184,6 +209,34 @@ class SessaoRascunho:
             avisos.append(Aviso(t("canvas.invalidas", n=len(r.invalidas)), "warning"))
         self.rascunho = r
         return avisos
+
+    def _migrar_de_antes(self, base: Modelo, avisos: List[str]) -> Optional[dict]:
+        """Sem arquivo no nome de agora: um rascunho gravado com o nome de antes (o `_seguro` não injetivo da 0.9.0)
+        que seja COMPROVADAMENTE deste schema é levado para o nome novo (o antigo fica como `….migrado`). O que é de
+        outro schema fica onde está, calado; o que não dá para atribuir sem dúvida fica onde está, com um aviso.
+        Um rascunho nunca se perde."""
+        for antigo in guardar.rascunhos_de_antes(self.porta, self.banco, self.esquema):
+            try:
+                dados = guardar.ler_rascunho_em(antigo)
+            except (OSError, _rascunho.RascunhoCorrompido):
+                dados = None
+            dono = _dono(dados, self.banco, self.esquema, base) if dados is not None else "duvida"
+            if dono == "outro":
+                continue
+            if dono == "duvida":
+                if antigo not in self._avisados:
+                    self._avisados.add(antigo)
+                    avisos.append(Aviso(t("canvas.rascunho_antigo", caminho=antigo), "warning", 15))
+                continue
+            limpo = {k: v for k, v in dados.items() if k not in ("banco", "esquema")}
+            try:
+                guardado = guardar.migrar_rascunho(antigo, self.porta, self.banco, self.esquema, limpo)
+            except OSError as erro:
+                avisos.append(Aviso(t("canvas.erro_gravar", erro=erro), "error"))
+                return limpo                # vale nesta sessão; o arquivo antigo continua intacto
+            avisos.append(Aviso(t("canvas.rascunho_migrado", caminho=guardado)))
+            return limpo
+        return None
 
     def persistir(self, so_se_mudou: bool = False) -> None:
         """Grava o rascunho; vazio apaga o arquivo. `so_se_mudou`: nada a fazer se o disco já tem exatamente isso
