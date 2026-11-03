@@ -72,23 +72,33 @@ def executar_rascunho(r: _rascunho.Rascunho, conexao, arquivo: Path, ensaio: boo
     return codigo, (falhou[0] if falhou else None)
 
 
-def _dono(dados: dict, banco: str, esquema: str, base: Modelo) -> str:
+def _dono(dados: dict, banco: str, esquema: str, base: Modelo, outra_pasta: bool = False) -> str:
     """De quem é um rascunho gravado com o nome de antes: "meu", "outro" ou "duvida".
     Com identidade gravada (banco, esquema), ela decide. Sem ela (rascunho antigo), decide o conteúdo: os ids das
     tabelas da base são os oids, únicos no banco — se toda operação vale sobre a base DESTE schema e alguma se apoia
-    nela (refere uma tabela dela) ou cria tabela neste schema, é dele; se alguma refere o que não existe aqui, é de
-    outro schema; senão (vazio, ou ilegível como rascunho), dúvida."""
+    nela (refere uma tabela dela) ou cria tabela neste schema, é dele; se alguma refere o que não existe aqui e
+    nenhuma se apoia nesta base, é de outro schema; se umas se apoiam e outras não valem mais (uma tabela apagada
+    desde então), dúvida; senão (vazio, ou ilegível como rascunho), dúvida.
+    `outra_pasta`: o arquivo está na pasta de OUTRO banco (a pasta antiga de um banco de nome trocado é a pasta de
+    sempre de um banco de nome seguro, como "meu_banco" para "meu banco"). Os oids só são únicos dentro de um banco
+    — um banco clonado de um template tem os mesmos — e todo banco tem um `public`: o conteúdo não prova nada, e o
+    arquivo nunca é "meu" (só a identidade pode dizer que é de outro)."""
     if "esquema" in dados or "banco" in dados:
-        return "meu" if dados.get("esquema") == esquema and dados.get("banco", banco) == banco else "outro"
+        if dados.get("esquema") == esquema and dados.get("banco", banco) == banco:
+            return "duvida" if outra_pasta else "meu"
+        return "outro"
+    if outra_pasta:
+        return "duvida"
     try:
         r = _rascunho.Rascunho.de_dict(dados, base)
     except _rascunho.RascunhoCorrompido:
         return "duvida"
     if not r.operacoes:
         return "duvida"
+    apoio_na_base = any(o.refere() & set(base.tabelas) for o in r.operacoes)
     if r.invalidas:
-        return "outro"
-    apoio = any(o.refere() & set(base.tabelas) for o in r.operacoes) or any(
+        return "duvida" if apoio_na_base else "outro"
+    apoio = apoio_na_base or any(
         isinstance(o, _rascunho.CriarTabela) and o.tabela.esquema == esquema for o in r.operacoes)
     criadas_aqui = all(o.tabela.esquema == esquema for o in r.operacoes if isinstance(o, _rascunho.CriarTabela))
     return "meu" if apoio and criadas_aqui else "duvida"
@@ -213,14 +223,16 @@ class SessaoRascunho:
     def _migrar_de_antes(self, base: Modelo, avisos: List[str]) -> Optional[dict]:
         """Sem arquivo no nome de agora: um rascunho gravado com o nome de antes (o `_seguro` não injetivo da 0.9.0)
         que seja COMPROVADAMENTE deste schema é levado para o nome novo (o antigo fica como `….migrado`). O que é de
-        outro schema fica onde está, calado; o que não dá para atribuir sem dúvida fica onde está, com um aviso.
-        Um rascunho nunca se perde."""
+        outro schema fica onde está, calado; o que não dá para atribuir sem dúvida fica onde está, com um aviso — e
+        assim fica todo arquivo achado na pasta de outro banco (pode ser o rascunho vivo dele). Um rascunho nunca se
+        perde."""
         for antigo in guardar.rascunhos_de_antes(self.porta, self.banco, self.esquema):
             try:
                 dados = guardar.ler_rascunho_em(antigo)
             except (OSError, _rascunho.RascunhoCorrompido):
                 dados = None
-            dono = _dono(dados, self.banco, self.esquema, base) if dados is not None else "duvida"
+            outra_pasta = antigo.parent != guardar.pasta(self.porta, self.banco)
+            dono = _dono(dados, self.banco, self.esquema, base, outra_pasta) if dados is not None else "duvida"
             if dono == "outro":
                 continue
             if dono == "duvida":

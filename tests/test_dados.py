@@ -90,17 +90,79 @@ def test_rascunho_gravado_no_nome_antigo_vai_para_o_dono_certo(monkeypatch, tmp_
     assert s5.rascunho.operacoes == [] and s5.reler(meu) is None
 
 
-def test_rascunho_de_banco_com_nome_trocado_e_achado_na_pasta_antiga(monkeypatch, tmp_path):
+def test_rascunho_de_banco_com_nome_trocado_na_pasta_nova(monkeypatch, tmp_path):
+    """Banco de nome trocado: o arquivo de nome antigo na pasta NOVA dele (só ele a usa) é migrado; banco de nome
+    seguro nunca olha outra pasta."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    pasta = guardar.pasta(5432, "meu banco")
+    antigo = _rascunho_antigo(pasta, "rascunho-my_schema.json", rascunho.Renomear("t10", None, "gente"))
+    s = sessao.SessaoRascunho(5432, "meu banco", "my schema")
+    s.abrir(_schema_de_uma_tabela("my schema", "t10", "pessoas"))
+    assert len(s.rascunho.operacoes) == 1 and not antigo.exists()
+    assert guardar.ler_rascunho(5432, "meu banco", "my schema") is not None
+    assert guardar.rascunhos_de_antes(5432, "teste", "public") == []
+
+
+def test_rascunho_na_pasta_de_outro_banco_nunca_e_levado(monkeypatch, tmp_path):
+    """A pasta antiga de "meu banco" (5432-meu_banco, do `_seguro` não injetivo) é a pasta de sempre de "meu_banco":
+    um rascunho achado ali pode ser de qualquer um dos dois (os oids só são únicos dentro de um banco, e um banco
+    clonado de um template tem os mesmos). Nunca é levado nem renomeado: fica, com um aviso (uma vez), e "meu_banco"
+    continua a abri-lo como sempre."""
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     pasta_antiga = guardar._raiz() / "5432-meu_banco"
-    assert guardar.pasta(5432, "meu banco") != pasta_antiga
-    antigo = _rascunho_antigo(pasta_antiga, "rascunho-public.json", rascunho.Renomear("t10", None, "gente"))
+    assert pasta_antiga == guardar.pasta(5432, "meu_banco") != guardar.pasta(5432, "meu banco")
+    base = _schema_de_uma_tabela("public", "t10", "pessoas")
+    nova = Tabela("novo-t1", "public", "x", [Coluna("novo-c1", "id", "bigint", pk=True)])
+    # A: só cria tabela em public; B: renomeia uma tabela cujo oid existe nos dois (clone de template)
+    for op in (rascunho.CriarTabela(nova), rascunho.Renomear("t10", None, "gente")):
+        guardar.gravar_rascunho(5432, "meu banco", "public", None)
+        antigo = _rascunho_antigo(pasta_antiga, "rascunho-public.json", op)
+        conteudo = antigo.read_text(encoding="utf-8")
+        s = sessao.SessaoRascunho(5432, "meu banco", "public")
+        avisos = s.abrir(base)
+        assert [str(a) for a in avisos] == [t("canvas.rascunho_antigo", caminho=antigo)]
+        assert s.rascunho.operacoes == [] and antigo.read_text(encoding="utf-8") == conteudo
+        assert not guardar._arquivo_rascunho(5432, "meu banco", "public").exists()
+        assert sorted(p.name for p in pasta_antiga.iterdir()) == ["rascunho-public.json"]     # nada de .migrado
+        assert s.abrir(base) == []                       # avisa uma vez só
+        s.acrescentar(rascunho.Renomear("t10", None, "outra"))   # "meu banco" edita o dele: o de meu_banco fica
+        assert antigo.read_text(encoding="utf-8") == conteudo
+        dono = sessao.SessaoRascunho(5432, "meu_banco", "public")
+        assert dono.abrir(_schema_de_uma_tabela("public", "t10", "pessoas")) == []
+        assert [o.tipo for o in dono.rascunho.operacoes] == [op.tipo]
+
+    # schema também de nome trocado, arquivo na pasta antiga: o mesmo
+    guardar.gravar_rascunho(5432, "meu banco", "my schema", None)
+    antigo = _rascunho_antigo(pasta_antiga, "rascunho-my_schema.json", rascunho.Renomear("t10", None, "gente"))
+    s = sessao.SessaoRascunho(5432, "meu banco", "my schema")
+    assert [str(a) for a in s.abrir(_schema_de_uma_tabela("my schema", "t10", "pessoas"))] == [
+        t("canvas.rascunho_antigo", caminho=antigo)]
+    assert s.rascunho.operacoes == [] and antigo.exists()
+
+    # com identidade gravada de meu_banco: é dele, sem dúvida — calado
+    guardar.gravar_rascunho(5432, "meu_banco", "public", {"operacoes": [rascunho._op_para_dict(
+        rascunho.Renomear("t10", None, "dele"))], "proximo": 1})
+    guardar.gravar_rascunho(5432, "meu banco", "public", None)
     s = sessao.SessaoRascunho(5432, "meu banco", "public")
-    s.abrir(_schema_de_uma_tabela("public", "t10", "pessoas"))
-    assert len(s.rascunho.operacoes) == 1 and not antigo.exists()
-    assert guardar.ler_rascunho(5432, "meu banco", "public") is not None
-    # banco de nome seguro: nunca olha outra pasta
-    assert guardar.rascunhos_de_antes(5432, "teste", "public") == []
+    assert s.abrir(base) == [] and s.rascunho.operacoes == []
+    assert guardar.ler_rascunho(5432, "meu_banco", "public")["operacoes"][0]["novo"] == "dele"
+
+
+def test_rascunho_antigo_com_operacao_que_nao_vale_mais_fica_em_duvida(monkeypatch, tmp_path):
+    """Um rascunho de antes que se apoia em tabelas DESTE schema mas também refere uma que sumiu (apagada desde
+    então) não é "de outro" calado: fica onde está, com um aviso."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    pasta = guardar.pasta(5432, "teste")
+    antigo = _rascunho_antigo(pasta, "rascunho-my_schema.json", rascunho.Renomear("t10", None, "gente"),
+                              rascunho.Renomear("t11", None, "sumiu"))
+    s = sessao.SessaoRascunho(5432, "teste", "my schema")
+    avisos = s.abrir(_schema_de_uma_tabela("my schema", "t10", "pessoas"))
+    assert [str(a) for a in avisos] == [t("canvas.rascunho_antigo", caminho=antigo)]
+    assert s.rascunho.operacoes == [] and antigo.exists()
+    # só o que não existe aqui: é de outro schema, calado
+    guardar.gravar_rascunho(5432, "teste", "my schema", None)
+    s2 = sessao.SessaoRascunho(5432, "teste", "my schema")
+    assert s2.abrir(_schema_de_uma_tabela("my schema", "t12", "outra")) == [] and antigo.exists()
 
 
 def test_canvas_e_outra_tela_dividem_o_rascunho(monkeypatch, tmp_path):
@@ -1551,11 +1613,22 @@ def test_celula_de_real_double_ou_interval_e_recusada_com_o_motivo():
     import datetime as dt
     from ratt.db import grade_dados
     for tipo, valor in (("real", 0.1), ("float4", 0.1), ("double precision", 1 / 3), ("float8", 2.5),
-                        ("interval", dt.timedelta(days=1, hours=2))):
+                        ("interval", dt.timedelta(days=1, hours=2)),
+                        ("interval day to second", dt.timedelta(days=1)), ("interval year to month", dt.timedelta(days=30)),
+                        ("interval hour", dt.timedelta(hours=3)), ("interval minute to second(3)", dt.timedelta(seconds=1)),
+                        ("interval(6)", dt.timedelta(days=1)), ("INTERVAL  Day To  Second (2)", dt.timedelta(days=1))):
         with pytest.raises(ValueError) as e:
             grade_dados.condicao_da_celula(Coluna("t1.c9", "medida", tipo), valor)
         assert str(e.value) == t("dados.e.celula_aprox", coluna="medida", tipo=tipo)
     assert grade_dados.condicao_da_celula(Coluna("t1.c9", "medida", "real"), None).operador == "vazio"
+    for tipo in ("interval year", "interval month", "interval day", "interval hour", "interval minute",
+                 "interval second", "interval year to month", "interval day to hour", "interval day to minute",
+                 "interval day to second", "interval hour to minute", "interval hour to second",
+                 "interval minute to second", "interval second(3)", "interval day to second(3)"):
+        assert filtro.tipo_normal(tipo) == "interval", tipo
+        assert filtro.familia_fina(tipo) == "tempo", tipo
+    assert filtro.tipo_normal("interval day to second[]") == "interval[]"
+    assert filtro.tipo_normal("intervalo") == "intervalo"                       # um tipo da pessoa, não o interval
     assert grade_dados.condicao_da_celula(Coluna("t1.c9", "v", "numeric(10,2)"), 2.5) == \
         filtro.Condicao("t1.c9", "igual", ["2.5"])                                # numeric volta exato
 

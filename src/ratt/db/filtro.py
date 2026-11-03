@@ -38,9 +38,16 @@ _FAMILIAS = {
 _DATAS = {"date", "timestamp without time zone", "timestamp with time zone"}
 
 
+# os campos de um interval (`interval day to second`, `interval year to month`, `interval hour`…): é o mesmo tipo
+_CAMPOS_INTERVAL = re.compile(r"^interval (?:year|month|day|hour|minute|second)(?: to (?:month|hour|minute|second))?"
+                              r"(?=$|\[)")
+
+
 def tipo_normal(tipo: str) -> str:
-    """O tipo sem modificador `(255)`, com os espaços normalizados e os apelidos do PostgreSQL unidos."""
+    """O tipo sem modificador `(255)`, com os espaços normalizados, os apelidos do PostgreSQL unidos e os campos
+    de um interval tirados (`interval day to second` é um `interval`)."""
     base = " ".join(re.sub(r"\(.*?\)", "", tipo).lower().split())
+    base = _CAMPOS_INTERVAL.sub("interval", base)
     return _SINONIMOS.get(base, base)
 
 
