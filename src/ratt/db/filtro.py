@@ -256,8 +256,17 @@ def _comum(c: Condicao, tab: Tabela, qual: Optional[str]) -> Tuple[str, bool]:
         return f"{expr} IS {'NULL' if op == 'vazio' else 'NOT NULL'}", False
     if op in ("verdadeiro", "falso"):
         return f"{expr} IS {'TRUE' if op == 'verdadeiro' else 'FALSE'}", False
+    if op == "na_lista" and "" in _valores(c):
+        # o vazio (∅) na lista: `IN (…, NULL)` nunca casa com NULL — as linhas vazias entram por um OU à parte
+        vazio = f"{expr} IS NULL" + (f" OR trim({expr}) = ''" if fam == "texto" else "")
+        itens = ", ".join(lit(v) for v in c.valores if v != "")
+        if not itens:
+            return (f"({vazio})", True) if fam == "texto" else (vazio, False)
+        return f"({expr} IN ({itens}) OR {vazio})", True
     if op in ("na_lista", "fora_lista"):
-        itens = ", ".join("NULL" if v == "" else lit(v) for v in _valores(c))      # "" na lista é o vazio (NULL)
+        # "" na lista é o vazio (NULL); em "não está na lista" fica a armadilha que se ensina: NOT IN (…, NULL) não
+        # pega nada (o aviso chk.fora_lista_vazio diz isso)
+        itens = ", ".join("NULL" if v == "" else lit(v) for v in _valores(c))
         return f"{expr} {'IN' if op == 'na_lista' else 'NOT IN'} ({itens})", False
     if op in ("contem", "comeca", "termina"):
         _valores(c, 1)
@@ -399,7 +408,8 @@ def deixa_vazios_de_fora(f: Filtro, m: Modelo, tabela_id: str) -> List[str]:
     for c in f.condicoes:
         if c.existe is not None:
             continue
-        ids = [] if c.operador in ("vazio", "preenchido", "verdadeiro", "falso") else [c.coluna]
+        pede_vazio = c.operador == "na_lista" and "" in c.valores        # o vazio está na lista: sai só se pedir
+        ids = [] if c.operador in ("vazio", "preenchido", "verdadeiro", "falso") or pede_vazio else [c.coluna]
         if c.outra_coluna is not None:
             ids.append(c.outra_coluna)
         for id in ids:

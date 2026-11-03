@@ -342,9 +342,22 @@ def test_so_digitos_ascii():
 
 
 def test_vazio_na_lista_e_avisos_revistos():
-    assert _w(filtro.Condicao("t1.c3", "na_lista", ["30", ""])) == "idade IN (30, NULL)"
+    # o vazio (∅) na lista pega as linhas vazias de verdade: `IN (…, NULL)` nunca casaria com NULL
+    assert _w(filtro.Condicao("t1.c3", "na_lista", ["30", ""])) == "(idade IN (30) OR idade IS NULL)"
+    assert _w(filtro.Condicao("t1.c3", "na_lista", [""])) == "idade IS NULL"
+    assert _w(filtro.Condicao("t1.c4", "na_lista", ["a@x", ""])) == \
+        "(email IN ('a@x') OR email IS NULL OR trim(email) = '')"                # texto: o vazio inclui o ''
+    assert _w(filtro.Condicao("t1.c4", "na_lista", ["a@x", ""], negar=True)) == \
+        "NOT (email IN ('a@x') OR email IS NULL OR trim(email) = '')"
+    assert _w(filtro.Condicao("t1.c4", "na_lista", ["a@x", ""]), filtro.Condicao("t1.c3", "igual", ["3"])) == \
+        "(email IN ('a@x') OR email IS NULL OR trim(email) = '') AND (idade = 3)"
+    # "não está na lista" com o vazio continua a armadilha que se ensina (o aviso diz que não pega nada)
     assert _w(filtro.Condicao("t1.c3", "fora_lista", ["", "7"])) == "idade NOT IN (NULL, 7)"
     m = modelo_pessoas()
+    for negar in (False, True):                 # o vazio está na lista: as linhas vazias não saem sem a pessoa pedir
+        f = filtro.Filtro([filtro.Condicao("t1.c3", "na_lista", ["30", ""], negar=negar)])
+        assert filtro.deixa_vazios_de_fora(f, m, "t1") == []
+    assert filtro.deixa_vazios_de_fora(filtro.Filtro([filtro.Condicao("t1.c3", "na_lista", ["30"])]), m, "t1") == ["t1.c3"]
     for op in ("vazio", "preenchido"):
         assert filtro.deixa_vazios_de_fora(filtro.Filtro([filtro.Condicao("t1.c3", op, negar=True)]), m, "t1") == []
     assert filtro.deixa_vazios_de_fora(filtro.Filtro([filtro.Condicao("t1.c6", "verdadeiro", negar=True)]), m, "t1") == []

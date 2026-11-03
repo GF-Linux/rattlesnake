@@ -241,6 +241,22 @@ def test_contagens_reais(banco):
     assert c.ja_existe("public", "pessoas", "email", "'ana@x.com'") == 1
 
 
+def test_vazio_na_lista_pega_as_linhas_vazias(banco):
+    """"está na lista (29, ∅)" pega a Ana e quem tem idade vazia; em texto, o vazio pega também o '' e o só
+    espaços. "não está na lista" com o vazio continua não pegando nada (a armadilha avisada)."""
+    banco.execute(PESSOAS_SQL + "INSERT INTO public.pessoas (nome, email) VALUES ('Branca', ''), ('Espaço', '  ');")
+    m = modelo_pessoas()
+    onde = lambda *c: filtro.where(filtro.Filtro(list(c)), m, "t1")
+    nomes_onde = lambda w: sorted(r[0] for r in banco.execute("SELECT nome FROM public.pessoas WHERE " + w))
+    assert nomes_onde(onde(filtro.Condicao("t1.c3", "na_lista", ["29", ""]))) == ["Ana", "Branca", "Espaço", "Giovana"]
+    assert nomes_onde(onde(filtro.Condicao("t1.c3", "na_lista", [""]))) == ["Branca", "Espaço", "Giovana"]
+    assert nomes_onde(onde(filtro.Condicao("t1.c4", "na_lista", ["ana@x.com", ""]))) == \
+        ["Ana", "Branca", "Espaço", "Giovana"]
+    assert nomes_onde(onde(filtro.Condicao("t1.c4", "na_lista", ["ana@x.com", ""], negar=True))) == \
+        [" Gustavo", "Gabriel", "O'Brien"]
+    assert nomes_onde(onde(filtro.Condicao("t1.c3", "fora_lista", ["29", ""]))) == []
+
+
 def test_valor_valido_tipo_ruim_nao_vira_sql(banco):
     banco.execute(PESSOAS_SQL)
     for forcar in (False, True):
