@@ -336,6 +336,12 @@ def test_json_ida_e_volta_e_corrompido():
         {"operacoes": [{"tipo": "remover_papeis", "papeis": [1], "novo_dono": "r11"}]},
         {"operacoes": [{"tipo": "criar_papel", "papel": {"id": "novo-p1"}}]},
         {"operacoes": [{"tipo": "criar_papel", "papel": "x"}]},
+        {"operacoes": [{"tipo": "criar_papel", "papel": {"id": "novo-p1", "nome": "x", "login": False,
+                                                         "superusuario": False, "cria_bancos": False,
+                                                         "cria_papeis": False, "concedido_por": {"r12": {"r10": [1, 2]}}}}]},
+        {"operacoes": [{"tipo": "criar_papel", "papel": {"id": "novo-p1", "nome": "x", "login": False,
+                                                         "superusuario": False, "cria_bancos": False,
+                                                         "cria_papeis": False, "concedido_por": {"r12": ["r10"]}}}]},
         {"operacoes": [{"tipo": "trocar_senha", "papel": "r16", "nomes": {"r16": 3}}]},
         {"operacoes": [], "proximo": "x"},
     ]
@@ -519,7 +525,8 @@ def test_remover_quem_deu_o_connect_tira_o_que_ele_deu_e_a_trava_ve():
     m.papeis["r20"] = _papel("r20", "adm2")
     m.papeis["r21"] = _papel("r21", "eu2")
     m.bancos["d5"] = Banco("d5", "x2", "r10", True, ("r10", "r20", "r21"), True,
-                           concedido_por={"r10": ("r10",), "r20": ("r10",), "r21": ("r20",), "PUBLIC": ("r20",)})
+                           concedido_por={"r10": {"r10": False}, "r20": {"r10": True}, "r21": {"r20": False},
+                                          "PUBLIC": {"r20": False}})
     m.eu, m.banco_atual = "r21", "d5"
     texto = _recusa(m, RemoverPapeis(("r20",), "r10", ("x2",)))
     assert "x2" in texto
@@ -527,49 +534,86 @@ def test_remover_quem_deu_o_connect_tira_o_que_ele_deu_e_a_trava_ve():
     r = RascunhoServidor(m)
     r.acrescentar(RemoverPapeis(("r20",), "r10", ("x2",)))
     b = r.vista().bancos["d5"]
-    assert b.acesso_direto == ("r10",) and b.publico is False and b.concedido_por == {"r10": ("r10",)}
+    assert b.acesso_direto == ("r10",) and b.publico is False and b.concedido_por == {"r10": {"r10": False}}
     assert servidor.acesso(r.modelo(), "r21", "d5") == "nenhum" and servidor.acesso(r.modelo(), "r16", "d5") == "nenhum"
 
 
-def test_cascata_transitiva_e_quem_tem_outro_concedente_fica():
+def test_cascata_do_connect_segue_a_opcao_de_conceder():
+    """Corrente dono → carla* → ana* → bruno; app tem de carla e do dono. Remover carla: ana perde (só tinha de
+    carla), bruno perde (ana já não pode dar), app fica pelo dono — e o concedente que caiu sai da lista dela."""
     m = modelo_exemplo()
     m.bancos["d5"] = Banco("d5", "x2", "r10", True, ("r10", "r13", "r15", "r16", "r11"), False,
-                           concedido_por={"r13": ("r16",), "r15": ("r13",), "r11": ("r16", "r10")})
+                           concedido_por={"r16": {"r10": True}, "r13": {"r16": True}, "r15": {"r13": False},
+                                          "r11": {"r16": False, "r10": False}})
     r = RascunhoServidor(m)
-    r.acrescentar(RemoverPapeis(("r16",), "r10"))                   # carla deu a ana, que deu a bruno
+    r.acrescentar(RemoverPapeis(("r16",), "r10"))
     b = r.vista().bancos["d5"]
-    assert b.acesso_direto == ("r10", "r11") and b.concedido_por == {"r11": ("r10",)}   # app tinha também do dono
+    assert b.acesso_direto == ("r10", "r11") and b.concedido_por == {"r11": {"r10": False}}
+
+
+def test_cascata_s3_quem_fica_com_o_connect_sem_opcao_nao_segura_o_que_deu():
+    """S3: ana tem c*/carla e c/dono e deu a bruno. Remover carla: ana continua entrando (pelo dono), mas sem a
+    opção de conceder — o que deu a bruno cai. Bruno, se for quem está, fica trancado: a trava recusa."""
+    m = modelo_exemplo()
+    m.bancos["d5"] = Banco("d5", "x3", "r10", True, ("r10", "r16", "r13", "r15"), False,
+                           concedido_por={"r16": {"r10": True}, "r13": {"r16": True, "r10": False},
+                                          "r15": {"r13": False}})
+    m.papeis["r15"].membro_de = ()
+    m.eu, m.banco_atual = "r15", "d5"
+    assert "x3" in _recusa(m, RemoverPapeis(("r16",), "r10"))
+    m.eu, m.banco_atual = "r10", None
+    r = RascunhoServidor(m)
+    r.acrescentar(RemoverPapeis(("r16",), "r10"))
+    b = r.vista().bancos["d5"]
+    assert b.acesso_direto == ("r10", "r13") and b.concedido_por == {"r13": {"r10": False}}
+    m.bancos["d5"].concedido_por["r13"]["r10"] = True                # com a opção vinda do dono, ana segura
+    r = RascunhoServidor(m)
+    r.acrescentar(RemoverPapeis(("r16",), "r10"))
+    assert r.vista().bancos["d5"].acesso_direto == ("r10", "r13", "r15")
 
 
 def test_dono_removido_passa_o_que_deu_ao_novo_dono():
     m = modelo_exemplo()
     m.bancos["d5"] = Banco("d5", "x2", "r16", True, ("r16", "r13"), False,
-                           concedido_por={"r16": ("r16",), "r13": ("r16",)})
+                           concedido_por={"r16": {"r16": False}, "r13": {"r16": False}})
     r = RascunhoServidor(m)
     r.acrescentar(RemoverPapeis(("r16",), "r11"))
     b = r.vista().bancos["d5"]
-    assert b.dono == "r11" and b.acesso_direto == ("r11", "r13") and b.concedido_por == {"r11": ("r11",),
-                                                                                         "r13": ("r11",)}
+    assert b.dono == "r11" and b.acesso_direto == ("r11", "r13")
+    assert b.concedido_por == {"r11": {"r11": False}, "r13": {"r11": False}}
 
 
-def test_remover_quem_deu_a_pertenca_tira_a_pertenca():
-    """16+: a pertença dada por um papel removido cai (e, em cascata, a que dependia dela)."""
+def test_pertenca_cai_so_quando_todas_as_linhas_sao_dos_removidos_sem_cascata():
+    """S4 (16+): app deu leitura a carla com ADMIN, carla deu a bruno. Remover app: a pertença de carla cai (era só
+    de app); a de bruno, dada por carla, fica (o PostgreSQL 18 não leva adiante)."""
     m = modelo_exemplo()
-    m.papeis["r16"].membro_de, m.papeis["r16"].concedido_por = ("r12",), {"r12": ("r11",)}   # app deu a carla
-    m.papeis["r11"].membro_de, m.papeis["r11"].concedido_por = ("r12",), {"r12": ("r10",)}
+    m.papeis["r11"].membro_de, m.papeis["r11"].concedido_por = ("r12",), {"r12": {"r10": (True, True)}}
+    m.papeis["r16"].membro_de, m.papeis["r16"].concedido_por = ("r12",), {"r12": {"r11": (True, True)}}
     m.papeis["r15"].membro_de = ("r14", "r12")
-    m.papeis["r15"].concedido_por = {"r12": ("r16",), "r14": ("r10",)}                       # carla deu a bruno
-    m.eu, m.banco_atual = "r15", "d1"
-    m.papeis["r14"].membro_de = ()                                  # bruno entra em estudos só pela pertença direta
-    texto = _recusa(m, RemoverPapeis(("r11",), "r10"))
-    assert "estudos" in texto
-    m.eu, m.banco_atual = "r10", None
+    m.papeis["r15"].concedido_por = {"r12": {"r16": (True, True)}, "r14": {"r10": (True, True)}}
+    m.papeis["r13"].concedido_por = {"r12": {"r11": (True, True), "r10": (True, True)}}   # ana: de app e de jared
     r = RascunhoServidor(m)
     r.acrescentar(RemoverPapeis(("r11",), "r10"))
     v = r.vista()
-    assert v.papeis["r16"].membro_de == () and v.papeis["r15"].membro_de == ("r14",)
-    assert v.papeis["r15"].concedido_por == {"r14": ("r10",)}
-    assert v.papeis["r13"].membro_de == ("r12",)                    # sem concedido_por: não cai
+    assert v.papeis["r16"].membro_de == () and v.papeis["r16"].concedido_por == {}
+    assert v.papeis["r15"].membro_de == ("r14", "r12")
+    assert v.papeis["r13"].membro_de == ("r12",) and v.papeis["r13"].concedido_por == {"r12": {"r10": (True, True)}}
+    m.eu, m.banco_atual = "r16", "d1"                               # carla entra em estudos só por leitura
+    assert "estudos" in _recusa(m, RemoverPapeis(("r11",), "r10"))
+
+
+def test_inherit_da_pertenca_vem_das_linhas_que_ficam():
+    """ana está em leitura por app (INHERIT) e por jared (INHERIT FALSE). Remover app: continua membro, mas sem
+    herdar — e perde o CONNECT de estudos, que vinha de leitura: a trava recusa se for ela."""
+    m = modelo_exemplo()
+    m.papeis["r13"].concedido_por = {"r12": {"r11": (True, True), "r10": (False, False)}}
+    r = RascunhoServidor(m)
+    r.acrescentar(RemoverPapeis(("r11",), "r10"))
+    ana = r.vista().papeis["r13"]
+    assert ana.membro_de == ("r12",) and ana.nao_herda == ("r12",) and ana.sem_set == ("r12",)
+    assert servidor.acesso(r.modelo(), "r13", "d1") == "nenhum"
+    m.eu, m.banco_atual = "r13", "d1"
+    assert "estudos" in _recusa(m, RemoverPapeis(("r11",), "r10"))
 
 
 def test_de_dict_avanca_o_proximo_e_acrescentar_recusado_nao_mexe_nos_nomes():

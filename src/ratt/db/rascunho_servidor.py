@@ -65,15 +65,15 @@ def _alvo_nome(m: ModeloServidor, alvo: str) -> str:
 
 def _novo_dono(banco: servidor.Banco, antigo: str, novo: str) -> None:
     """O dono muda como no PostgreSQL (`aclnewowner`): o que o dono antigo tinha no `datacl` passa ao novo, e o que
-    ele deu passa a ter sido dado pelo novo."""
-    def troca(ids):
-        return tuple(dict.fromkeys(novo if i == antigo else i for i in ids))
+    ele deu passa a ter sido dado pelo novo (as entradas que se juntam somam a opção de conceder)."""
     banco.dono = novo
-    banco.acesso_direto = troca(banco.acesso_direto)
-    concedido: Dict[str, Tuple[str, ...]] = {}
+    banco.acesso_direto = tuple(dict.fromkeys(novo if i == antigo else i for i in banco.acesso_direto))
+    concedido: Dict[str, Dict[str, bool]] = {}
     for quem, por in banco.concedido_por.items():
-        chave = novo if quem == antigo else quem
-        concedido[chave] = troca(concedido.get(chave, ()) + por)
+        linhas = concedido.setdefault(novo if quem == antigo else quem, {})
+        for deu, opcao in por.items():
+            chave = novo if deu == antigo else deu
+            linhas[chave] = linhas.get(chave, False) or opcao
     banco.concedido_por = concedido
     _marcar(banco, "mudado")
 
@@ -82,44 +82,66 @@ def _sem(ids: Tuple[str, ...], fora: Set[str]) -> Tuple[str, ...]:
     return tuple(i for i in ids if i not in fora)
 
 
-def _cascata(m: ModeloServidor, fora: Set[str]) -> None:
-    """O que cai junto quando os papéis `fora` somem (`DROP OWNED` revoga com CASCADE o que foi dado a eles, e o
-    que eles deram cai junto): cada CONNECT e cada pertença cujos concedentes saíram todos — transitivamente: o que
-    alguém deu pela opção de conceder que perdeu também cai. Um concedente segura o que deu enquanto não sai e
-    ainda tem de onde dar: no banco, é o dono ou ainda tem o CONNECT; na pertença, é superusuário ou ainda é membro
-    do grupo. Sem `concedido_por` (não se sabe quem deu), nada cai por isso."""
-    for b in m.bancos.values():
-        tem = (set(b.acesso_direto) | ({PUBLIC} if b.publico else set())) - fora
-        mudou = True
-        while mudou:
-            mudou = False
-            for quem in sorted(tem):
-                por = b.concedido_por.get(quem)
-                if quem != b.dono and por and not any(x not in fora and (x == b.dono or x in tem) for x in por):
-                    tem.discard(quem)
-                    mudou = True
-        diretos, publico = tuple(i for i in b.acesso_direto if i in tem), b.publico and PUBLIC in tem
-        concedido = {q: _sem(por, fora) for q, por in b.concedido_por.items() if q in tem and _sem(por, fora)}
-        if (diretos, publico, concedido) != (b.acesso_direto, b.publico, b.concedido_por):
-            b.acesso_direto, b.publico, b.concedido_por = diretos, publico, concedido
-            _marcar(b, "mudado")
-    vivos = {p.id: set(p.membro_de) - fora for p in m.papeis.values() if p.id not in fora and p.estado != "apagado"}
+def _cascata_banco(m: ModeloServidor, b: servidor.Banco, fora: Set[str]) -> None:
+    """O CONNECT do banco depois que os papéis `fora` somem, como o `DROP OWNED` (REVOKE … CASCADE): saem as
+    entradas dadas a eles e as dadas por eles; e, em cascata, as dadas por quem perdeu o direito de dar — um
+    concedente só segura o que deu sendo o dono, superusuário ou tendo ainda uma entrada COM a opção de conceder
+    vinda de quem continua. Quem tem o CONNECT sem `concedido_por` (dado no rascunho, pelo dono) fica."""
+    linhas = {q: {d: o for d, o in por.items() if d not in fora} for q, por in b.concedido_por.items() if q not in fora}
+
+    def pode_dar(x: str) -> bool:
+        return (x == b.dono or (x in m.papeis and m.papeis[x].superusuario)
+                or any(linhas.get(x, {}).values()))
     mudou = True
     while mudou:
         mudou = False
-        for pid in sorted(vivos):
-            for g in sorted(vivos[pid]):
-                por = m.papeis[pid].concedido_por.get(g)
-                if por and not any(x not in fora and x in m.papeis
-                                   and (m.papeis[x].superusuario or g in vivos.get(x, ())) for x in por):
-                    vivos[pid].discard(g)
-                    mudou = True
-    for pid, gs in vivos.items():
-        p = m.papeis[pid]
-        if set(p.membro_de) != gs:
-            sai = set(p.membro_de) - gs
-            p.membro_de, p.nao_herda, p.sem_set = _sem(p.membro_de, sai), _sem(p.nao_herda, sai), _sem(p.sem_set, sai)
-        p.concedido_por = {g: _sem(por, fora) for g, por in p.concedido_por.items() if g in gs and _sem(por, fora)}
+        for quem in sorted(linhas):
+            vivas = {d: o for d, o in linhas[quem].items() if pode_dar(d)}
+            if vivas != linhas[quem]:
+                linhas[quem] = vivas
+                mudou = True
+    tem = (set(b.acesso_direto) | ({PUBLIC} if b.publico else set())) - fora
+    tem = {q for q in tem if q not in b.concedido_por or linhas.get(q)}
+    diretos, publico = tuple(i for i in b.acesso_direto if i in tem), b.publico and PUBLIC in tem
+    concedido = {q: por for q, por in linhas.items() if q in tem and por}
+    if (diretos, publico, concedido) != (b.acesso_direto, b.publico, b.concedido_por):
+        b.acesso_direto, b.publico, b.concedido_por = diretos, publico, concedido
+        _marcar(b, "mudado")
+
+
+def _cascata_pertencas(m: ModeloServidor, fora: Set[str]) -> None:
+    """As pertenças depois que os papéis `fora` somem (16+): sai cada linha de `pg_auth_members` dada por eles, e a
+    pertença sai só quando TODAS as linhas dela eram deles — sem cascata: o que o membro deu adiante fica (o
+    PostgreSQL 18 deixa a linha com o concedente órfão). O INHERIT/SET da pertença vem das linhas que ficam.
+    Pertença sem `concedido_por` (até o 15, ou dada no rascunho) fica como está."""
+    for p in m.papeis.values():
+        if p.id in fora or p.estado == "apagado":
+            continue
+        membro_de, nao_herda, sem_set = list(p.membro_de), set(p.nao_herda), set(p.sem_set)
+        concedido: Dict[str, Dict[str, Tuple[bool, bool]]] = {}
+        for g in p.membro_de:
+            por = p.concedido_por.get(g)
+            if g in fora or (por and all(d in fora for d in por)):
+                membro_de.remove(g)
+                nao_herda.discard(g)
+                sem_set.discard(g)
+                continue
+            if por:
+                vivas = {d: f for d, f in por.items() if d not in fora}
+                concedido[g] = vivas
+                (nao_herda.discard if any(h for h, _ in vivas.values()) else nao_herda.add)(g)
+                (sem_set.discard if any(st for _, st in vivas.values()) else sem_set.add)(g)
+        p.membro_de = tuple(membro_de)
+        p.nao_herda = tuple(g for g in p.membro_de if g in nao_herda)
+        p.sem_set = tuple(g for g in p.membro_de if g in sem_set)
+        p.concedido_por = concedido
+
+
+def _cascata(m: ModeloServidor, fora: Set[str]) -> None:
+    """O que cai junto quando os papéis `fora` somem: no CONNECT de cada banco e nas pertenças."""
+    for b in m.bancos.values():
+        _cascata_banco(m, b, fora)
+    _cascata_pertencas(m, fora)
 
 
 # ── operações ──
@@ -579,9 +601,12 @@ def _tipo_certo(valor, tipo: str) -> bool:
         return isinstance(valor, tuple) and all(isinstance(x, str) for x in valor)
     if tipo == "Dict[str, str]":
         return isinstance(valor, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in valor.items())
-    if tipo == "Dict[str, Tuple[str, ...]]":
-        return isinstance(valor, dict) and all(isinstance(k, str) and _tipo_certo(v, "Tuple[str, ...]")
-                                               for k, v in valor.items())
+    if tipo == "Dict[str, Dict[str, Tuple[bool, bool]]]":
+        return isinstance(valor, dict) and all(
+            isinstance(g, str) and isinstance(por, dict) and all(
+                isinstance(d, str) and isinstance(f, tuple) and len(f) == 2 and all(isinstance(x, bool) for x in f)
+                for d, f in por.items())
+            for g, por in valor.items())
     if tipo == "Papel":
         return isinstance(valor, Papel) and all(_tipo_certo(getattr(valor, f.name), f.type) for f in fields(Papel))
     raise TypeError(f"campo de tipo inesperado: {tipo}")
@@ -615,9 +640,10 @@ def _op_de_dict(d: dict) -> OperacaoServidor:
             if nome in v:
                 v[nome] = _tupla(v[nome])
         if "concedido_por" in v:
-            if not isinstance(v["concedido_por"], dict):
+            por = v["concedido_por"]
+            if not isinstance(por, dict) or not all(isinstance(x, dict) for x in por.values()):
                 raise TypeError("concedido_por inválido")
-            v["concedido_por"] = {k: _tupla(x) for k, x in v["concedido_por"].items()}
+            v["concedido_por"] = {g: {d: _tupla(f) for d, f in por.items()} for g, por in v["concedido_por"].items()}
         campos["papel"] = Papel(**v)
     if cls is RemoverPapeis:
         for nome in ("papeis", "bancos"):

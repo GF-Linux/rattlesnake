@@ -255,6 +255,89 @@ def _por_nome(m):
     return papeis, bancos
 
 
+def _confere_com_postgresql(servidor, banco, previsto):
+    """Depois de aplicar: o acesso que o modelo previsto dá a cada papel em cada banco é o que o
+    `has_database_privilege` diz, e o catálogo relido (por nomes) é o previsto."""
+    with servidor.conectar(banco) as c:
+        depois = catalogo_servidor.modelo_servidor(c)
+        for papel in previsto.papeis.values():
+            for b in previsto.bancos.values():
+                pode = c.execute("SELECT has_database_privilege(%s, %s, 'CONNECT')", (papel.nome, b.nome)).fetchone()[0]
+                assert (_servidor.acesso(previsto, papel.id, b.id) != "nenhum") == pode, (papel.nome, b.nome)
+    assert _por_nome(previsto) == _por_nome(depois)
+
+
+def _remover_e_conferir(servidor, banco, remover, quem_fica_sem):
+    """Remove `remover` (nomes) pelo rascunho, como superusuário, em todos os bancos que aceitam conexão; antes,
+    conectado como `quem_fica_sem`, confere que a trava recusa. Depois confere o previsto com o PostgreSQL."""
+    import pytest
+    from ratt.db.rascunho_servidor import RascunhoServidor, RemoverPapeis
+    with _conectar_como(servidor, quem_fica_sem, banco) as c:
+        m = catalogo_servidor.modelo_servidor(c)
+    bancos = tuple(x.nome for x in m.bancos.values() if x.aceita_conexao)
+    su = m.papel_por_nome(servidor.usuario).id
+    with pytest.raises(ValueError):
+        RascunhoServidor(m).acrescentar(RemoverPapeis(tuple(m.papel_por_nome(n).id for n in remover), su, bancos))
+    with servidor.conectar(banco) as c:
+        m = catalogo_servidor.modelo_servidor(c)
+    r = RascunhoServidor(m)
+    r.acrescentar(RemoverPapeis(tuple(m.papel_por_nome(n).id for n in remover), m.eu, bancos))
+    previsto = r.modelo()
+    assert _servidor.acesso(previsto, previsto.papel_por_nome(quem_fica_sem).id, previsto.banco_atual) == "nenhum"
+    _aplicar(servidor, r, banco)
+    _confere_com_postgresql(servidor, banco, previsto)
+    return m, previsto
+
+
+def test_s3_quem_so_tinha_a_opcao_do_removido_perde_o_que_deu(servidor, banco_servidor):
+    """x3 tem c*/y3 e c/dono e deu a v3. Remover y3: x3 continua entrando, sem a opção — o de v3 cai."""
+    b = banco_servidor
+    with servidor.conectar() as c:
+        for cmd in ("CREATE ROLE y3 LOGIN", "CREATE ROLE x3 LOGIN", "CREATE ROLE v3 LOGIN",
+                    f"REVOKE CONNECT ON DATABASE {b} FROM PUBLIC",
+                    f"GRANT CONNECT ON DATABASE {b} TO y3 WITH GRANT OPTION", f"GRANT CONNECT ON DATABASE {b} TO x3"):
+            c.execute(cmd)
+        c.execute("SET ROLE y3")
+        c.execute(f"GRANT CONNECT ON DATABASE {b} TO x3 WITH GRANT OPTION")
+        c.execute("SET ROLE x3")
+        c.execute(f"GRANT CONNECT ON DATABASE {b} TO v3")
+        c.execute("RESET ROLE")
+    m, previsto = _remover_e_conferir(servidor, b, ["y3"], "v3")
+    x3, y3, su = (m.papel_por_nome(n).id for n in ("x3", "y3", servidor.usuario))
+    assert m.banco_por_nome(b).concedido_por[x3] == {su: False, y3: True}
+    assert _servidor.acesso(previsto, x3, previsto.banco_atual) == "direto"
+
+
+def test_s4_pertenca_dada_pelo_removido_cai_sem_cascata_e_inherit_das_linhas(servidor, banco_servidor):
+    """g4 → b4 (ADMIN) → a4 (ADMIN) → v4; w4 está em g4 por b4 (INHERIT) e pelo superusuário (INHERIT FALSE).
+    Remover b4: a4 sai de g4 (só tinha a linha de b4); v4 fica (a linha é de a4: o PostgreSQL não leva adiante);
+    w4 fica membro sem herdar — e perde o CONNECT que g4 tem."""
+    import pytest
+    b = banco_servidor
+    with servidor.conectar() as c:
+        if c.info.server_version < 160000:
+            pytest.skip("pertenças por concedente só no PostgreSQL 16+")
+        for cmd in ("CREATE ROLE g4 NOLOGIN", "CREATE ROLE b4 LOGIN", "CREATE ROLE a4 LOGIN", "CREATE ROLE v4 LOGIN",
+                    "CREATE ROLE w4 LOGIN", f"REVOKE CONNECT ON DATABASE {b} FROM PUBLIC",
+                    f"GRANT CONNECT ON DATABASE {b} TO g4", "GRANT g4 TO b4 WITH ADMIN OPTION",
+                    "GRANT g4 TO w4 WITH INHERIT FALSE"):
+            c.execute(cmd)
+        c.execute("SET ROLE b4")
+        c.execute("GRANT g4 TO a4 WITH ADMIN OPTION")
+        c.execute("GRANT g4 TO w4")
+        c.execute("SET ROLE a4")
+        c.execute("GRANT g4 TO v4")
+        c.execute("RESET ROLE")
+    m, previsto = _remover_e_conferir(servidor, b, ["b4"], "w4")
+    g4, b4, su = (m.papel_por_nome(n).id for n in ("g4", "b4", servidor.usuario))
+    assert m.papel_por_nome("w4").concedido_por == {g4: {b4: (True, True), su: (False, True)}}
+    assert previsto.papel_por_nome("a4").membro_de == ()
+    assert previsto.papel_por_nome("v4").membro_de == (g4,)
+    w4 = previsto.papel_por_nome("w4")
+    assert w4.membro_de == (g4,) and w4.nao_herda == (g4,)
+    assert _servidor.acesso(previsto, previsto.papel_por_nome("v4").id, previsto.banco_atual) == "herdado"
+
+
 def test_remover_quem_deu_connect_e_pertenca_igual_ao_postgresql(servidor, banco_servidor):
     """adm tem CONNECT com opção de conceder e ADMIN em grp; deu CONNECT a eu2 e ao PUBLIC e grp a outro. Remover
     adm leva tudo isso junto (DROP OWNED em cascata) — o rascunho prevê, a trava vê e o PostgreSQL confirma."""
@@ -273,7 +356,7 @@ def test_remover_quem_deu_connect_e_pertenca_igual_ao_postgresql(servidor, banco
     with _conectar_como(servidor, "eu2", b) as c:              # eu2 entra só pelo que adm deu: a trava recusa
         m = catalogo_servidor.modelo_servidor(c)
     adm = m.papel_por_nome("adm")
-    assert m.bancos[m.banco_atual].concedido_por[m.eu] == (adm.id,)
+    assert m.bancos[m.banco_atual].concedido_por[m.eu] == {adm.id: False}
     bancos = tuple(x.nome for x in m.bancos.values() if x.aceita_conexao)
     import pytest
     with pytest.raises(ValueError):
@@ -281,19 +364,12 @@ def test_remover_quem_deu_connect_e_pertenca_igual_ao_postgresql(servidor, banco
     with servidor.conectar(b) as c:
         m = catalogo_servidor.modelo_servidor(c)
     if m.versao >= 160000:
-        assert m.papel_por_nome("outro").concedido_por == {m.papel_por_nome("grp").id: (adm.id,)}
+        assert m.papel_por_nome("outro").concedido_por == {m.papel_por_nome("grp").id: {adm.id: (True, True)}}
     r = RascunhoServidor(m)
     r.acrescentar(RemoverPapeis((adm.id,), m.eu, bancos))
     previsto = r.modelo()
     _aplicar(servidor, r, b)
-    with servidor.conectar(b) as c:
-        depois = catalogo_servidor.modelo_servidor(c)
-        for papel in previsto.papeis.values():
-            for banco in previsto.bancos.values():
-                pode = c.execute("SELECT has_database_privilege(%s, %s, 'CONNECT')",
-                                 (papel.nome, banco.nome)).fetchone()[0]
-                assert (_servidor.acesso(previsto, papel.id, banco.id) != "nenhum") == pode, (papel.nome, banco.nome)
-    assert _por_nome(previsto) == _por_nome(depois)
+    _confere_com_postgresql(servidor, b, previsto)
     assert _servidor.acesso(previsto, previsto.papel_por_nome("eu2").id, previsto.banco_atual) == "nenhum"
 
 

@@ -27,10 +27,11 @@ class Papel:
     sem_set: Tuple[str, ...] = ()       # dos `membro_de`, os sem SET (16+: não pode `SET ROLE` para o grupo); só se lê
     herda: bool = True                  # rolinherit (16+: só o padrão das pertenças novas)
     sistema: bool = False               # papel do próprio PostgreSQL (`pg_*`): conta no acesso, as telas escondem
-    concedido_por: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
-                                        # grupo → ids de quem deu a pertença (16+: `pg_auth_members.grantor`; pode
-                                        # haver vários). Sem entrada: não se sabe (até o 15, ou dada no rascunho) e
-                                        # a pertença não cai junto com ninguém
+    concedido_por: Dict[str, Dict[str, Tuple[bool, bool]]] = field(default_factory=dict)
+                                        # grupo → {quem deu a pertença: (INHERIT, SET) dessa linha} — 16+: uma linha
+                                        # de `pg_auth_members` por concedente (`grantor`). `nao_herda`/`sem_set` são
+                                        # o resumo delas (herda se alguma herda). Sem entrada: não se sabe (até o
+                                        # 15, ou dada no rascunho) e a pertença não cai junto com ninguém
 
 
 @dataclass
@@ -43,9 +44,9 @@ class Banco:
     publico: bool                       # PUBLIC tem CONNECT (o padrão do PostgreSQL)
     estado: str = ""
     template: bool = False              # datistemplate (template1, template0)
-    concedido_por: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
-                                        # quem tem o CONNECT (id ou "PUBLIC") → ids de quem o deu (o grantor no
-                                        # `datacl`; pode haver vários). Sem entrada: dado pelo dono
+    concedido_por: Dict[str, Dict[str, bool]] = field(default_factory=dict)
+                                        # quem tem o CONNECT (id ou "PUBLIC") → {quem o deu (o grantor no `datacl`;
+                                        # pode haver vários): com a opção de conceder}. Sem entrada: dado pelo dono
 
 
 @dataclass
