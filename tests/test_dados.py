@@ -13,6 +13,7 @@ from ratt.db import checagem, filtro, guardar, rascunho, sessao
 from ratt.db.modelo import Coluna, Ligacao, Modelo, Tabela
 from ratt.db.idioma import t
 
+from conftest import esperar_que, esperar_tela, esperar_workers
 from test_canvas import AppTeste, ConsultaFalsa, FonteFalsa, contado, modelo_png, pronto
 
 
@@ -883,7 +884,7 @@ class AppDados(App):
 async def pronto_dados(app, voltas=4):
     """As leituras da tela Dados vêm em duas etapas (o modelo, depois a grade): espera as duas."""
     for _ in range(voltas):
-        await app.workers.wait_for_complete()
+        await esperar_workers(app)
         await asyncio.sleep(0.05)
 
 
@@ -1128,6 +1129,33 @@ def test_sem_tempo_ao_trocar_o_filtro_esvazia_a_grade_e_sem_contagem(monkeypatch
             tela.vigiar()                                          # nada mudou: não relê
             await pronto_dados(app)
             assert len([c for c in fonte.chamadas if c[0] == "pagina"]) == antes + 1
+    asyncio.run(roteiro())
+
+
+def test_vigia_nao_se_sobrepoe_ao_timer(monkeypatch, tmp_path):
+    """Uma olhada pedida à mão e o timer logo em seguida: a segunda não sai enquanto a primeira está no ar (a marca
+    de "no ar" é posta na thread da tela, antes da thread começar) — nada é cancelado, o banco é lido uma vez só."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.worker import WorkerCancelled
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 44)):
+            await pronto_dados(app)
+            tela = app.screen
+            antes = len(fonte.oids)
+            fonte.escritas += 1
+            tela.vigiar()
+            tela.vigiar()                                          # o timer, logo depois do pedido à mão
+            assert tela._olhando
+            try:
+                await app.workers.wait_for_complete()
+            except WorkerCancelled:
+                pytest.fail("uma olhada cancelou a outra")
+            await pronto_dados(app)
+            assert len(fonte.oids) == antes + 1 and not tela._olhando
+            assert len([c for c in fonte.chamadas if c[0] == "pagina"]) == 2       # a abertura e a releitura
     asyncio.run(roteiro())
 
 
@@ -1691,6 +1719,18 @@ def test_apagar_banco_de_teste_tenta_de_novo():
         conftest.apagar_banco(admin, "ratt_teste_1", espera=esperas.append)
 
 
+def test_criar_banco_de_teste_que_falha_duas_vezes_falha_com_o_erro():
+    import conftest
+    esperas = []
+    admin = _AdminTeimoso([psycopg.errors.ObjectInUse("o banco modelo está em uso")])
+    conftest.criar_banco(admin, "ratt_teste_1", espera=esperas.append)          # a segunda tentativa dá certo
+    assert admin.comandos == ['CREATE DATABASE "ratt_teste_1"'] * 2 and esperas == [0.5]
+    admin = _AdminTeimoso([psycopg.errors.InsufficientPrivilege("permissão negada para criar banco de dados")] * 2)
+    with pytest.raises(pytest.fail.Exception) as falha:                         # falha — não "pulado"
+        conftest.criar_banco(admin, "ratt_teste_1", espera=esperas.append)
+    assert "InsufficientPrivilege: permissão negada para criar banco de dados" in str(falha.value)
+
+
 def test_coluna_de_identidade_e_gerada_no_json_so_quando_fogem_do_padrao():
     r = rascunho.Rascunho(Modelo("public"))
     r.acrescentar(rascunho.CriarTabela(Tabela(r.novo_id("t"), "public", "x", [
@@ -1722,7 +1762,7 @@ def test_escolher_linha_mostra_a_destacada_em_tela_pequena():
                 self.push_screen(formularios_dados.EscolherLinha(Fonte(), "public", "pessoas", "id"))
         app = A()
         async with app.run_test(size=(largura, altura)) as piloto:
-            await app.workers.wait_for_complete()
+            await esperar_workers(app)
             await piloto.pause()
             tela = app.screen
             caixa, lista = tela.query_one(Vertical), tela.query_one(OptionList)
@@ -2153,11 +2193,13 @@ def test_banco_muda_por_baixo_do_formulario_reconta(monkeypatch, tmp_path):
             assert not _botao(form).disabled
             tela.sessao.rascunho.base.tabelas["t1"].colunas[1].nome = "nome2"     # renomeada por fora
             consulta.n = 3
+            consulta.presa = True                           # a recontagem espera: dá para ver o "recontando…"
             await piloto.click("#por_no_rascunho")
-            await piloto.pause()
+            await esperar_que(piloto, lambda: form.contando, mensagem="não recontou")
             assert app.screen is form and tela.sessao.rascunho.operacoes == []
             assert t("dados.f.recontando") in str(form.query_one("#erro").render())
             assert form.contando and _botao(form).disabled
+            consulta.solta.set()
             await contado(app, form)
             assert str(form.query_one("#erro").render()) == "" and not _botao(form).disabled
             await piloto.click("#por_no_rascunho")

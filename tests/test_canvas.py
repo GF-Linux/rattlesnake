@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest
 
+from conftest import esperar_que, esperar_tela, esperar_workers
 from ratt.db import modelo, rascunho
 from ratt.db.modelo import Coluna, Ligacao, Modelo, Tabela
 
@@ -866,7 +867,7 @@ class AppTeste(App):
 
 async def pronto(app):
     """Espera as leituras do banco (feitas em thread) terminarem e chegarem à tela."""
-    await app.workers.wait_for_complete()
+    await esperar_workers(app)
     await asyncio.sleep(0.05)
 
 
@@ -876,7 +877,7 @@ async def contado(app, form, limite=5.0):
     import time
     fim = time.monotonic() + limite
     while True:
-        await app.workers.wait_for_complete()
+        await esperar_workers(app)
         await asyncio.sleep(0.02)
         if not form.contando:
             return
@@ -940,6 +941,38 @@ def test_redesenha_quando_o_banco_muda(monkeypatch, tmp_path):
             app.screen.vigiar()
             await piloto.pause(0.3)
             assert "t4" not in app.screen.vista.tabelas
+    asyncio.run(roteiro())
+
+
+def test_vigia_do_canvas_nao_se_sobrepoe_ao_timer(monkeypatch, tmp_path):
+    """Um pedido à mão e o timer logo depois: a segunda leitura não sai com a primeira no ar (a marca é posta na
+    thread da tela) — nenhuma é cancelada e o banco é lido uma vez."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.worker import WorkerCancelled
+
+    class Fonte(FonteFalsa):
+        lidas = 0
+
+        def assinatura(self):
+            Fonte.lidas += 1
+            return self.sig
+
+    async def roteiro():
+        fonte = Fonte()
+        app = AppTeste(fonte)
+        async with app.run_test(size=(120, 40)):
+            await pronto(app)
+            tela, antes = app.screen, Fonte.lidas
+            fonte.sig = 2
+            tela.vigiar()
+            tela.vigiar()
+            assert tela._lendo
+            try:
+                await app.workers.wait_for_complete()
+            except WorkerCancelled:
+                pytest.fail("uma leitura cancelou a outra")
+            await pronto(app)
+            assert Fonte.lidas == antes + 1 and not tela._lendo and tela.marca == 2
     asyncio.run(roteiro())
 
 
@@ -1407,12 +1440,14 @@ def test_menu_torna_obrigatoria_e_renomeia(monkeypatch, tmp_path):
             assert app.screen.selecao[0] == "coluna"
             await piloto.press("space")
             assert isinstance(app.screen, formularios.MenuSelecao)
+            tela = app.screen_stack[-2]
             app.screen.dismiss("obrigatoria")
-            await pronto(app)
-            assert isinstance(app.screen, formularios.FormSimples)
+            await esperar_que(piloto, lambda: isinstance(app.screen, formularios.FormSimples))
+            form = app.screen
+            await esperar_tela(piloto, form)
             await piloto.click("#por_no_rascunho")
-            await pronto(app)
-            assert "SET NOT NULL" in app.screen.rascunho.sql_texto()
+            await esperar_que(piloto, lambda: app.screen is tela, mensagem="o formulário não fechou")
+            assert "SET NOT NULL" in tela.rascunho.sql_texto()
     asyncio.run(roteiro())
 
 
@@ -1432,7 +1467,7 @@ def test_apagar_tabela_com_dependentes_oferece_cascade(monkeypatch, tmp_path):
             await piloto.press("x")
             form = app.screen
             assert isinstance(form, formularios.ConfirmarApagar)
-            await piloto.pause()
+            await esperar_tela(piloto, form)
             botao = form.query_one("#por_no_rascunho").region           # logo depois de abrir, "contando…"
             await contado(app, form)
             await piloto.pause()
@@ -1441,7 +1476,7 @@ def test_apagar_tabela_com_dependentes_oferece_cascade(monkeypatch, tmp_path):
             assert casc.display and casc.visible
             casc.value = True
             await piloto.click("#por_no_rascunho")                     # sem esperar: os avisos não mexem no botão
-            await pronto(app)
+            await esperar_que(piloto, lambda: app.screen is not form, mensagem="o formulário não fechou")
             assert "DROP TABLE public.roles CASCADE;" in app.screen.rascunho.sql_texto()
     asyncio.run(roteiro())
 
@@ -2570,7 +2605,7 @@ def test_tudo_em_schema_grande_pede_confirmacao_e_nao_trava(monkeypatch, tmp_pat
             await piloto.press("tab"); await piloto.pause()                  # a tela responde enquanto desenha
             assert tela.selecao is not None
             soltar.set()
-            await app.workers.wait_for_complete(); await piloto.pause(0.1)
+            await esperar_workers(app); await piloto.pause(0.1)
             assert tela.foco is None and len(tela.vista.tabelas) == 201
             assert tela.query_one(canvas.Quadro).aviso_vazio == ""
     asyncio.run(roteiro())
@@ -2593,7 +2628,7 @@ def test_tudo_grande_descarta_se_trocou_de_schema(monkeypatch, tmp_path):
             await piloto.click("#sim"); await piloto.pause(0.1)
             tela.trocar_esquema("outro")              # trocou de schema durante o desenho
             soltar.set()
-            await app.workers.wait_for_complete(); await piloto.pause(0.1)
+            await esperar_workers(app); await piloto.pause(0.1)
             assert tela.esquema == "outro" and not tela._desenhando and tela._grade_pronta is None
             assert tela.foco == "t0" and len(tela.vista.tabelas) == canvas.LIMITE_FOCO   # o schema novo abriu em foco
     asyncio.run(roteiro())
@@ -2636,7 +2671,7 @@ def test_mover_durante_o_desenho_nao_se_perde(monkeypatch, tmp_path):
             await piloto.press("shift+down"); await piloto.pause()           # mexe enquanto desenha
             assert guardar.ler_posicoes(5432, "teste", "public")["t1"] == (80, 11)
             soltar.set()
-            await app.workers.wait_for_complete(); await piloto.pause(0.1)
+            await esperar_workers(app); await piloto.pause(0.1)
             assert not tela._desenhando
             tela._selecionar(("tabela", "t2"))
             await piloto.press("shift+down"); await piloto.pause()
@@ -2662,7 +2697,7 @@ def test_desenho_velho_nao_desfaz_a_escolha_do_foco(monkeypatch, tmp_path):
             await piloto.press(*"r005"); await piloto.press("enter"); await piloto.pause()
             assert tela.foco == "t5" and not tela._desenhando
             soltar.set()
-            await app.workers.wait_for_complete(); await piloto.pause(0.1)
+            await esperar_workers(app); await piloto.pause(0.1)
             assert tela.foco == "t5" and len(tela.vista.tabelas) < 201
     asyncio.run(roteiro())
 
@@ -2763,12 +2798,12 @@ def test_on_mount_do_formbase_roda_uma_vez(monkeypatch, tmp_path):
             for form in (formularios.FormTabela(r, tela.fonte), formularios.FormLigar(r, tela.fonte, "t4", "t4.c4"),
                          formularios.ConfirmarApagar(r, tela.fonte, ("tabela", "t4"))):
                 tela._abrir(form)
+                await esperar_tela(piloto, form)    # sob carga, um tempo fixo podia não bastar para o on_mount rodar
                 await pronto(app)
-                await piloto.pause()                # sob carga, 0,05 s podia não bastar para o on_mount rodar
-                assert app.screen is form
                 if isinstance(form, formularios.ConfirmarApagar):
                     assert form.focused is form.query_one("#cancelar")      # o foco continua no cancelar
                 await piloto.press("escape")
+                await esperar_que(piloto, lambda: app.screen is tela, mensagem="o formulário não fechou")
                 await pronto(app)
     asyncio.run(roteiro())
     assert vezes == ["FormTabela", "FormLigar", "ConfirmarApagar"]

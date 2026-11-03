@@ -1,5 +1,5 @@
 """As operações de dados do rascunho contra um PostgreSQL de verdade (o fixture `banco` cria um banco descartável)."""
-from conftest import PESSOAS_SQL
+from conftest import PESSOAS_SQL, esperar_workers
 import psycopg
 import pytest
 
@@ -746,7 +746,7 @@ def _apps_isolados(monkeypatch, tmp_path):
 async def _pronto(app, voltas=6):
     import asyncio
     for _ in range(voltas):
-        await app.workers.wait_for_complete()
+        await esperar_workers(app)
         await asyncio.sleep(0.1)
 
 
@@ -852,13 +852,45 @@ def _espera_escrita(banco, tabela, antes, limite=10.0):
     raise AssertionError(f"as estatísticas de {tabela} não mudaram")
 
 
+def _estatisticas_em_dia(banco, minimos, limite=10.0):
+    """As escritas que ESTA conexão fez vão já para as estatísticas: no PostgreSQL 15+ uma conexão que acabou de
+    mandar as suas adia as seguintes (até ~10 s) — elas chegariam no meio do teste, como uma escrita de outro.
+    Força a ida (`pg_stat_force_next_flush`, que vale na próxima vez que a conexão fica ociosa: o SELECT seguinte) e
+    espera cada tabela de `minimos` mostrar pelo menos aquelas escritas."""
+    import time
+    if catalogo.versao(banco) >= 150000:
+        banco.execute("SELECT pg_stat_force_next_flush()")
+        banco.execute("SELECT 1")
+    fim = time.monotonic() + limite
+    for tabela, minimo in minimos.items():
+        oid = banco.execute("SELECT %s::regclass::oid", (tabela,)).fetchone()[0]
+        while catalogo.escritas_da_tabela(banco, oid) < minimo:
+            assert time.monotonic() < fim, f"as estatísticas de {tabela} não chegaram"
+            time.sleep(0.05)
+
+
+def test_estatisticas_da_preparacao_chegam_antes_do_teste(banco):
+    """O que a conexão do teste escreveu já está nas estatísticas depois de `_estatisticas_em_dia`, e nada mais
+    chega depois (uma espera maior que o intervalo mínimo entre duas idas, 1 s)."""
+    import time
+    banco.execute(PESSOAS_SQL)
+    _estatisticas_em_dia(banco, {"public.pessoas": 5, "public.pedidos": 3})
+    oid = banco.execute("SELECT 'public.pessoas'::regclass::oid").fetchone()[0]
+    agora = catalogo.escritas_da_tabela(banco, oid)
+    time.sleep(1.2)
+    banco.execute("SELECT 1")
+    assert agora == 5 and catalogo.escritas_da_tabela(banco, oid) == agora
+
+
 def test_vigia_so_rele_com_escrita_nesta_tabela(banco, tmp_path, monkeypatch):
     import asyncio
     import getpass
     from ratt.db import canvas, tela_dados
     from test_dados import AppDados  # noqa: F401  (o mesmo App dos testes sem banco)
     _apps_isolados(monkeypatch, tmp_path)
+    monkeypatch.setattr(tela_dados.TelaDados, "VIGIA_SEGUNDOS", 0)     # a vigia só olha quando o teste pede
     banco.execute(PESSOAS_SQL)
+    _estatisticas_em_dia(banco, {"public.pessoas": 5, "public.pedidos": 3})
     oid = lambda nome: banco.execute("SELECT %s::regclass::oid", (nome,)).fetchone()[0]
 
     async def roteiro():

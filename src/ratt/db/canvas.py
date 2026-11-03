@@ -349,6 +349,8 @@ class TelaCanvas(AcoesRascunho, Screen):
         self._relendo: Optional[sessao.SessaoRascunho] = None   # aplicada, à espera do catálogo novo
         self._sem_leitura = False           # a leitura do schema falhou e ainda não deu certo: o vigia tenta de novo
         self._tentando = False              # uma nova tentativa está no ar (o vigia não empilha outra)
+        self._lendo = False                 # uma leitura do banco está no ar (posto e tirado na thread da tela)
+        self._leitura = 0                   # sobe a cada leitura: só a última tira a marca de "no ar"
         self._avisou_posicoes = False       # já disse que não deu para gravar as posições
         self._ultimo = 0.0
         self._timer = None
@@ -1004,22 +1006,45 @@ class TelaCanvas(AcoesRascunho, Screen):
 
     # ── ler o banco (sempre fora da thread da tela) ─────────────────────────
 
+    def ler(self, esquema: str, so_se_mudou: bool = False) -> None:
+        """Lê o modelo de `esquema` numa thread. A marca de "no ar" é posta aqui, na thread da tela, antes da thread
+        começar: o vigia não começa outra leitura (que cancelaria esta, `exclusive`) enquanto ela não terminar."""
+        self._leitura += 1
+        self._lendo = True
+        self._ler(esquema, so_se_mudou, self._leitura)
+
+    def _leu(self, leitura: int) -> None:
+        if leitura == self._leitura:
+            self._lendo = False
+
+    def _de_volta(self, fn, *args) -> None:
+        try:
+            self.app.call_from_thread(fn, *args)
+        except RuntimeError:                # a app já fechou
+            pass
+
     @work(thread=True, exclusive=True, group="vigia_canvas")
-    def ler(self, esquema: str, so_se_mudou: bool = False):
-        """Lê o modelo de `esquema`. Se a tela já trocou de schema ou saiu quando a resposta chega, ela é descartada."""
+    def _ler(self, esquema: str, so_se_mudou: bool, leitura: int):
+        """Se a tela já trocou de schema ou saiu quando a resposta chega, ela é descartada. Ao terminar (depois de
+        a resposta chegar à tela), tira a marca de "no ar"."""
         primeira = not self.carregado
         try:
-            marca = self.fonte.assinatura()
-            if so_se_mudou and marca == self.marca:
+            try:
+                marca = self.fonte.assinatura()
+                if so_se_mudou and marca == self.marca:
+                    return
+                m = self.fonte.modelo(esquema)
+            except Exception as erro:
+                if primeira:            # o poller falha em silêncio; quem abre ou troca de schema precisa saber
+                    self._de_volta(self._nao_leu, esquema, erro)
                 return
-            m = self.fonte.modelo(esquema)
-        except Exception as erro:
-            if primeira:                # o poller falha em silêncio; quem abre ou troca de schema precisa saber
-                self.app.call_from_thread(self._nao_leu, esquema, erro)
-            return
-        self.app.call_from_thread(self._chegou, esquema, marca, m)
+            self._de_volta(self._chegou, esquema, marca, m)
+        finally:
+            self._de_volta(self._leu, leitura)
 
     def vigiar(self):
+        if self._lendo:                 # banco lento: uma leitura por vez, sem empilhar threads
+            return
         if self.carregado:
             self.ler(self.esquema, so_se_mudou=True)
         elif self._sem_leitura and not self._tentando:     # a primeira leitura falhou: tenta de novo

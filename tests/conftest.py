@@ -1,4 +1,5 @@
 """O que os testes com PostgreSQL dividem: o banco descartável e as tabelas de exemplo."""
+import asyncio
 import getpass
 import os
 import re
@@ -84,8 +85,8 @@ def _limpar_sobras(admin):
 
 @pytest.fixture
 def banco():
-    """Um banco descartável ratt_teste_<pid>; pula sem PostgreSQL ou sem permissão de criar banco."""
-    import psycopg
+    """Um banco descartável ratt_teste_<pid>; pula sem PostgreSQL acessível. Com o PostgreSQL no ar, não conseguir
+    criar o banco é falha (com o erro de verdade), não um teste pulado."""
     porta = int(os.environ.get("PGPORT") or 5432)
     usuario = getpass.getuser()
     admin, _ = acesso.entrar(porta, usuario)
@@ -97,17 +98,8 @@ def banco():
     try:
         _limpar_sobras(admin)
         apagar_banco(admin, nome)       # o nosso nome, deixado por um teste anterior desta rodada que não conseguiu apagar
-        erro = None
-        for tentativa in range(2):
-            try:
-                admin.execute('CREATE DATABASE "%s"' % nome)
-                criado = True
-                break
-            except psycopg.Error as e:
-                erro = e
-                time.sleep(0.5)
-        if not criado:
-            pytest.skip("não deu para criar o banco de teste: %s: %s" % (type(erro).__name__, str(erro).strip()))
+        criar_banco(admin, nome)
+        criado = True
         conexao, _ = acesso.entrar(porta, usuario, nome)
         if conexao is None:
             pytest.skip("não entrou no banco de teste")
@@ -120,3 +112,59 @@ def banco():
                 apagar_banco(admin, nome)
         finally:
             admin.close()
+
+
+def criar_banco(admin, nome, tentativas=2, espera=time.sleep):
+    """CREATE DATABASE com uma segunda tentativa (um DROP da rodada anterior pode estar terminando); se as duas
+    falham, o teste FALHA com o erro de verdade — não vira um "pulado" que esconde o problema."""
+    import psycopg
+    erro = None
+    for _ in range(tentativas):
+        try:
+            admin.execute('CREATE DATABASE "%s"' % nome)
+            return
+        except psycopg.Error as e:
+            erro = e
+            espera(0.5)
+    pytest.fail("não deu para criar o banco de teste: %s: %s" % (type(erro).__name__, str(erro).strip()))
+
+
+# ── esperar a tela sem sleep fixo ──
+
+async def esperar_workers(app, limite=10.0):
+    """Espera os workers no ar terminarem e o que eles mandaram para a tela ser processado. Um worker cancelado
+    (trocado por um mais novo do mesmo grupo `exclusive`) não é erro: `app.workers.wait_for_complete()` levantaria
+    `WorkerCancelled`. Um que falhou levanta, como antes."""
+    from textual.pilot import Pilot
+    from textual.worker import WorkerCancelled, WorkerState
+    fim = time.monotonic() + limite
+    while True:
+        vivos = [w for w in list(app.workers) if w.state in (WorkerState.PENDING, WorkerState.RUNNING)]
+        if not vivos:
+            break
+        assert time.monotonic() < fim, "os workers não terminaram: %r" % vivos
+        for w in vivos:
+            if w.state == WorkerState.PENDING:
+                await asyncio.sleep(0.01)       # ainda não começou: wait() recusaria
+                continue
+            try:
+                await w.wait()
+            except WorkerCancelled:
+                pass
+    await Pilot(app).pause()
+
+
+async def esperar_que(piloto, condicao, limite=5.0, mensagem="a condição não ficou verdadeira"):
+    """Pergunta `condicao()` até ela valer (com prazo), dando a vez à app entre uma pergunta e outra."""
+    fim = time.monotonic() + limite
+    while not condicao():
+        assert time.monotonic() < fim, mensagem
+        await piloto.pause(0.01)
+
+
+async def esperar_tela(piloto, tela, limite=5.0):
+    """Antes de clicar num formulário recém-aberto: espera ele ser a tela de cima e estar montado (sob carga, o
+    clique logo depois do push_screen pode cair na tela de baixo)."""
+    app = piloto.app
+    await esperar_que(piloto, lambda: app.screen is tela and tela.is_mounted, limite, "a tela não abriu")
+    await piloto.pause()

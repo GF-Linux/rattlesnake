@@ -67,6 +67,7 @@ class TelaDados(AcoesRascunho, Screen):
         Binding("r", "painel", t("canvas.k.rascunho")),
         Binding("escape,q", "voltar", t("canvas.k.voltar")),
     ]
+    VIGIA_SEGUNDOS = 2.0                    # de quanto em quanto tempo a vigia olha o banco (0: só à mão, nos testes)
     DEFAULT_CSS = """
     #dados_titulo { height: 1; padding: 0 1; background: $panel; }
     #dados_filtro { height: auto; max-height: 3; padding: 0 1; }
@@ -112,7 +113,8 @@ class TelaDados(AcoesRascunho, Screen):
         self._marca_escritas = None         # e a das escritas: mudou, a grade relê
         self._trava = threading.Lock()      # uma conversa com o banco por vez nesta tela
         self._calado = False
-        self._olhando = False               # a vigia está no ar
+        self._olhando = False               # uma olhada da vigia está no ar (posto e tirado na thread da tela)
+        self._olhada = 0                    # sobe a cada olhada: só a última tira a marca de "no ar"
         self._relendo: Optional[sessao.SessaoRascunho] = None
         self._criada: Optional[str] = None  # nome da tabela criada pelo rascunho que acabou de ser aplicado
 
@@ -131,8 +133,9 @@ class TelaDados(AcoesRascunho, Screen):
         self.sessao.ouvir(self._rascunho_mudou)
         self._montar()
         self._linha_contagem()
-        self._olhar(True)
-        self.set_interval(2.0, self.vigiar)
+        self._comecar_olhada(True)
+        if self.VIGIA_SEGUNDOS:
+            self.set_interval(self.VIGIA_SEGUNDOS, self.vigiar)
 
     def on_unmount(self) -> None:
         self.sessao.parar(self._rascunho_mudou)
@@ -404,32 +407,44 @@ class TelaDados(AcoesRascunho, Screen):
 
     def vigiar(self) -> None:
         if not self._olhando:              # banco lento: uma olhada por vez, sem empilhar threads
-            self._olhar(not self.carregado)
+            self._comecar_olhada(not self.carregado)
+
+    def _comecar_olhada(self, primeira: bool) -> None:
+        """A marca de "no ar" é posta aqui, na thread da tela, antes da thread começar: o timer que vem logo depois
+        de um pedido à mão não começa outra (que cancelaria esta, `exclusive`)."""
+        self._olhada += 1
+        self._olhando = True
+        self._olhar(primeira, self._olhada)
+
+    def _olhou(self, olhada: int) -> None:
+        if olhada == self._olhada:
+            self._olhando = False
 
     @work(thread=True, exclusive=True, group="vigia_dados")
-    def _olhar(self, primeira: bool) -> None:
+    def _olhar(self, primeira: bool, olhada: int = 0) -> None:
         """A estrutura do banco mudou: relê o modelo (e a grade). Só as escritas DESTA tabela (ou das que a view
-        lê) mudaram: relê a grade. Na primeira vez, as colunas da view e o relkind vêm junto."""
-        self._olhando = True
-        oid = self._oid()
+        lê) mudaram: relê a grade. Na primeira vez, as colunas da view e o relkind vêm junto. Ao terminar (depois
+        de a resposta chegar à tela), tira a marca de "no ar"."""
         try:
-            with self._trava:
-                estrutura, escritas = self.fonte.assinaturas(oid)
-                m = self.fonte.modelo(self.esquema) if primeira or estrutura != self._marca else None
-                classe = self.fonte.classe(oid) if primeira and not self.so_ver and oid is not None \
-                    and hasattr(self.fonte, "classe") else None
-                colunas = self.fonte.colunas(oid) if primeira and self._view and self._modelo_view is None \
-                    and oid is not None else None
-        except Exception as erro:
-            if primeira:
-                self._de_volta(self._nao_leu, erro)
-            return
+            oid = self._oid()
+            try:
+                with self._trava:
+                    estrutura, escritas = self.fonte.assinaturas(oid)
+                    m = self.fonte.modelo(self.esquema) if primeira or estrutura != self._marca else None
+                    classe = self.fonte.classe(oid) if primeira and not self.so_ver and oid is not None \
+                        and hasattr(self.fonte, "classe") else None
+                    colunas = self.fonte.colunas(oid) if primeira and self._view and self._modelo_view is None \
+                        and oid is not None else None
+            except Exception as erro:
+                if primeira:
+                    self._de_volta(self._nao_leu, erro)
+                return
+            if m is not None:
+                self._de_volta(self._modelo_chegou, estrutura, escritas, m, classe, colunas)
+            elif escritas != self._marca_escritas:
+                self._de_volta(self._escritas_mudaram, escritas)
         finally:
-            self._olhando = False
-        if m is not None:
-            self._de_volta(self._modelo_chegou, estrutura, escritas, m, classe, colunas)
-        elif escritas != self._marca_escritas:
-            self._de_volta(self._escritas_mudaram, escritas)
+            self._de_volta(self._olhou, olhada)
 
     def _oid(self) -> Optional[int]:
         achado = re.fullmatch(r"t(\d+)", self.tabela_id)
