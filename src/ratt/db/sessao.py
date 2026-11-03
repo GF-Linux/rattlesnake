@@ -467,6 +467,9 @@ def _sem_segredos(texto: str, segredos: List[str]) -> str:
     return _HASH.sub("<hash>", texto)
 
 
+_OBJETOS_DEPENDEM = "2BP01"     # dependent_objects_still_exist: o DROP ROLE que vê objetos; o REVOKE com dependentes
+
+
 def _erro_pg(erro) -> str:
     """O que o PostgreSQL disse, sem o trecho do comando (o `LINE 1: …` do psycopg citaria o SQL, e com ele o hash)."""
     d = getattr(erro, "diag", None)
@@ -478,23 +481,38 @@ def _erro_pg(erro) -> str:
     return f"{primeira} — {detalhe}" if detalhe else primeira
 
 
-def _erro_psql(saida: str) -> Tuple[Optional[int], str]:
-    """(linha da entrada em que o psql parou, o erro) a partir do que ele escreveu; sem as linhas `LINE n:` e `^`,
-    que repetiriam o comando."""
+_SQLSTATE = re.compile(r"(\w+):\s+([0-9A-Z]{5}):\s+")        # "ERROR:  2BP01: …" (o psql com VERBOSITY=verbose)
+_LOCALIZACAO = re.compile(r"\w+:\s+\S+, \S+:\d+")               # "LOCATION:  DropRole, user.c:1297" (traduzido também)
+
+
+class ErroPsql:
+    """O erro de um lote pelo `psql` (o caminho do sudo): só o SQLSTATE, como o `sqlstate` de uma exceção do psycopg
+    — o aplicar decide pelo código, não pelo texto (que vem no idioma do servidor)."""
+
+    def __init__(self, sqlstate: Optional[str]):
+        self.sqlstate = sqlstate
+
+
+def _erro_psql(saida: str) -> Tuple[Optional[int], str, Optional[str]]:
+    """(linha da entrada em que o psql parou, o erro, o SQLSTATE) a partir do que ele escreveu; sem as linhas
+    `LINE n:` e `^`, que repetiriam o comando, nem o código e a `LOCATION` do modo verboso. Com ON_ERROR_STOP o erro
+    é a última linha `psql:<stdin>:n:` (as de antes são avisos)."""
     linha: Optional[int] = None
+    estado: Optional[str] = None
     partes: List[str] = []
     for bruta in saida.splitlines():
         m = re.match(r"psql:<stdin>:(\d+):\s*(.*)", bruta)
         if m:
-            if linha is None:
-                linha = int(m.group(1))
-            partes.append(m.group(2).strip())
+            texto = m.group(2).strip()
+            codigo = _SQLSTATE.match(texto)
+            linha, estado = int(m.group(1)), codigo.group(2) if codigo else None
+            partes.append(_SQLSTATE.sub(r"\1:  ", texto, count=1))
             continue
         s = bruta.strip()
-        if not s or s.startswith("^") or re.match(r"(LINE|LINHA)\s+\d+:", s):
+        if not s or s.startswith("^") or re.match(r"(LINE|LINHA)\s+\d+:", s) or _LOCALIZACAO.fullmatch(s):
             continue
         partes.append(s)
-    return linha, " — ".join(p for p in partes if p) or "psql"
+    return linha, " — ".join(p for p in partes if p) or "psql", estado
 
 
 def _comando_da_linha(cmds: List[Tuple[int, str, str]], linha: Optional[int], primeira: int) -> int:
@@ -511,16 +529,17 @@ def _comando_da_linha(cmds: List[Tuple[int, str, str]], linha: Optional[int], pr
 
 
 def comando_psql(banco: str, ensaio: bool, porta: Optional[int] = None, pasta: Optional[str] = None) -> List[str]:
-    """`sudo -u postgres psql -X -q [-h pasta] [-p porta] -d <banco> -v ON_ERROR_STOP=1 -1` (como root, `runuser`).
-    A porta (e a pasta do socket, se achada) é a da tela: sem ela o psql iria ao servidor padrão. O SQL vai pela
-    entrada padrão, nunca aqui: o que está nos argumentos qualquer um vê no `ps`. Um nome de banco com `=` ou `://`
-    iria como texto de conexão: vai como `dbname='…'`. O ensaio não leva `-1` (a entrada traz BEGIN … ROLLBACK)."""
+    """`sudo -u postgres psql -X -q [-h pasta] [-p porta] -d <banco> -v VERBOSITY=verbose -f - -v ON_ERROR_STOP=1 -1`
+    (como root, `runuser`). A porta (e a pasta do socket, se achada) é a da tela: sem ela o psql iria ao servidor
+    padrão. O SQL vai pela entrada padrão (`-f -`: o erro diz a linha), nunca aqui: o que está nos argumentos qualquer
+    um vê no `ps`. O modo verboso põe o SQLSTATE no erro. Um nome de banco com `=` ou `://` iria como texto de
+    conexão: vai como `dbname='…'`. O ensaio não leva `-1` (a entrada traz BEGIN … ROLLBACK)."""
     from ratt.db import configurar
     alvo = banco
     if "=" in banco or "://" in banco:
         alvo = "dbname='" + banco.replace("\\", "\\\\").replace("'", "\\'") + "'"
     cmd = ["psql", "-X", "-q"] + (["-h", pasta] if pasta else []) + (["-p", str(int(porta))] if porta else [])
-    cmd += ["-d", alvo, "-v", "ON_ERROR_STOP=1"] + ([] if ensaio else ["-1"])
+    cmd += ["-d", alvo, "-v", "VERBOSITY=verbose", "-f", "-", "-v", "ON_ERROR_STOP=1"] + ([] if ensaio else ["-1"])
     return configurar._postgres(cmd)
 
 
@@ -737,13 +756,14 @@ class SessaoServidor(_SessaoComDisco):
             j, texto_erro, excecao = erro
             op_i = cmds[j][0]
             op = self.rascunho.operacoes[op_i]
+            estado = getattr(excecao, "sqlstate", None)         # psycopg ou o psql do sudo (ErroPsql)
             if (ensaio and isinstance(op, _rs.RemoverPapeis) and op.bancos and cmds[j][1].startswith("DROP ROLE")
-                    and (como_postgres or isinstance(excecao, psycopg.errors.DependentObjectsStillExist))):
+                    and estado == _OBJETOS_DEPENDEM):
                 print(c(f"   ~ {t('usu.ensaio_drop_role', erro=texto_erro)}", "amarelo"))
                 feitos.append(k)
                 continue
-            if isinstance(op, (_rs.TirarAcesso, _rs.TirarDoGrupo)):
-                texto_erro += self._dependentes(op, atual)
+            if isinstance(op, (_rs.TirarAcesso, _rs.TirarDoGrupo)) and estado == _OBJETOS_DEPENDEM:
+                texto_erro += self._dependentes(op, atual)     # "dependent privileges exist": diz quem depende
             print(c(f"   ✗ {texto_erro}", "laranja", "negrito"))
             if not como_postgres and isinstance(excecao, psycopg.errors.InsufficientPrivilege):
                 self.precisa_sudo = True
@@ -800,8 +820,8 @@ class SessaoServidor(_SessaoComDisco):
         codigo, saida = runner(argv, entrada)
         if codigo == 0:
             return None
-        linha, texto = _erro_psql(saida)
-        return _comando_da_linha(cmds, linha, 2 if ensaio else 1), _sem_segredos(texto, segredos), None
+        linha, texto, estado = _erro_psql(saida)
+        return _comando_da_linha(cmds, linha, 2 if ensaio else 1), _sem_segredos(texto, segredos), ErroPsql(estado)
 
     def _dependentes(self, op, conexao) -> str:
         """O REVOKE falhou: se há quem recebeu de `op.alvo`/`op.papel` o mesmo privilégio pela opção de conceder

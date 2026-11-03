@@ -1639,3 +1639,117 @@ def test_tela_permissoes_concede_e_aplica_pela_tela(servidor, banco_servidor, mo
         tem = c.execute("SELECT has_table_privilege('Leitura Ü', 'public.pessoas', 'SELECT'), "
                         "has_table_privilege('Leitura Ü', 'public.pedidos', 'SELECT')").fetchone()
         assert tem == (True, False)
+
+
+# ── revisão final: o ensaio com um papel criado no rascunho; os erros pelo sudo, pelo SQLSTATE ──
+
+def _psql_no_descartavel(servidor, chamadas=None, trocar=None):
+    """O executor do caminho do sudo com o psql de verdade, no servidor descartável e sem sudo: os argumentos que o
+    ratt monta (`comando_psql`) depois de `psql`, com o socket, a porta e o usuário do cluster. `trocar(entrada)`
+    muda o SQL antes (para provocar outro erro de verdade)."""
+    import subprocess
+    import pytest
+    from conftest import _binario_pg
+    psql = _binario_pg("psql")
+    if not psql:
+        pytest.skip("sem psql instalado")
+
+    def executor(argv, entrada):
+        resto = list(argv[argv.index("psql") + 1:])
+        for opcao in ("-h", "-p"):
+            if opcao in resto:
+                i = resto.index(opcao)
+                del resto[i:i + 2]
+        if trocar is not None:
+            entrada = trocar(entrada)
+        if chamadas is not None:
+            chamadas.append((argv, entrada))
+        p = subprocess.run([psql, "-h", servidor.socket_dir, "-p", str(servidor.porta), "-U", servidor.usuario]
+                           + resto, input=entrada, text=True, capture_output=True, cwd="/", timeout=60)
+        return p.returncode, (p.stderr or "") + (p.stdout or "" if p.returncode else "")
+    return executor
+
+
+def _antes_de(chave, **valores):
+    """O começo fixo de um texto do idioma (antes de `{erro}`)."""
+    from ratt.db.idioma import t
+    return t(chave, erro="\x00", **valores).split("\x00")[0]
+
+
+def test_ensaio_pelo_sudo_so_desculpa_o_drop_role_que_ainda_ve_objetos(servidor, banco_servidor, monkeypatch,
+                                                                       tmp_path):
+    """Pelo sudo, o DROP ROLE do fim do ensaio só é "esperado" com o erro de objetos que dependem do papel
+    (SQLSTATE 2BP01, lido do psql de verdade); outro erro nessa linha é uma falha do ensaio."""
+    import io
+    from contextlib import redirect_stdout
+    from ratt.db.rascunho_servidor import RemoverPapeis
+    b1 = banco_servidor
+    with servidor.conectar() as c:
+        c.execute("CREATE ROLE ana LOGIN")
+    _objetos_em(servidor, b1, "ana")
+    s = _sessao_servidor(servidor, b1, monkeypatch, tmp_path)
+    s.acrescentar(RemoverPapeis((s.rascunho.base.papel_por_nome("ana").id,), s.rascunho.base.eu, ()))
+    _reabrir(s, servidor, b1)
+    conexoes = _Conexoes(servidor)
+    try:
+        saida = io.StringIO()
+        with redirect_stdout(saida):
+            r = s.aplicar(_conectar_de(conexoes, b1), True, lambda nome: SENHA, como_postgres=True,
+                          runner=_psql_no_descartavel(servidor))
+        assert r == (0, None, None), saida.getvalue()
+        assert _antes_de("usu.ensaio_drop_role") in saida.getvalue()
+        # o mesmo DROP ROLE falhando por outro motivo (o papel não existe: 42704) não é desculpado
+        saida = io.StringIO()
+        with redirect_stdout(saida):
+            codigo, indice, msg = s.aplicar(
+                _conectar_de(conexoes, b1), True, lambda nome: SENHA, como_postgres=True,
+                runner=_psql_no_descartavel(servidor, trocar=lambda e: e.replace("DROP ROLE ana;", "DROP ROLE ninguem_x;")))
+    finally:
+        conexoes.fechar()
+    assert codigo == 1 and indice == 0 and "ninguem_x" in msg, saida.getvalue()
+    assert _antes_de("usu.ensaio_drop_role") not in saida.getvalue()
+    assert "42704" not in msg and "LOCATION" not in msg and "user.c" not in msg      # o texto limpo
+
+
+def test_dica_dos_dependentes_so_no_erro_de_dependentes(servidor, banco_servidor, monkeypatch, tmp_path):
+    """y tem o CONNECT com a opção de conceder e o deu a x. Tirar o de y pelo sudo (psql de verdade): o erro é o de
+    dependentes (2BP01) e a dica diz que x depende. O mesmo REVOKE falhando por outro motivo (um lock que não veio,
+    pela conexão) não ganha a dica."""
+    import psycopg
+    from ratt.db.rascunho_servidor import TirarAcesso
+    b1 = banco_servidor
+    with servidor.conectar() as c:
+        for cmd in ("CREATE ROLE y LOGIN", "CREATE ROLE x LOGIN", f"REVOKE CONNECT ON DATABASE {b1} FROM PUBLIC",
+                    f"GRANT CONNECT ON DATABASE {b1} TO y WITH GRANT OPTION"):
+            c.execute(cmd)
+        c.execute("SET ROLE y")
+        c.execute(f"GRANT CONNECT ON DATABASE {b1} TO x")
+        c.execute("RESET ROLE")
+    s = _sessao_servidor(servidor, b1, monkeypatch, tmp_path)
+    m = s.rascunho.base
+    s.acrescentar(TirarAcesso(m.papel_por_nome("y").id, m.banco_por_nome(b1).id))
+    conexoes = _Conexoes(servidor)
+
+    class _Barrada:
+        """A conexão de `b1`, mas o REVOKE falha com um lock que não veio (55P03)."""
+
+        def __init__(self, c):
+            self._c = c
+
+        def __getattr__(self, nome):
+            return getattr(self._c, nome)
+
+        def execute(self, consulta, *args, **kw):
+            if isinstance(consulta, bytes) and consulta.startswith(b"REVOKE"):
+                raise psycopg.errors.LockNotAvailable("could not obtain lock on row in relation \"pg_database\"")
+            return self._c.execute(consulta, *args, **kw)
+
+    try:
+        codigo, indice, msg = s.aplicar(_conectar_de(conexoes, b1), False, lambda nome: SENHA, como_postgres=True,
+                                        runner=_psql_no_descartavel(servidor))
+        assert codigo == 1 and indice == 0 and "x" in msg.split("—")[-1] and "CASCADE" in msg, msg
+        assert "2BP01" not in msg
+        codigo, indice, msg = s.aplicar(lambda nome: _Barrada(conexoes(nome or b1)), False, lambda nome: SENHA)
+    finally:
+        conexoes.fechar()
+    assert codigo == 1 and indice == 0 and "lock" in msg and "CASCADE" not in msg, msg

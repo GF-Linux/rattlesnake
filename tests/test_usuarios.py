@@ -1028,7 +1028,8 @@ def test_confirmar_terminal_so_sim_explicito():
 def test_comando_psql_sem_sql_e_nome_de_banco_com_igual_vai_como_dbname(monkeypatch):
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
     assert _sessao.comando_psql("estudos", False) == ["sudo", "-u", "postgres", "psql", "-X", "-q", "-d", "estudos",
-                                                      "-v", "ON_ERROR_STOP=1", "-1"]
+                                                      "-v", "VERBOSITY=verbose", "-f", "-", "-v", "ON_ERROR_STOP=1",
+                                                      "-1"]
     assert "-1" not in _sessao.comando_psql("estudos", True)
     argv = _sessao.comando_psql("host=/tmp x", False)
     assert argv[argv.index("-d") + 1] == "dbname='host=/tmp x'"
@@ -1042,8 +1043,18 @@ def test_erro_do_psql_sem_o_comando_e_sem_hash():
     saida = ("psql:<stdin>:3: ERROR:  syntax error at or near \"x\"\n"
              "LINE 1: ALTER ROLE a PASSWORD 'SCRAM-SHA-256$4096:abc$def:ghi'\n"
              "                                ^\n")
-    linha, texto = _sessao._erro_psql(saida)
-    assert linha == 3 and texto == 'ERROR:  syntax error at or near "x"'
+    linha, texto, estado = _sessao._erro_psql(saida)
+    assert linha == 3 and texto == 'ERROR:  syntax error at or near "x"' and estado is None
+    # o modo verboso (VERBOSITY=verbose): o SQLSTATE do erro (a última linha do psql; antes, um aviso) sai do texto,
+    # e a LOCATION (traduzida ou não) também
+    saida = ("psql:<stdin>:1: WARNING:  25001: there is already a transaction in progress\n"
+             "LOCALIZAÇÃO:  BeginTransactionBlock, xact.c:3954\n"
+             "psql:<stdin>:4: ERRO:  2BP01: role \"ana\" cannot be dropped because some objects depend on it\n"
+             "DETALHE:  owner of table t_ana\nLOCATION:  DropRole, user.c:1297\n")
+    linha, texto, estado = _sessao._erro_psql(saida)
+    assert linha == 4 and estado == "2BP01"
+    assert texto == ('WARNING:  there is already a transaction in progress — ERRO:  role "ana" cannot be dropped '
+                     'because some objects depend on it — DETALHE:  owner of table t_ana')
     assert _sessao._sem_segredos("a SCRAM-SHA-256$4096:abc$def:ghi b", []) == "a <hash> b"
     assert _sessao._sem_segredos("tem segredo", ["segredo"]) == "tem <hash>"
     cmds = [(0, "CREATE ROLE a", ""), (0, "ALTER ROLE a\nPASSWORD 'x'", ""), (1, "GRANT g TO a", "")]
