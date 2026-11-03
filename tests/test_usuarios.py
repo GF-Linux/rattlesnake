@@ -2194,3 +2194,79 @@ def test_P_na_tela_usuarios_escolhe_o_schema_do_banco_atual(monkeypatch, tmp_pat
             await esperar_que(piloto, lambda: app.screen is usuarios)
             assert banco.fechada
     asyncio.run(roteiro())
+
+
+# ── revisão final: os formulários num terminal de 80×24 ──
+
+def _inteiro_na_tela(w) -> bool:
+    """A região do widget tem altura, está inteira na tela e nenhum contêiner de cima a corta."""
+    from textual.errors import NoWidget
+    try:
+        geo = w.screen.find_widget(w)
+    except NoWidget:
+        return False
+    return (w.region.height >= 1 and w.screen.region.contains_region(w.region)
+            and geo.clip.contains_region(w.region))
+
+
+async def _botoes_e_erro_a_vista(app, piloto, tela, form, com_motivo=True):
+    from textual.widgets import Button
+    app.push_screen(form)
+    await esperar_tela(piloto, form)
+    await esperar_workers(app)
+    erro = form.query_one("#erro")
+    alvos = [form.query_one("#por_no_rascunho", Button), form.query_one("#cancelar", Button), erro]
+    await esperar_que(piloto, lambda: (_texto(erro).strip() or not com_motivo)
+                      and all(_inteiro_na_tela(w) for w in alvos),
+                      mensagem=f"{type(form).__name__}: botões ou motivo fora da tela: "
+                               f"{[(w.id, w.region) for w in alvos]}")
+    if form.foco_no_cancelar:
+        assert app.focused is alvos[1]
+    form.dismiss(None)
+    await esperar_que(piloto, lambda: app.screen is tela)
+
+
+def test_formularios_usuarios_em_80x24_botoes_e_motivo_a_vista(monkeypatch, tmp_path):
+    from ratt.db import formularios_usuarios as fu
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    m = _modelo_com_banco_atual()
+    m.papeis["r40"] = _papel("r40", "nome_" + "comprido_" * 16)    # título e motivo de várias linhas
+    fonte = FonteServidorFalsa(m)
+
+    async def roteiro():
+        app = _app_usuarios(fonte)
+        async with app.run_test(size=(80, 24)) as piloto:
+            app._piloto = piloto
+            await _usuarios_pronta(app)
+            tela = app.screen
+            s = tela.sessao
+            for form in (fu.FormNovoUsuario(s, fonte),                      # nome vazio
+                         fu.FormPoderes(s, fonte, "r13"),                   # nada muda
+                         fu.FormPoderes(s, fonte, "r40"),
+                         fu.FormGrupos(s, fonte, "r13"),                    # nada mudou nos grupos
+                         fu.EscolherPapel(s, fonte, "d1"),                  # já é o dono
+                         fu.ConfirmarRemocao(s, fonte, ("r10",))):          # a trava: remover a si
+                await _botoes_e_erro_a_vista(app, piloto, tela, form)
+            # sem motivo, com os avisos da remoção (a área maior): os botões continuam à vista, foco no cancelar
+            form = fu.ConfirmarRemocao(s, fonte, ("r40", "r13"))
+            await _botoes_e_erro_a_vista(app, piloto, tela, form, com_motivo=False)
+    asyncio.run(roteiro())
+
+
+def test_formularios_permissoes_em_80x24_botoes_e_motivo_a_vista(monkeypatch, tmp_path):
+    from ratt.db import formularios_usuarios as fu
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    fonte = FontePermFalsa(*_schema_tela(n_tabelas=40, n_papeis=15))
+
+    async def roteiro():
+        app = _app_perm(fonte)
+        async with app.run_test(size=(80, 24)) as piloto:
+            await _perm_pronta(app, piloto)
+            tela = app.screen
+            s, f = tela.sessao, tela.fonte_avisos
+            muitas = tuple(f"t{100 + k}" for k in range(40))
+            for form in (fu.FormPrivilegios(s, f, ("r12",), ("t10", "t11", "t12")),    # marque o que conceder
+                         fu.FormPrivilegios(s, f, ("r12", "r11", "r30", "r31", "r32", "r33"), muitas),
+                         fu.FormSchema(s, f, "r11", {"USAGE"})):                        # nada muda no schema
+                await _botoes_e_erro_a_vista(app, piloto, tela, form)
+    asyncio.run(roteiro())

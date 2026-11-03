@@ -33,6 +33,7 @@ from ratt.db.tela import COR
 
 _NIVEL = {"info": ("·", COR["cinza"]), "atencao": ("!", COR["amarelo"]), "impede": ("✖", COR["laranja"])}
 _ATRASO = 0.25                      # espera a pessoa parar de mexer antes de contar no servidor
+_CORPO_MIN, _AVISOS_MIN = 5, 2      # num terminal baixo, a área dos avisos encolhe até aqui para o corpo ter isso
 
 
 def _copia(r, ops=()):
@@ -89,8 +90,17 @@ def texto_avisos(avisos) -> Text:
     return Text.assemble(*partes)
 
 
+class _Erro(Static):
+    """A linha do erro (ou do motivo da recusa): quando muda de altura, o corpo do formulário se ajusta."""
+
+    def on_resize(self) -> None:
+        caber = getattr(self.screen, "caber", None)
+        if caber is not None:
+            caber()
+
+
 class FormServidor(ModalScreen):
-    """Esqueleto: título, campos (da subclasse), SQL, erro (ou o motivo da recusa), avisos e os dois botões. A
+    """Esqueleto: título, campos e SQL (o corpo, que rola), avisos, erro (ou o motivo da recusa) e os dois botões. A
     subclasse dá `campos()` e `operacoes()` (as operações dos campos agora; ValueError diz o que falta). Fecha com
     a lista das operações que entraram no rascunho (a tela grava e avisa), ou None. Serve aos dois rascunhos: o do
     servidor (tela Usuários) e o do schema (tela Permissões) — `sessao.rascunho` e `fonte.avisos(op, rascunho)`."""
@@ -143,14 +153,14 @@ class FormServidor(ModalScreen):
 
     # ── esqueleto ──
     def compose(self) -> ComposeResult:
-        with Vertical():
+        with Vertical(id="form_caixa"):
             yield Static(Text(self.titulo), id="form_titulo")
             with Corpo(id="form_corpo"):
                 yield from self.campos()
                 yield Static(id="form_sql")
-                yield Static(id="erro")
             with VerticalScroll(id="form_avisos_area"):
                 yield Static(id="form_avisos")
+            yield _Erro(id="erro")                  # fora do corpo, junto dos botões: o motivo nunca rola para longe
             with Horizontal(id="form_botoes"):
                 yield Button(t("canvas.f.pr"), id="por_no_rascunho", variant="primary", disabled=True)
                 yield Button(t("canvas.f.cancelar"), id="cancelar")
@@ -160,6 +170,27 @@ class FormServidor(ModalScreen):
         if self.foco_no_cancelar:
             self.query_one("#cancelar", Button).focus()
         self.atualizar()
+
+    def on_resize(self) -> None:
+        self.caber()
+
+    def caber(self) -> None:
+        """Num terminal baixo (80×24) os botões e o motivo ficam à vista: só o corpo (campos e SQL) encolhe e rola,
+        e a área dos avisos encolhe se o corpo ficaria pequeno demais. Roda quando a tela ou o motivo mudam de
+        tamanho, com o resto (título, avisos, erro, botões) já medido."""
+        if not self.is_mounted:
+            return
+        caixa = self.query_one("#form_caixa")
+        corpo, area = self.query_one("#form_corpo"), self.query_one("#form_avisos_area")
+        resto = caixa.styles.gutter.height + corpo.styles.margin.height + area.styles.margin.height
+        for w in caixa.children:
+            if w is not corpo and w is not area and w.display:
+                resto += w.outer_size.height + w.styles.margin.height
+        livre = self.size.height - resto
+        avisos = max(_AVISOS_MIN, min(self.altura_avisos, livre - _CORPO_MIN))
+        if area.styles.height is None or area.styles.height.value != avisos:
+            area.styles.height = avisos
+        corpo.styles.max_height = max(1, livre - avisos)
 
     def previa(self) -> List[OperacaoServidor]:
         """As operações como seriam agora, sem gastar ids do rascunho (roda a cada mudança)."""
@@ -544,9 +575,7 @@ class FormPrivilegios(FormServidor):
     revogar a mesma letra) deixa o botão desligado, com o motivo."""
 
     altura_avisos = 3
-    # num terminal de 24 linhas o formulário inteiro cabe (os campos rolam: metade da altura), botões à vista
     DEFAULT_CSS = """
-    FormPrivilegios #form_corpo { max-height: 50vh; }
     FormPrivilegios #perm_letras { height: auto; }
     FormPrivilegios #perm_letras > Vertical { width: 1fr; height: auto; }
     FormPrivilegios #perm_letras SelectionList { height: auto; max-height: 7; border: none; padding: 0; }
