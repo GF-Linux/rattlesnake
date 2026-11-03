@@ -1159,6 +1159,51 @@ def test_vigia_nao_se_sobrepoe_ao_timer(monkeypatch, tmp_path):
     asyncio.run(roteiro())
 
 
+def _sem_suspender(monkeypatch, fonte):
+    """Aplicar sob `run_test`: sem suspender o terminal, com uma conexão falsa."""
+    from contextlib import contextmanager
+    from textual.app import App
+
+    @contextmanager
+    def sem_suspender(self):
+        yield
+    monkeypatch.setattr(App, "suspend", sem_suspender)
+
+    class Con:
+        def close(self):
+            pass
+    fonte.conexao_para_aplicar = lambda: Con()
+
+
+def test_contagem_logo_depois_de_aplicar_e_a_nova(monkeypatch, tmp_path):
+    """Aplicou pela tela Dados (um INSERT nesta tabela): a linha "N de M" já mostra o total novo — não a contagem
+    guardada de antes do aplicar, à espera da vigia."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from ratt.db import tela_dados
+    monkeypatch.setattr(tela_dados.TelaDados, "VIGIA_SEGUNDOS", 0)       # nada de vigia: só o aplicar relê
+    fonte = FonteDadosFalsa()
+    _sem_suspender(monkeypatch, fonte)
+    gil = (6, "Gil", None, None, None, True)
+
+    def rodou(self, con, arq, ensaio, cab):
+        fonte.LINHAS = FonteDadosFalsa.LINHAS + [gil]                   # o banco gravou a linha nova
+        return 0, None, None
+    monkeypatch.setattr(tela_dados.TelaDados, "_sessao", rodou)
+
+    async def roteiro():
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 44)):
+            await pronto_dados(app)
+            tela = app.screen
+            assert tela.total == 5 and t("dados.n_de_m", n=5, m=5) in _texto(tela, "#dados_contagem")
+            tela.sessao.acrescentar(rascunho.Inserir("t1", {"t1.c2": "Gil"}))
+            tela._rodar(False)
+            await pronto_dados(app)
+            assert len(tela.linhas) == 6 and tela.total == 6 and tela.total_tabela == 6
+            assert t("dados.n_de_m", n=6, m=6) in _texto(tela, "#dados_contagem")
+    asyncio.run(roteiro())
+
+
 def test_pagina_que_estoura_o_tempo_nao_trava_a_paginacao(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     from ratt.db import tela_dados

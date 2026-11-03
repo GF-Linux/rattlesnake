@@ -323,6 +323,13 @@ class TelaDados(AcoesRascunho, Screen):
         self._contar(chave, tab.esquema, tab.nome, onde, copy.deepcopy(self.filtro),
                      _rascunho.Rascunho(self._base()), self.tabela_id)
 
+    def _esquecer_contagens(self) -> None:
+        """As linhas da tabela mudaram (o aplicar desta sessão, ou alguém escreveu nela): a contagem guardada — e a
+        que ainda está a caminho — não vale mais; a próxima página conta de novo."""
+        self._chave_contada = self._chave_pedida = None
+        self._contadas = (None, None, [])
+        self.total = self.total_tabela = None
+
     @work(thread=True, exclusive=True, group="contagem_dados")
     def _contar(self, chave, esquema, nome, onde, f, r, tabela_id) -> None:
         total = total_tabela = None
@@ -481,6 +488,7 @@ class TelaDados(AcoesRascunho, Screen):
 
     def _escritas_mudaram(self, escritas) -> None:
         if self.is_attached:
+            self._esquecer_contagens()
             self._marca_escritas = escritas
             self._pedir_grade(manter=True)
 
@@ -726,8 +734,11 @@ class TelaDados(AcoesRascunho, Screen):
             s.aplicando = False
         if not self.is_attached:
             return
+        self._esquecer_contagens()          # o aplicar escreveu: a contagem de antes mentiria até a vigia passar
+        self._marca_escritas = None
         if m is None:
             self._marca = None              # a vigia traz o catálogo na próxima volta
+            self._linha_contagem()
             self.notify(t("canvas.erro_banco", erro=_primeira_linha(erro)), severity="error")
             return
         if self._criada is not None and m.por_nome(self._criada) is not None:
