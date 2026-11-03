@@ -354,14 +354,21 @@ class TelaPermissoes(AcoesRascunho, Screen):
         grade.cursor_coordinate = Coordinate(max(linha, 0), max(coluna, 0))
 
     def _linha_schema(self, v, base: catalogo.Permissoes, ef: catalogo.Permissoes) -> None:
-        """`schema public: PUBLIC USAGE · app USAGE, CREATE` — o que o rascunho dá em amarelo, o que tira com `−`."""
+        """`schema public: PUBLIC USAGE · app USAGE, CREATE` — o que o rascunho dá em amarelo, o que tira com `−`.
+        Depois das linhas da grade, os papéis do PostgreSQL que têm algo no schema (a grade não os mostra): no 15+, o
+        `public` é de `pg_database_owner`, o dono do banco."""
         texto = Text(t("perm.schema", esquema=v.esquema) + " ", style="bold")
         itens: List[Text] = []
-        for papel in self._linhas:
+        fora = sorted((p for p in set(base.schema) | set(ef.schema) if p not in self._linhas and p in v.papeis),
+                      key=lambda p: nome_papel(v, p))
+        for papel in list(self._linhas) + fora:
             agora, antes = ef.schema.get(papel, frozenset()), base.schema.get(papel, frozenset())
             if not agora and not antes:
                 continue
-            item = Text(nome_papel(v, papel) + " ")
+            nome = nome_papel(v, papel)
+            item = Text(nome + " ")
+            if nome == "pg_database_owner":
+                item.append(t("perm.dono_do_banco") + " ", style=COR["cinza"])
             partes = [Text(n, style="" if n in antes else f"bold {COR['amarelo']}") for n in _NO_SCHEMA if n in agora]
             partes += [Text("−" + n, style=f"strike {COR['laranja']}") for n in _NO_SCHEMA if n in antes and n not in agora]
             item.append_text(Text(", ").join(partes))

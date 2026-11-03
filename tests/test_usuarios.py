@@ -2317,3 +2317,29 @@ def test_tela_usuarios_servidor_fora_avisa_uma_vez_so(monkeypatch, tmp_path):
             assert not tela.carregado
             assert avisos == [t("canvas.erro_banco", erro="servidor fora do ar")]
     asyncio.run(roteiro())
+
+
+def test_tela_permissoes_linha_do_schema_mostra_o_dono_do_banco(monkeypatch, tmp_path):
+    """No PostgreSQL 15+, o `public` é de `pg_database_owner` (USAGE e CREATE). Sem nada para o PUBLIC nem para os
+    papéis da grade, a linha do schema não diz que ninguém tem: diz que o dono do banco tem."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    m, perms = _schema_tela()
+    m.papeis["r6171"] = "pg_database_owner"
+    perms = _Permissoes(perms.por_tabela, perms.dono, {"r6171": frozenset({"USAGE", "CREATE"})}, perms.padrao)
+    fonte = FontePermFalsa(m, perms)
+
+    async def roteiro():
+        app = _app_perm(fonte)
+        async with app.run_test(size=(120, 36)) as piloto:
+            await _perm_pronta(app, piloto)
+            tela = app.screen
+            assert "pg_database_owner" not in _grade_perm(tela)              # a grade continua sem os pg_*
+            schema = _texto(tela.query_one("#perm_schema"))
+            assert t("perm.schema_ninguem") not in schema
+            assert f"pg_database_owner {t('perm.dono_do_banco')} USAGE, CREATE" in schema
+            # o rascunho dá USAGE a app: aparece junto, e o dono do banco continua
+            tela.sessao.acrescentar(PermissaoNoSchema("r11", True, None))
+            await piloto.pause()
+            schema = _texto(tela.query_one("#perm_schema"))
+            assert "app USAGE" in schema and "pg_database_owner" in schema
+    asyncio.run(roteiro())

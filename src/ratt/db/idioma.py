@@ -698,6 +698,7 @@ ratt db user passwd [name]            changes a password (no name: yours)
     "perm.dono": {"pt": "dono", "en": "owner"},
     "perm.lendo": {"pt": "lendo as permissões…", "en": "reading the permissions…"},
     "perm.schema": {"pt": "schema {esquema}:", "en": "schema {esquema}:"},
+    "perm.dono_do_banco": {"pt": "(o dono do banco)", "en": "(the database owner)"},
     "perm.schema_ninguem": {"pt": "ninguém tem USAGE nem CREATE (fora superusuários)",
                             "en": "nobody has USAGE or CREATE (superusers aside)"},
     "perm.legenda": {"pt": "S I U D T R t: select insert update delete truncate references trigger",
