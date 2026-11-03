@@ -169,6 +169,7 @@ class TelaUsuarios(AcoesRascunhoServidor, Screen):
         self._calado = False
         self._relendo: Optional[_sessao.SessaoServidor] = None
         self._listando = False              # o P está listando os schemas (numa thread)
+        self._avisou_erro = False           # a primeira leitura falhou e já disse (uma vez só)
 
     def compose(self) -> ComposeResult:
         yield Static(id="usu_titulo")
@@ -253,7 +254,8 @@ class TelaUsuarios(AcoesRascunhoServidor, Screen):
             self._de_volta(self._olhou, olhada)
 
     def _nao_leu(self, erro) -> None:
-        if self.is_attached and not self.carregado:
+        if self.is_attached and not self.carregado and not self._avisou_erro:
+            self._avisou_erro = True        # a vigia segue tentando; o aviso sai uma vez
             linhas = str(erro).strip().splitlines()
             self.notify(t("canvas.erro_banco", erro=linhas[0] if linhas else type(erro).__name__), severity="error")
 

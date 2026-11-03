@@ -2287,3 +2287,33 @@ def test_formularios_permissoes_em_80x24_botoes_e_motivo_a_vista(monkeypatch, tm
                          fu.FormSchema(s, f, "r11", {"USAGE"})):                        # nada muda no schema
                 await _botoes_e_erro_a_vista(app, piloto, tela, form)
     asyncio.run(roteiro())
+
+
+def test_tela_usuarios_servidor_fora_avisa_uma_vez_so(monkeypatch, tmp_path):
+    """Enquanto a primeira leitura falha, a vigia segue tentando, mas o erro aparece uma vez (não a cada olhada)."""
+    from ratt.db import tela_usuarios
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    avisos = []
+    monkeypatch.setattr(tela_usuarios.TelaUsuarios, "notify", lambda self, msg, **kw: avisos.append(msg))
+    fonte = FonteServidorFalsa(_modelo_com_banco_atual())
+    tentativas = []
+
+    def fora():
+        tentativas.append(1)
+        raise OSError("servidor fora do ar")
+    fonte.assinatura = fora
+
+    async def roteiro():
+        app = _app_usuarios(fonte)
+        async with app.run_test(size=(140, 40)) as piloto:
+            await esperar_que(piloto, lambda: isinstance(app.screen, tela_usuarios.TelaUsuarios))
+            tela = app.screen
+            for _ in range(3):                              # três olhadas da vigia, todas falhando
+                await esperar_workers(app)
+                await esperar_que(piloto, lambda: not tela._olhando)
+                tela.vigiar()
+            await esperar_workers(app)
+            await esperar_que(piloto, lambda: len(tentativas) == 4 and not tela._olhando)
+            assert not tela.carregado
+            assert avisos == [t("canvas.erro_banco", erro="servidor fora do ar")]
+    asyncio.run(roteiro())
