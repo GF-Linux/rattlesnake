@@ -929,13 +929,15 @@ class RascunhoServidor:
     def sql_psql(self, cabecalho: str, banco_atual: str) -> str:
         """O texto SQL para rodar inteiro com um `psql -f`: o mesmo de `sql_texto`, com um `\\connect` antes de cada
         grupo de comandos que roda noutro banco (os do servidor, de qualquer banco, rodam em `banco_atual`, o da
-        tela). Sem senha nenhuma, como o resto."""
+        tela). Cada grupo de um `\\connect` é um `BEGIN;` … `COMMIT;`, como o ratt aplica: um banco por vez, cada um
+        numa transação. Sem senha nenhuma, como o resto."""
         linhas: List[str] = []
         if cabecalho:
             cab = _linha(cabecalho)
             linhas.append(cab if cab.startswith("--") else "-- " + cab)
         _, passos, _, de_quem = self._percorrer()
         conectado: Optional[str] = None
+        fim: Optional[int] = None           # onde entra o COMMIT do grupo aberto (depois da última linha dele)
         vazio = True
         for i in self._ordem():
             op, valida, desc, cmds = passos[i]
@@ -949,15 +951,21 @@ class RascunhoServidor:
             for destino, grupo in _agrupar(cmds):
                 alvo = destino if destino is not None else banco_atual
                 if alvo != conectado:
-                    linhas.append(psql_connect(alvo))
+                    if fim is not None:
+                        linhas.insert(fim, "COMMIT;")
+                    linhas += [psql_connect(alvo), "BEGIN;"]
                     conectado = alvo
                 if por_banco:
                     onde = t("usu.no_servidor") if destino is None else t("usu.no_banco", banco=destino)
                     linhas.append("-- " + _linha(onde))
                 for cmd in grupo:
                     linhas.extend((cmd + ";").split("\n"))
+                fim = len(linhas)
             if de_quem[i] is not None:
                 linhas.append("-- " + _linha(t("usu.senha_ao_aplicar", papel=ident(de_quem[i]))))
+                fim = len(linhas)
+        if fim is not None:
+            linhas.insert(fim, "COMMIT;")
         return "\n".join(linhas) + ("\n" if linhas else "")
 
     def linhas_das_operacoes(self, cabecalho: str = "") -> List[int]:

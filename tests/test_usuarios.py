@@ -1687,6 +1687,12 @@ def test_rascunho_servidor_sql_para_psql_com_connect_por_banco():
     texto = r.sql_psql("-- cabeçalho", "estudos")
     linhas = texto.splitlines()
     conecta = [l for l in linhas if l.startswith("\\connect")]
+    # cada grupo de um \\connect numa transação: BEGIN logo depois, COMMIT antes do próximo e no fim
+    comandos = [l for l in linhas if l and not l.startswith("--")]
+    assert [l for l in comandos if l.startswith("\\connect") or l in ("BEGIN;", "COMMIT;")] == \
+        [x for c in conecta for x in (c, "BEGIN;", "COMMIT;")]
+    assert comandos[-1] == "COMMIT;" and linhas[-1] == "COMMIT;"
+    assert all(comandos[comandos.index(c) + 1] == "BEGIN;" for c in conecta)
     assert conecta == ["\\connect -reuse-previous=on 'estudos'", "\\connect -reuse-previous=on 'sistema'",
                        "\\connect -reuse-previous=on 'dbname=''a=b \\\\''x\\\\''\\\\\\\\y'''",
                        "\\connect -reuse-previous=on 'estudos'"]

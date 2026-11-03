@@ -1799,3 +1799,33 @@ def test_dica_dos_dependentes_so_no_erro_de_dependentes(servidor, banco_servidor
         conexoes.fechar()
     assert codigo == 1 and indice == 0 and "lock" in msg and "CASCADE" not in msg, msg
 
+
+def test_sql_exportado_do_servidor_cada_banco_numa_transacao(servidor, banco_servidor, tmp_path):
+    """Cada grupo de um `\\connect` no `.sql` exportado é um BEGIN … COMMIT, como o ratt aplica: um comando que falha
+    no meio do grupo desfaz o grupo inteiro (ana, criada antes no mesmo grupo, não fica)."""
+    import subprocess
+    import pytest
+    from conftest import _binario_pg
+    from ratt.db.rascunho_servidor import CriarPapel, PorNoGrupo, RascunhoServidor
+    psql = _binario_pg("psql")
+    if not psql:
+        pytest.skip("sem psql instalado")
+    b1 = banco_servidor
+    with servidor.conectar() as admin:
+        admin.execute("CREATE ROLE grp NOLOGIN")
+    with servidor.conectar(b1) as c:
+        m = catalogo_servidor.modelo_servidor(c)
+    r = RascunhoServidor(m)
+    n = r.novo_id("p")
+    r.acrescentar(CriarPapel(_servidor.Papel(n, "ana", True, False, False, False)))
+    r.acrescentar(PorNoGrupo(n, m.papel_por_nome("grp").id))
+    arquivo = tmp_path / "servidor.sql"
+    arquivo.write_text(r.sql_psql("-- teste", b1), encoding="utf-8")
+    with servidor.conectar() as admin:
+        admin.execute("DROP ROLE grp")                   # o GRANT grp TO ana vai falhar, depois do CREATE ROLE ana
+    p = subprocess.run([psql, "-X", "-q", "-h", servidor.socket_dir, "-p", str(servidor.porta), "-U", servidor.usuario,
+                        "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-f", str(arquivo)],
+                       capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0 and "grp" in p.stderr
+    with servidor.conectar() as c:
+        assert c.execute("SELECT count(*) FROM pg_roles WHERE rolname = 'ana'").fetchone()[0] == 0
