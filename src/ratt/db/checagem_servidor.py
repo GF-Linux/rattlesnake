@@ -222,13 +222,17 @@ def _prevoo(r: RascunhoServidor, conexao_servidor, conectar: Conectar) -> List[s
     for i, ((op, valia, desc, _), motivo) in enumerate(zip(era, novo.motivos())):
         if valia and motivo is not None:
             msgs.append(t("chk.pv_invalida", n=i + 1, descricao=desc, motivo=motivo))
+    vista = None
     for (op, vale, _, _) in novo.passos():
         if vale and isinstance(op, RemoverPapeis):
-            msgs += _prevoo_remocao(op, agora, conexao_servidor, conectar)
+            if vista is None:
+                vista = novo.vista()
+            msgs += _prevoo_remocao(op, agora, vista, conexao_servidor, conectar)
     return msgs
 
 
-def _prevoo_remocao(op: RemoverPapeis, agora: ModeloServidor, conexao_servidor, conectar: Conectar) -> List[str]:
+def _prevoo_remocao(op: RemoverPapeis, agora: ModeloServidor, vista: ModeloServidor, conexao_servidor,
+                    conectar: Conectar) -> List[str]:
     msgs: List[str] = []
     nomes = [agora.papeis[p].nome for p in op.papeis]
     abertas = catalogo_servidor.sessoes(conexao_servidor, nomes)
@@ -245,7 +249,7 @@ def _prevoo_remocao(op: RemoverPapeis, agora: ModeloServidor, conexao_servidor, 
                               comando=f"ALTER DATABASE {ident(b.nome)} ALLOW_CONNECTIONS true;"))
         elif b.nome not in op.bancos:
             msgs.append(t("chk.pv_banco_fora", banco=b.nome))
-    dono = agora.papeis[op.novo_dono]
+    dono = agora.papeis.get(op.novo_dono) or vista.papeis[op.novo_dono]     # criado pelo próprio rascunho
     if not dono.login and dono.id != agora.eu:
         msgs.append(t("chk.pv_novo_dono", papel=dono.nome))
     eu = agora.papeis.get(agora.eu)

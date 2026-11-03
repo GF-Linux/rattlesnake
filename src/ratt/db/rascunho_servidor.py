@@ -578,15 +578,29 @@ def comandos_de(op: OperacaoServidor, m: ModeloServidor) -> Comandos:
     return cmds
 
 
-def _agrupar(cmds: Comandos) -> List[Tuple[Optional[str], List[str]]]:
-    """Os comandos seguidos de um mesmo destino juntos, na ordem."""
-    grupos: List[Tuple[Optional[str], List[str]]] = []
+def _agrupar(cmds: list) -> list:
+    """Os comandos seguidos de um mesmo destino juntos, na ordem: [(destino, x)] → [(destino, [x, …])]."""
+    grupos: list = []
     for destino, cmd in cmds:
         if grupos and grupos[-1][0] == destino:
             grupos[-1][1].append(cmd)
         else:
             grupos.append((destino, [cmd]))
     return grupos
+
+
+def linhas_dos_comandos(cmds: Comandos) -> List[str]:
+    """Os comandos de uma operação como linhas de texto, cada um com `;`; quando algum tem banco de destino, cada
+    grupo leva antes o comentário de onde roda ("no banco x:" / "no servidor"). O painel e o texto SQL usam."""
+    linhas: List[str] = []
+    por_banco = any(destino is not None for destino, _ in cmds)
+    for destino, grupo in _agrupar(cmds):
+        if por_banco:
+            onde = t("usu.no_servidor") if destino is None else t("usu.no_banco", banco=destino)
+            linhas.append("-- " + _linha(onde))
+        for cmd in grupo:
+            linhas.extend((cmd + ";").split("\n"))
+    return linhas
 
 
 # ── de e para o disco ──
@@ -820,29 +834,46 @@ class RascunhoServidor:
         que o rascunho pede vem de `senhas` ({id do papel: hash SCRAM}) e entra citada como literal num
         `ALTER ROLE … PASSWORD`, logo depois do comando da operação; faltar uma (ou não vir `senhas`) é ValueError
         — nunca sai papel com senha provisória. O ensaio passa um hash descartável. Nada daqui é guardado."""
+        return [(destino, "\n".join(sql + ";" for _, sql, _ in cmds)) for destino, cmds in self.lotes(senhas)]
+
+    def lotes(self, senhas: Optional[Dict[str, str]] = None) -> List[Tuple[Optional[str], List[Tuple[int, str, str]]]]:
+        """Os mesmos grupos de `grupos`, comando a comando: (destino, [(índice da operação no rascunho, SQL sem `;`,
+        o SQL para mostrar)]). O SQL para mostrar é o próprio, menos no `ALTER ROLE … PASSWORD`, em que o hash
+        não aparece (a sessão imprime esse texto no terminal e nos erros)."""
         from .filtro import literal
         _, passos, _, de_quem = self._percorrer()
-        comuns: Comandos = []
-        blocos: List[Comandos] = []
+        comuns: List[Tuple[Optional[str], Tuple[int, str, str]]] = []
+        blocos: List[List[Tuple[Optional[str], Tuple[int, str, str]]]] = []
         for i in self._ordem():
             op, valida, _, cmds = passos[i]
             if not valida:
                 continue
-            cmds = list(cmds)
+            itens = [(destino, (i, cmd, cmd)) for destino, cmd in cmds]
             papel = op.senha_de()
             if papel is not None:
                 if senhas is None or papel not in senhas:
                     raise ValueError(t("usu.e.falta_senha", papel=de_quem[i]))
-                cmds.append((None, _um_comando(f"ALTER ROLE {ident(de_quem[i])} PASSWORD "
-                                               f"{literal(senhas[papel], 'text')}")))
+                comeco = f"ALTER ROLE {ident(de_quem[i])} PASSWORD "
+                itens.append((None, (i, _um_comando(comeco + literal(senhas[papel], "text")),
+                                     comeco + t("usu.hash_escondido"))))
             if isinstance(op, RemoverPapeis):
-                blocos.append(cmds)
+                blocos.append(itens)
             else:
-                comuns += cmds
+                comuns += itens
         saida = []
         for bloco in ([comuns] if comuns else []) + blocos:
-            saida += [(destino, "\n".join(c + ";" for c in cmds)) for destino, cmds in _agrupar(bloco)]
+            saida += _agrupar(bloco)
         return saida
+
+    def senhas_pedidas(self) -> List[Tuple[str, str]]:
+        """(id, nome) de cada papel cuja senha o aplicar pede, na ordem em que roda, sem repetir (só as válidas)."""
+        _, passos, _, de_quem = self._percorrer()
+        vistos: Dict[str, str] = {}
+        for i in self._ordem():
+            op, valida, _, _ = passos[i]
+            if valida and op.senha_de() is not None and op.senha_de() not in vistos:
+                vistos[op.senha_de()] = de_quem[i]
+        return list(vistos.items())
 
 
     def _linhas(self, cabecalho: str) -> Tuple[List[str], List[int]]:
@@ -864,13 +895,7 @@ class RascunhoServidor:
             vazio = False
             marcas[i] = len(linhas) + 1
             linhas.append(f"-- {i + 1}. {desc}")
-            por_banco = any(destino is not None for destino, _ in cmds)
-            for destino, grupo in _agrupar(cmds):
-                if por_banco:
-                    onde = t("usu.no_servidor") if destino is None else t("usu.no_banco", banco=destino)
-                    linhas.append("-- " + _linha(onde))
-                for cmd in grupo:
-                    linhas.extend((cmd + ";").split("\n"))
+            linhas += linhas_dos_comandos(cmds)
             if de_quem[i] is not None:
                 linhas.append("-- " + _linha(t("usu.senha_ao_aplicar", papel=ident(de_quem[i]))))
         return linhas, marcas

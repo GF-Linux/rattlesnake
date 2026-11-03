@@ -160,9 +160,12 @@ def migrar_rascunho(antigo: Path, porta: int, banco: str, esquema: str, dados: d
 def separar_rascunho(porta: int, banco: str, esquema: str) -> Path:
     """Tira de cena um rascunho ilegível sem perdê-lo: renomeia para `rascunho-{esquema}.corrompido-AAAAMMDD-HHMMSS.json`
     (com `-2`, `-3`... se o nome já existir) e devolve o novo caminho. Nunca sobrescreve."""
-    origem = _arquivo_rascunho(porta, banco, esquema)
+    return _separar(_arquivo_rascunho(porta, banco, esquema), f"rascunho-{_seguro(esquema)}")
+
+
+def _separar(origem: Path, nome: str) -> Path:
     agora = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    base = f"rascunho-{_seguro(esquema)}.corrompido-{agora}"
+    base = f"{nome}.corrompido-{agora}"
     destino = origem.with_name(base + ".json")
     n = 1
     while destino.exists():
@@ -184,8 +187,11 @@ def nome_exportado(banco: str, esquema: str) -> str:
 
 def guardar_aplicado(porta: int, banco: str, texto: str) -> Path:
     """Guarda o SQL que acabou de ser aplicado em `aplicados/AAAAMMDD-HHMMSS.sql` (nunca sobrescreve)."""
-    agora = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    pasta_aplicados = pasta(porta, banco) / "aplicados"
+    return _guardar_em(pasta(porta, banco) / "aplicados", "", texto)
+
+
+def _guardar_em(pasta_aplicados: Path, prefixo: str, texto: str) -> Path:
+    agora = prefixo + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     caminho = pasta_aplicados / f"{agora}.sql"
     n = 1
     while caminho.exists():
@@ -193,3 +199,46 @@ def guardar_aplicado(porta: int, banco: str, texto: str) -> Path:
         caminho = pasta_aplicados / f"{agora}-{n}.sql"
     _escrever(caminho, texto)
     return caminho
+
+
+# ── o rascunho do servidor (papéis, grupos, acesso aos bancos): um por porta ──
+#
+# Mora em `canvas/{porta}-servidor/`. Um banco chamado "servidor" usaria a mesma pasta, mas nada se mistura: o
+# rascunho do servidor é `rascunho.json` (o de um schema é sempre `rascunho-{schema}.json`) e o SQL aplicado é
+# `aplicados/servidor-AAAAMMDD-HHMMSS.sql`.
+
+def pasta_servidor(porta: int) -> Path:
+    return _raiz() / f"{porta}-servidor"
+
+
+def arquivo_rascunho_servidor(porta: int) -> Path:
+    return pasta_servidor(porta) / "rascunho.json"
+
+
+def ler_rascunho_servidor(porta: int) -> Optional[dict]:
+    """Mesmos erros de `ler_rascunho`: ilegível é `RascunhoCorrompido`, não conseguir ler é `OSError`."""
+    return ler_rascunho_em(arquivo_rascunho_servidor(porta))
+
+
+def gravar_rascunho_servidor(porta: int, dados: Optional[dict]) -> None:
+    arquivo = arquivo_rascunho_servidor(porta)
+    if dados is None:
+        try:
+            arquivo.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    _escrever(arquivo, json.dumps(dados, ensure_ascii=False, indent=1))
+
+
+def separar_rascunho_servidor(porta: int) -> Path:
+    return _separar(arquivo_rascunho_servidor(porta), "rascunho")
+
+
+def guardar_aplicado_servidor(porta: int, texto: str) -> Path:
+    """O SQL aplicado do rascunho do servidor — o texto mostrado, que nunca tem senha nem hash."""
+    return _guardar_em(pasta_servidor(porta) / "aplicados", "servidor-", texto)
+
+
+def nome_exportado_servidor(porta: int) -> str:
+    return f"rascunho-servidor-{int(porta)}.sql"

@@ -709,3 +709,482 @@ def test_aviso_de_remocao_bate_com_o_que_o_postgresql_faz(servidor, banco_servid
     assert sai == {x for x in membros_antes - membros_depois if x[0] not in removidos}
     if m.versao >= 160000:                                         # a pertença que dora deu cai com ela
         assert sai == {("eva", "g2")}
+
+
+# ── a sessão do servidor: aplicar banco a banco, senha só ao aplicar, sudo ──
+
+import contextlib
+import re
+import time
+
+SENHA = "s3nh@-de-teste-ratt"
+
+
+def _sessao_servidor(servidor, b1, monkeypatch, tmp_path):
+    """Uma `SessaoServidor` com os dados do ratt em `tmp_path` e o catálogo lido de `b1`."""
+    from ratt.db.sessao import SessaoServidor
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "dados"))
+    s = SessaoServidor(servidor.porta)
+    with servidor.conectar(b1) as c:
+        assert s.abrir(catalogo_servidor.modelo_servidor(c)) == []
+    return s
+
+
+def _reabrir(s, servidor, b1):
+    with servidor.conectar(b1) as c:
+        return s.abrir(catalogo_servidor.modelo_servidor(c))
+
+
+def _conectar_de(conexoes, b1):
+    """O `conectar` da sessão: None é o banco atual (`b1`)."""
+    return lambda nome: conexoes(nome or b1)
+
+
+def _sem_segredo_no_disco(raiz, *segredos):
+    """Nenhum arquivo do ratt (rascunho, aplicados, o que for) tem a senha, um hash SCRAM ou os segredos dados."""
+    vistos = 0
+    for pasta, _, arquivos in os.walk(raiz):
+        for nome in arquivos:
+            with open(os.path.join(pasta, nome), "rb") as f:
+                texto = f.read().decode("utf-8", "replace")
+            vistos += 1
+            assert SENHA not in texto and "SCRAM-SHA-256$" not in texto, nome
+            for s in segredos:
+                assert s not in texto, nome
+    return vistos
+
+
+@contextlib.contextmanager
+def _senha_obrigatoria(servidor, papel):
+    """O `pg_hba.conf` do servidor descartável passa a pedir senha (SCRAM) a `papel` pelo socket, até o fim do
+    bloco (o resto continua `trust`). Espera o reload valer nos dois sentidos."""
+    import psycopg
+    hba = os.path.join(servidor.dados, "pg_hba.conf")
+    with open(hba, encoding="utf-8") as f:
+        antes = f.read()
+
+    def sem_senha_entra():
+        try:
+            psycopg.connect(host=servidor.socket_dir, port=servidor.porta, user=papel, dbname="postgres",
+                            connect_timeout=5).close()
+            return True
+        except psycopg.OperationalError:
+            return False
+
+    def esperar(condicao):
+        for _ in range(100):
+            if condicao():
+                return
+            time.sleep(0.05)
+        raise AssertionError("o pg_hba.conf novo não passou a valer")
+
+    with open(hba, "w", encoding="utf-8") as f:
+        f.write(f"local all {papel} scram-sha-256\n" + antes)
+    with servidor.conectar() as c:
+        c.execute("SELECT pg_reload_conf()")
+    try:
+        esperar(lambda: not sem_senha_entra())
+        yield
+    finally:
+        with open(hba, "w", encoding="utf-8") as f:
+            f.write(antes)
+        with servidor.conectar() as c:
+            c.execute("SELECT pg_reload_conf()")
+        esperar(sem_senha_entra)
+
+
+def test_sessao_servidor_cria_ana_com_senha_e_nada_vai_ao_disco(servidor, banco_servidor, monkeypatch, tmp_path):
+    """Ensaio: não pede senha e não cria nada. Aplicar: pede a senha de ana uma vez, ana entra com ela (o servidor
+    pede SCRAM a ana) e não entra com outra; nenhum arquivo do ratt tem a senha nem o hash."""
+    import psycopg
+    import pytest
+    from ratt.db.rascunho_servidor import CriarPapel
+    b1 = banco_servidor
+    s = _sessao_servidor(servidor, b1, monkeypatch, tmp_path)
+    n = s.rascunho.novo_id("p")
+    s.acrescentar(CriarPapel(_servidor.Papel(n, "ana", True, False, False, False)))
+    assert (tmp_path / "dados" / "ratt" / "canvas" / f"{servidor.porta}-servidor" / "rascunho.json").is_file()
+    pedidos = []
+
+    def nao_pede(nome):
+        raise AssertionError("o ensaio pediu senha")
+
+    conexoes = _Conexoes(servidor)
+    try:
+        assert s.aplicar(_conectar_de(conexoes, b1), True, nao_pede)[0] == 0
+        with servidor.conectar() as c:
+            assert c.execute("SELECT count(*) FROM pg_roles WHERE rolname = 'ana'").fetchone()[0] == 0
+        assert len(s.rascunho.operacoes) == 1
+        texto = s.rascunho.sql_texto(s.cabecalho())
+        codigo, indice, msg = s.aplicar(_conectar_de(conexoes, b1), False,
+                                        lambda nome: pedidos.append(nome) or SENHA, confirmado=texto)
+    finally:
+        conexoes.fechar()
+    assert (codigo, indice, msg) == (0, None, None) and pedidos == ["ana"]
+    s.concluir(codigo, indice, False, texto)
+    assert s.rascunho.operacoes == [] and s.aplicando
+    with servidor.conectar() as c:
+        hash_, = c.execute("SELECT rolpassword FROM pg_authid WHERE rolname = 'ana'").fetchone()
+    assert hash_.startswith("SCRAM-SHA-256$")
+    with _senha_obrigatoria(servidor, "ana"):
+        with psycopg.connect(host=servidor.socket_dir, port=servidor.porta, user="ana", dbname=b1,
+                             password=SENHA, connect_timeout=5) as c:
+            assert c.execute("SELECT current_user").fetchone()[0] == "ana"
+        with pytest.raises(psycopg.OperationalError):
+            psycopg.connect(host=servidor.socket_dir, port=servidor.porta, user="ana", dbname=b1,
+                            password="outra", connect_timeout=5)
+    aplicados = list((tmp_path / "dados" / "ratt" / "canvas" / f"{servidor.porta}-servidor" / "aplicados").iterdir())
+    assert len(aplicados) == 1 and aplicados[0].name.startswith("servidor-")
+    assert "CREATE ROLE ana LOGIN" in aplicados[0].read_text(encoding="utf-8")
+    assert _sem_segredo_no_disco(tmp_path / "dados", hash_) == 1        # o rascunho vazio sumiu; fica o aplicado
+
+
+def _objetos_em(servidor, banco, dono):
+    with servidor.conectar(banco) as c:
+        c.execute(sql.SQL("CREATE TABLE {} (i integer)").format(sql.Identifier(f"t_{dono}")))
+        c.execute(sql.SQL("ALTER TABLE {} OWNER TO {}").format(sql.Identifier(f"t_{dono}"), sql.Identifier(dono)))
+
+
+def _donos(servidor, banco):
+    with servidor.conectar(banco) as c:
+        return dict(c.execute("SELECT relname, relowner::regrole::text FROM pg_class "
+                              "WHERE relname LIKE 't\\_%' AND relkind = 'r'").fetchall())
+
+
+def test_sessao_servidor_remove_em_todos_os_bancos_e_termina_depois_de_parcial(servidor, banco_servidor,
+                                                                               monkeypatch, tmp_path):
+    """carlos (novo, com senha) recebe o que ana e bruno possuem em ratt_x1 e ratt_x2. Um gatilho de evento em ratt_x2
+    faz o DROP OWNED falhar: o servidor (carlos) e ratt_x1 ficam feitos, a remoção fica "parcial" — no disco também —
+    e o que foi feito sai do rascunho (a remoção passa a referir carlos pelo id do catálogo). Sem o gatilho, aplicar de
+    novo termina: tudo é de carlos, ana e bruno somem. A remoção entra com bancos velhos: o aplicar refaz a lista."""
+    import json
+    from ratt.db.rascunho_servidor import CriarPapel, RemoverPapeis
+    from ratt.db.sessao import SessaoServidor
+    b1 = banco_servidor
+    with servidor.conectar() as c:
+        for cmd in ("CREATE ROLE ana LOGIN", "CREATE ROLE bruno LOGIN", "CREATE DATABASE ratt_x1",
+                    "CREATE DATABASE ratt_x2"):
+            c.execute(cmd)
+    _objetos_em(servidor, "ratt_x1", "ana")
+    _objetos_em(servidor, "ratt_x2", "ana")
+    _objetos_em(servidor, "ratt_x2", "bruno")
+    with servidor.conectar("ratt_x2") as c:
+        c.execute("CREATE FUNCTION public.barra() RETURNS event_trigger LANGUAGE plpgsql AS "
+                  "$$ BEGIN RAISE EXCEPTION 'barrado de propósito'; END $$")
+        c.execute("CREATE EVENT TRIGGER barra ON ddl_command_start WHEN TAG IN ('DROP OWNED') "
+                  "EXECUTE FUNCTION public.barra()")
+    s = _sessao_servidor(servidor, b1, monkeypatch, tmp_path)
+    m = s.rascunho.base
+    ana, bruno = m.papel_por_nome("ana").id, m.papel_por_nome("bruno").id
+    n = s.rascunho.novo_id("p")
+    s.acrescentar(CriarPapel(_servidor.Papel(n, "carlos", True, False, False, False)))
+    s.acrescentar(RemoverPapeis((ana, bruno), n, (b1,)))       # bancos velhos: o rebase/aplicar refaz
+    remocao = s.rascunho.operacoes[1]
+    conexoes = _Conexoes(servidor)
+    try:
+        _reabrir(s, servidor, b1)
+        assert {"ratt_x1", "ratt_x2", "postgres", b1} <= set(remocao.bancos)
+        codigo, indice, msg = s.aplicar(_conectar_de(conexoes, b1), False, lambda nome: SENHA)
+        assert codigo == 1 and indice == 0
+        assert "ratt_x1" in msg.split("falhou")[0] and "falhou em ratt_x2" in msg and "barrado de propósito" in msg
+        assert "não rodado:" in msg and "template1" in msg.split("não rodado:")[1]
+        assert s.rascunho.operacoes == [remocao] and s.falha == 0 and s.mensagem_falha == msg
+        with servidor.conectar() as c:
+            carlos = c.execute("SELECT 'r' || oid FROM pg_roles WHERE rolname = 'carlos'").fetchone()[0]
+        assert remocao.novo_dono == carlos and s.rascunho.invalidas == set()
+        assert _donos(servidor, "ratt_x1") == {"t_ana": "carlos"}
+        assert _donos(servidor, "ratt_x2") == {"t_ana": "ana", "t_bruno": "bruno"}
+        pasta = tmp_path / "dados" / "ratt" / "canvas" / f"{servidor.porta}-servidor"
+        gravado = json.loads((pasta / "rascunho.json").read_text(encoding="utf-8"))
+        assert gravado["parcial"] == {"op": 0, "mensagem": msg}
+        outra = SessaoServidor(servidor.porta)                     # outra sessão (outro processo) vê a marca
+        _reabrir(outra, servidor, b1)
+        assert outra.falha == 0 and outra.mensagem_falha == msg
+        aplicado, = (pasta / "aplicados").iterdir()
+        assert aplicado.read_text(encoding="utf-8").startswith("-- PARCIAL: ")
+        with servidor.conectar("ratt_x2") as c:
+            c.execute("DROP EVENT TRIGGER barra")
+        codigo, indice, msg = s.aplicar(_conectar_de(conexoes, b1), False, lambda nome: SENHA)
+    finally:
+        conexoes.fechar()
+    assert (codigo, indice, msg) == (0, None, None)
+    assert _donos(servidor, "ratt_x1") == {"t_ana": "carlos"}
+    assert _donos(servidor, "ratt_x2") == {"t_ana": "carlos", "t_bruno": "carlos"}
+    with servidor.conectar() as c:
+        assert c.execute("SELECT count(*) FROM pg_roles WHERE rolname IN ('ana', 'bruno')").fetchone()[0] == 0
+    assert not (pasta / "rascunho.json").exists()
+    _sem_segredo_no_disco(tmp_path / "dados")
+
+
+def test_sessao_servidor_remover_sem_ser_superusuario_oferece_sudo(servidor, banco_servidor, monkeypatch, tmp_path):
+    """maria (CREATEROLE, não superusuária) cria um papel e remove ana: o aplicar recusa antes de mudar nada e oferece
+    o sudo; aceito, cada lote vai por `sudo -u postgres psql … -1` com o SQL pela entrada padrão (o executor falso
+    roda a entrada no servidor descartável como superusuário). A senha é pedida uma vez só; o SQL e o hash nunca
+    aparecem nos argumentos."""
+    from ratt.db import painel
+    from ratt.db.rascunho_servidor import CriarPapel, RemoverPapeis
+    b1 = banco_servidor
+    with servidor.conectar() as c:
+        for cmd in ("CREATE ROLE maria LOGIN CREATEROLE", "CREATE ROLE ana LOGIN"):
+            c.execute(cmd)
+    _objetos_em(servidor, b1, "ana")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "dados"))
+    from ratt.db.sessao import SessaoServidor
+    s = SessaoServidor(servidor.porta)
+    with _conectar_como(servidor, "maria", b1) as c:
+        s.abrir(catalogo_servidor.modelo_servidor(c))
+    m = s.rascunho.base
+    n = s.rascunho.novo_id("p")
+    s.acrescentar(CriarPapel(_servidor.Papel(n, "dani", True, False, False, False)))
+    s.acrescentar(RemoverPapeis((m.papel_por_nome("ana").id,), m.papel_por_nome(servidor.usuario).id, ()))
+    with _conectar_como(servidor, "maria", b1) as c:                 # o vigia da tela: os bancos são refeitos
+        s.rebase(catalogo_servidor.modelo_servidor(c))
+    assert "postgres" in s.rascunho.operacoes[1].bancos
+    chamadas, perguntas, pedidos, sudo = [], [], [], []
+
+    def executor(argv, entrada):
+        chamadas.append((argv, entrada))
+        banco = argv[argv.index("-d") + 1]
+        try:
+            with servidor.conectar(banco) as c:
+                if "-1" in argv:
+                    with c.transaction():
+                        c.execute(entrada)
+                else:
+                    c.execute(entrada)
+        except Exception as e:               # como o psql: o erro na saída de erro, código 3
+            return 3, f"psql:<stdin>:1: ERROR:  {e}\nLINE 1: {entrada}"
+        return 0, ""
+
+    abertas = {}
+
+    def conectar(nome):
+        nome = nome or b1
+        if nome not in abertas:
+            abertas[nome] = _conectar_como(servidor, "maria", nome)
+        return abertas[nome]
+
+    try:
+        texto = s.rascunho.sql_texto(s.cabecalho())
+        codigo, indice, msg = painel.aplicar_servidor(
+            s, conectar, False, lambda nome: pedidos.append(nome) or SENHA,
+            lambda pergunta: perguntas.append(pergunta) or True, runner=executor,
+            garantir_sudo=lambda: sudo.append(1) or True, confirmado=texto)
+    finally:
+        for c in abertas.values():
+            c.close()
+    assert (codigo, indice, msg) == (0, None, None), msg
+    assert len(perguntas) == 1 and "sudo" in perguntas[0] and sudo == [1] and pedidos == ["dani"]
+    destinos = [argv[argv.index("-d") + 1] for argv, _ in chamadas]
+    assert destinos[0] == b1 and destinos[-1] == b1 and "postgres" in destinos
+    for argv, entrada in chamadas:
+        if os.geteuid() != 0:
+            assert argv[:4] == ["sudo", "-u", "postgres", "psql"]
+        assert argv[-3:] == ["-v", "ON_ERROR_STOP=1", "-1"]
+        assert "-X" in argv and "-q" in argv and argv[argv.index("-p") + 1] == str(servidor.porta)
+        assert not any(";" in a or "ROLE" in a or "SCRAM" in a for a in argv)     # nada de SQL nos argumentos
+    assert "CREATE ROLE dani LOGIN;" in chamadas[0][1] and "PASSWORD 'SCRAM-SHA-256$" in chamadas[0][1]
+    assert "DROP ROLE ana;" in chamadas[-1][1]
+    with servidor.conectar() as c:
+        assert c.execute("SELECT rolpassword LIKE 'SCRAM-SHA-256$%' FROM pg_authid "
+                         "WHERE rolname = 'dani'").fetchone()[0] is True
+        assert c.execute("SELECT count(*) FROM pg_roles WHERE rolname = 'ana'").fetchone()[0] == 0
+    assert _donos(servidor, b1) == {"t_ana": servidor.usuario}
+    _sem_segredo_no_disco(tmp_path / "dados")
+
+
+def test_sessao_servidor_erro_de_psql_pelo_sudo_nao_mostra_o_hash(servidor, banco_servidor, monkeypatch, tmp_path):
+    """Pelo sudo, o psql que falha repete o comando (`LINE 1: …`): a mensagem e a marca não levam o hash, e a
+    operação marcada é a do comando da linha em que ele parou."""
+    from ratt.db.rascunho_servidor import CriarPapel, PorNoGrupo
+    b1 = banco_servidor
+    with servidor.conectar() as c:
+        c.execute("CREATE ROLE grp NOLOGIN")
+    s = _sessao_servidor(servidor, b1, monkeypatch, tmp_path)
+    n = s.rascunho.novo_id("p")
+    s.acrescentar(CriarPapel(_servidor.Papel(n, "eva", True, False, False, False)))
+    s.acrescentar(PorNoGrupo(n, s.rascunho.base.papel_por_nome("grp").id))
+    with servidor.conectar() as c:
+        c.execute("DROP ROLE grp")
+        c.execute("CREATE ROLE grp NOLOGIN")               # mesmo nome, outro oid: o pré-voo recusa
+    conexoes = _Conexoes(servidor)
+    entradas = []
+
+    def executor(argv, entrada):
+        entradas.append(entrada)
+        hash_ = re.search(r"'(SCRAM-SHA-256\$[^']+)'", entrada).group(1)
+        return 3, f"psql:<stdin>:2: ERROR:  syntax error at or near \"{hash_}\"\nLINE 1: ALTER ROLE eva PASSWORD '{hash_}'\n    ^"
+
+    try:
+        codigo, indice, msg = s.aplicar(_conectar_de(conexoes, b1), False, lambda nome: SENHA, como_postgres=True,
+                                        runner=executor)
+        assert codigo == 1 and indice is None and "grp" in msg and entradas == []     # recusado antes
+        s.tirar([1])
+        codigo, indice, msg = s.aplicar(_conectar_de(conexoes, b1), False, lambda nome: SENHA, como_postgres=True,
+                                        runner=executor)
+    finally:
+        conexoes.fechar()
+    assert codigo == 1 and indice == 0 and len(entradas) == 1
+    assert "SCRAM" not in msg and "<hash>" in msg and "LINE" not in msg and SENHA not in msg
+    assert "SCRAM" not in (s.mensagem_falha or "")
+    _sem_segredo_no_disco(tmp_path / "dados")
+
+
+def test_sessao_servidor_revoke_com_dependentes_e_revoke_de_quem_nao_concedeu(servidor, banco_servidor,
+                                                                              monkeypatch, tmp_path):
+    """y tem o CONNECT com a opção de conceder e o deu a x. Tirar o de y: "dependent privileges exist" — a mensagem
+    diz que x depende, nada muda e a operação fica marcada. Tirar o de x (dado por y): o superusuário revoga como o
+    dono e o de y fica — o aplicar não diz que deu certo: "o acesso continua: foi concedido por y". No 16+, o
+    mesmo com a pertença em g dada por y."""
+    from ratt.db.rascunho_servidor import TirarAcesso, TirarDoGrupo
+    b1 = banco_servidor
+    with servidor.conectar() as c:
+        v16 = c.info.server_version >= 160000
+        for cmd in ("CREATE ROLE y LOGIN", "CREATE ROLE x LOGIN", "CREATE ROLE g NOLOGIN",
+                    f"REVOKE CONNECT ON DATABASE {b1} FROM PUBLIC",
+                    f"GRANT CONNECT ON DATABASE {b1} TO y WITH GRANT OPTION", "GRANT g TO y WITH ADMIN OPTION"):
+            c.execute(cmd)
+        c.execute("SET ROLE y")
+        c.execute(f"GRANT CONNECT ON DATABASE {b1} TO x")
+        c.execute("GRANT g TO x")
+        c.execute("RESET ROLE")
+    s = _sessao_servidor(servidor, b1, monkeypatch, tmp_path)
+    m = s.rascunho.base
+    x, y, g = (m.papel_por_nome(nome).id for nome in ("x", "y", "g"))
+    d = m.banco_por_nome(b1).id
+    conexoes = _Conexoes(servidor)
+    try:
+        s.acrescentar(TirarAcesso(y, d))
+        codigo, indice, msg = s.aplicar(_conectar_de(conexoes, b1), False, lambda nome: SENHA)
+        assert codigo == 1 and indice == 0 and s.falha == 0
+        assert "x" in msg.split("—")[-1] and "CASCADE" in msg
+        with servidor.conectar() as c:
+            assert c.execute("SELECT has_database_privilege('y', %s, 'CONNECT')", (b1,)).fetchone()[0]
+        s.tirar([0])
+        s.acrescentar(TirarAcesso(x, d))
+        if v16:
+            s.acrescentar(TirarDoGrupo(x, g))
+        codigo, indice, msg = s.aplicar(_conectar_de(conexoes, b1), False, lambda nome: SENHA)
+    finally:
+        conexoes.fechar()
+    assert codigo == 0 and indice is None and msg == s.aviso
+    assert f"o acesso de x ao banco {b1} continua: foi concedido por y" in msg
+    if v16:
+        assert "x continua no grupo g: a pertença foi concedida por y" in msg
+    with servidor.conectar() as c:
+        assert c.execute("SELECT has_database_privilege('x', %s, 'CONNECT')", (b1,)).fetchone()[0]
+
+
+def test_sessao_servidor_ensaio_da_remocao_nao_muda_nada(servidor, banco_servidor, monkeypatch, tmp_path):
+    """O ensaio roda cada banco e desfaz; o DROP ROLE do fim, que ainda vê os objetos (os bancos foram desfeitos), é
+    o esperado do ensaio, não uma falha. Nada muda no servidor nem no rascunho."""
+    from ratt.db.rascunho_servidor import RemoverPapeis
+    b1 = banco_servidor
+    with servidor.conectar() as c:
+        c.execute("CREATE ROLE ana LOGIN")
+    _objetos_em(servidor, b1, "ana")
+    s = _sessao_servidor(servidor, b1, monkeypatch, tmp_path)
+    m = s.rascunho.base
+    s.acrescentar(RemoverPapeis((m.papel_por_nome("ana").id,), m.eu, ()))
+    _reabrir(s, servidor, b1)
+    antes = s.rascunho.sql_texto(s.cabecalho())
+    conexoes = _Conexoes(servidor)
+    import io
+    from contextlib import redirect_stdout
+    saida = io.StringIO()
+    try:
+        with redirect_stdout(saida):
+            assert s.aplicar(_conectar_de(conexoes, b1), True, lambda nome: SENHA) == (0, None, None)
+    finally:
+        conexoes.fechar()
+    assert "esperado no ensaio" in saida.getvalue() and "conferido no estado de agora" in saida.getvalue()
+    assert _donos(servidor, b1) == {"t_ana": "ana"} and s.rascunho.sql_texto(s.cabecalho()) == antes
+    with servidor.conectar() as c:
+        assert c.execute("SELECT count(*) FROM pg_roles WHERE rolname = 'ana'").fetchone()[0] == 1
+
+
+def test_aplicar_o_rascunho_do_servidor_pela_tela(servidor, banco_servidor, monkeypatch, tmp_path):
+    """Uma tela com `AcoesRascunhoServidor` e o painel: o painel mostra os passos por banco; Enter abre a confirmação
+    com o SQL; confirmado, a parte suspensa (trocada por uma sem terminal que chama `aplicar_servidor` com a senha
+    falsa) aplica, a sessão esvazia e a tela é avisada para reler."""
+    import asyncio
+    from contextlib import contextmanager
+    from textual.app import App
+    from textual.binding import Binding
+    from textual.screen import Screen
+    from conftest import esperar_que, esperar_tela, saida_presa
+    from ratt.db import formularios, painel
+    from ratt.db.rascunho_servidor import CriarPapel, RemoverPapeis
+    b1 = banco_servidor
+    with servidor.conectar() as c:
+        c.execute("CREATE ROLE bruno LOGIN")
+    _objetos_em(servidor, b1, "bruno")
+    s = _sessao_servidor(servidor, b1, monkeypatch, tmp_path)
+    m = s.rascunho.base
+    n = s.rascunho.novo_id("p")
+    s.acrescentar(CriarPapel(_servidor.Papel(n, "ana", True, False, False, False)))
+    s.acrescentar(RemoverPapeis((m.papel_por_nome("bruno").id,), m.eu, ()))
+    _reabrir(s, servidor, b1)
+    relidos = []
+
+    class Fonte:
+        porta, usuario, banco = servidor.porta, servidor.usuario, b1
+
+    class Tela(painel.AcoesRascunhoServidor, Screen):
+        BINDINGS = [Binding("enter", "aplicar"), Binding("e", "ensaio")]
+
+        def __init__(self):
+            super().__init__()
+            self.fonte, self.sessao = Fonte(), s
+
+        def compose(self):
+            yield painel.PainelSQL()
+
+        def on_mount(self):
+            self.query_one(painel.PainelSQL).atualizar(self.sessao.rascunho.passos())
+
+        def _pronto(self):
+            return True
+
+        def _conectar(self):
+            return painel.ConexoesServidor(servidor.porta, servidor.usuario, b1,
+                                           entrar=lambda porta, usuario, nome: (servidor.conectar(nome), None))
+
+        def _sessao_servidor(self, conectar, ensaio, cabecalho, confirmado):
+            return painel.aplicar_servidor(self.sessao, conectar, ensaio, lambda nome: SENHA, lambda p: False,
+                                           confirmado=confirmado, cabecalho=cabecalho)
+
+        def depois_de_aplicar(self, esquema, nomes):
+            with servidor.conectar(b1) as c:
+                self.sessao.aplicado(catalogo_servidor.modelo_servidor(c))
+            relidos.append(esquema)
+
+    class AppTeste(App):
+        def on_mount(self):
+            self.push_screen(Tela())
+
+    @contextmanager
+    def sem_suspender(self):
+        yield
+
+    monkeypatch.setattr(App, "suspend", sem_suspender)
+
+    async def roteiro():
+        app = AppTeste()
+        async with app.run_test(size=(100, 40)) as piloto:
+            await esperar_que(piloto, lambda: isinstance(app.screen, Tela))
+            plano = app.screen.query_one(painel.PainelSQL).texto_plano()
+            assert "-- no banco postgres:" in plano and "DROP ROLE bruno;" in plano and "CREATE ROLE ana LOGIN;" in plano
+            await piloto.press("enter")
+            await esperar_que(piloto, lambda: isinstance(app.screen, formularios.Confirmar))
+            await esperar_tela(piloto, app.screen)
+            with saida_presa():
+                await piloto.click("#sim")
+                await esperar_que(piloto, lambda: relidos == [None])
+            assert not s.aplicando and s.rascunho.operacoes == []
+    asyncio.run(roteiro())
+    with servidor.conectar() as c:
+        assert c.execute("SELECT count(*) FROM pg_roles WHERE rolname = 'ana'").fetchone()[0] == 1
+        assert c.execute("SELECT count(*) FROM pg_roles WHERE rolname = 'bruno'").fetchone()[0] == 0
+    assert _donos(servidor, b1) == {"t_bruno": servidor.usuario}
+    _sem_segredo_no_disco(tmp_path / "dados")

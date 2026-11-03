@@ -857,3 +857,205 @@ def test_aviso_quem_sai_de_um_grupo_pela_remocao_ou_pela_cascata(monkeypatch):
     # tirar do grupo é o pedido: não é aviso
     assert not _com(cs.avisos_da_operacao_servidor(TirarDoGrupo("r13", "r12"), RascunhoServidor(m), _conectar_falso()),
                     "chk.sai_do_grupo")
+
+
+# ── a sessão do servidor: disco, parcial, bancos refeitos; senhas e sudo (o que não precisa de servidor) ──
+
+from ratt.db import guardar
+from ratt.db import painel as _painel
+from ratt.db import sessao as _sessao
+
+
+def test_prevoo_novo_dono_criado_no_proprio_rascunho(monkeypatch):
+    """O novo dono pode ser um papel que o rascunho cria antes (as comuns rodam antes da remoção): o pré-voo olha a
+    vista, não quebra por ele ainda não existir no servidor."""
+    base = modelo_exemplo()
+    del base.bancos["d3"]
+    r = RascunhoServidor(base)
+    n = r.novo_id("p")
+    r.acrescentar(CriarPapel(Papel(n, "carlos", True, False, False, False)))
+    r.acrescentar(RemoverPapeis(("r13",), n, ("estudos", "sistema")))
+    _prevoo_falso(monkeypatch, base)
+    assert cs.prevoo(r, object(), _conectar_falso()) == []
+    r2 = RascunhoServidor(base)
+    n2 = r2.novo_id("p")
+    r2.acrescentar(CriarPapel(Papel(n2, "grupo", False, False, False, False)))
+    r2.acrescentar(RemoverPapeis(("r13",), n2, ("estudos", "sistema")))
+    msgs = cs.prevoo(r2, object(), _conectar_falso())
+    assert len(msgs) == 1 and "grupo" in msgs[0] and "LOGIN" in msgs[0]
+
+
+def _sessao_srv(monkeypatch, tmp_path, porta=5999):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    return _sessao.SessaoServidor(porta)
+
+
+def test_sessao_servidor_grava_em_porta_servidor_e_le_de_volta(monkeypatch, tmp_path):
+    s = _sessao_srv(monkeypatch, tmp_path)
+    assert s.abrir(modelo_exemplo()) == []
+    ouvidos = []
+    s.ouvir(lambda: ouvidos.append(1))
+    s.acrescentar(PorNoGrupo("r16", "r12"))
+    arquivo = tmp_path / "ratt" / "canvas" / "5999-servidor" / "rascunho.json"
+    assert json.loads(arquivo.read_text(encoding="utf-8"))["operacoes"][0]["tipo"] == "por_no_grupo"
+    assert ouvidos == [1]
+    outra = _sessao.SessaoServidor(5999)
+    outra.abrir(modelo_exemplo())
+    assert len(outra.rascunho.operacoes) == 1 and outra.rascunho.invalidas == set()
+    assert s.desfazer() is not None and not arquivo.exists()      # vazio apaga o arquivo
+    assert s.cabecalho().startswith("ratt db") and "5999" in s.cabecalho()
+
+
+def test_sessao_servidor_arquivo_ilegivel_vai_para_o_lado_e_sem_ler_nao_grava(monkeypatch, tmp_path):
+    s = _sessao_srv(monkeypatch, tmp_path)
+    arquivo = tmp_path / "ratt" / "canvas" / "5999-servidor" / "rascunho.json"
+    arquivo.parent.mkdir(parents=True)
+    arquivo.write_text("{ quebrado", encoding="utf-8")
+    avisos = s.abrir(modelo_exemplo())
+    assert len(avisos) == 1 and "corrompido" in avisos[0]
+    assert not arquivo.exists() and len(list(arquivo.parent.glob("rascunho.corrompido-*.json"))) == 1
+    s2 = _sessao_srv(monkeypatch, tmp_path, porta=6000)
+
+    def nao_le(porta):
+        raise PermissionError("sem permissão")
+
+    monkeypatch.setattr(guardar, "ler_rascunho_servidor", nao_le)
+    avisos = s2.abrir(modelo_exemplo())
+    assert s2.sem_gravar and len(avisos) == 1 and "servidor" in avisos[0]
+    s2.acrescentar(PorNoGrupo("r16", "r12"))
+    assert not (tmp_path / "ratt" / "canvas" / "6000-servidor" / "rascunho.json").exists()
+
+
+def test_sessao_servidor_marca_parcial_fica_no_disco_ate_a_operacao_sair(monkeypatch, tmp_path):
+    s = _sessao_srv(monkeypatch, tmp_path)
+    arquivo = tmp_path / "ratt" / "canvas" / "5999-servidor" / "rascunho.json"
+    arquivo.parent.mkdir(parents=True)
+    op = rs._op_para_dict(RemoverPapeis(("r13",), "r10", ("estudos", "sistema")))
+    arquivo.write_text(json.dumps({"operacoes": [op], "proximo": 1,
+                                   "parcial": {"op": 0, "mensagem": "feito em estudos; falhou em sistema: x"}}),
+                       encoding="utf-8")
+    s.abrir(modelo_exemplo())
+    assert s.falha == 0 and s.mensagem_falha.startswith("feito em estudos")
+    s.acrescentar(PorNoGrupo("r16", "r12"))                        # outra mudança não apaga a marca de parcial
+    assert s.falha == 0 and json.loads(arquivo.read_text(encoding="utf-8"))["parcial"]["op"] == 0
+    s.tirar([0])
+    assert s.falha is None and s.mensagem_falha is None
+    assert "parcial" not in json.loads(arquivo.read_text(encoding="utf-8"))
+    for ruim in ({"op": 5, "mensagem": "x"}, {"op": True, "mensagem": "x"}, {"op": 0}, "lixo"):   # marca estragada
+        arquivo.write_text(json.dumps({"operacoes": [op], "proximo": 1, "parcial": ruim}), encoding="utf-8")
+        s3 = _sessao.SessaoServidor(5999)
+        s3.abrir(modelo_exemplo())
+        assert len(s3.rascunho.operacoes) == 1 and s3.falha is None
+
+
+def test_sessao_servidor_rebase_refaz_os_bancos_da_remocao(monkeypatch, tmp_path):
+    s = _sessao_srv(monkeypatch, tmp_path)
+    s.abrir(modelo_exemplo())
+    s.acrescentar(RemoverPapeis(("r13",), "r10", ("estudos",)))
+    op = s.rascunho.operacoes[0]
+    s.rebase(modelo_exemplo())
+    assert op.bancos == ("estudos", "sistema")                     # os que aceitam conexão (fechado não)
+    agora = modelo_exemplo()
+    agora.bancos["d8"] = Banco("d8", "novo", "r10", True, ("r10",), True)
+    s.rebase(agora)
+    assert op.bancos == ("estudos", "sistema", "novo")
+    arquivo = tmp_path / "ratt" / "canvas" / "5999-servidor" / "rascunho.json"
+    assert json.loads(arquivo.read_text(encoding="utf-8"))["operacoes"][0]["bancos"] == ["estudos", "sistema", "novo"]
+    assert "-- no banco novo:" in s.rascunho.sql_texto()
+
+
+def test_obter_servidor_uma_por_porta():
+    class App:
+        pass
+
+    class Fonte:
+        def __init__(self, porta):
+            self.porta, self.banco = porta, "x"
+
+    app = App()
+    a = _sessao.obter_servidor(app, Fonte(5432))
+    assert _sessao.obter_servidor(app, Fonte(5432)) is a and _sessao.obter_servidor(app, Fonte(5433)) is not a
+
+
+def test_lotes_tem_o_indice_da_operacao_e_o_hash_nao_aparece_no_texto_mostrado():
+    base = modelo_exemplo()
+    r = RascunhoServidor(base)
+    n = r.novo_id("p")
+    r.acrescentar(RemoverPapeis(("r15",), "r10", ("estudos", "sistema")))
+    r.acrescentar(CriarPapel(Papel(n, "ana2", True, False, False, False)))
+    r.acrescentar(TrocarSenha("r16"))
+    assert r.senhas_pedidas() == [(n, "ana2"), ("r16", "carla")]
+    lotes = r.lotes({n: "SCRAM-SHA-256$h1", "r16": "SCRAM-SHA-256$h2"})
+    assert [d for d, _ in lotes] == [None, "estudos", "sistema", None]
+    comuns = lotes[0][1]
+    assert [i for i, _, _ in comuns] == [1, 1, 2] and all(i == 0 for _, cmds in lotes[1:] for i, _, _ in cmds)
+    assert "SCRAM-SHA-256$h1" in comuns[1][1] and "SCRAM-SHA-256$" not in comuns[1][2] + comuns[2][2]
+    assert comuns[1][2].startswith("ALTER ROLE ana2 PASSWORD <")
+    assert r.grupos({n: "SCRAM-SHA-256$h1", "r16": "SCRAM-SHA-256$h2"}) == [
+        (d, "\n".join(sql + ";" for _, sql, _ in cmds)) for d, cmds in lotes]
+
+
+def test_painel_desenha_comandos_com_banco_de_destino():
+    linhas = _painel._linhas_comandos([("estudos", "REASSIGN OWNED BY ana TO jared"), (None, "DROP ROLE ana")])
+    assert linhas == ["-- no banco estudos:", "REASSIGN OWNED BY ana TO jared;", "-- no servidor (de qualquer banco):",
+                      "DROP ROLE ana;"]
+    assert _painel._linhas_comandos(["SELECT 1", "SELECT 2"]) == ["SELECT 1;", "SELECT 2;"]
+
+
+def test_pedir_senha_terminal_duas_vezes_vazia_nao_vale_e_ctrl_c_sobe():
+    respostas = iter(["", "abc", "abd", "abc", "abc"])
+    mostrado = []
+    assert _painel.pedir_senha_terminal("ana", ler=lambda p: next(respostas), mostrar=mostrado.append) == "abc"
+    assert len(mostrado) == 2                                       # a vazia e a que não bateu
+
+    def ctrl_c(p):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        _painel.pedir_senha_terminal("ana", ler=ctrl_c, mostrar=mostrado.append)
+
+
+def test_confirmar_terminal_so_sim_explicito():
+    assert _painel.confirmar_terminal("?", ler=lambda p: " S ") is True
+    assert _painel.confirmar_terminal("?", ler=lambda p: "") is False
+
+    def fim(p):
+        raise EOFError
+
+    assert _painel.confirmar_terminal("?", ler=fim) is False
+
+
+def test_comando_psql_sem_sql_e_nome_de_banco_com_igual_vai_como_dbname(monkeypatch):
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    assert _sessao.comando_psql("estudos", False) == ["sudo", "-u", "postgres", "psql", "-X", "-q", "-d", "estudos",
+                                                      "-v", "ON_ERROR_STOP=1", "-1"]
+    assert "-1" not in _sessao.comando_psql("estudos", True)
+    argv = _sessao.comando_psql("host=/tmp x", False)
+    assert argv[argv.index("-d") + 1] == "dbname='host=/tmp x'"
+    assert _sessao.comando_psql("estudos", False, 5433, "/run/postgresql")[4:12] == [
+        "-X", "-q", "-h", "/run/postgresql", "-p", "5433", "-d", "estudos"]
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    assert _sessao.comando_psql("estudos", False)[:4] == ["runuser", "-u", "postgres", "--"]
+
+
+def test_erro_do_psql_sem_o_comando_e_sem_hash():
+    saida = ("psql:<stdin>:3: ERROR:  syntax error at or near \"x\"\n"
+             "LINE 1: ALTER ROLE a PASSWORD 'SCRAM-SHA-256$4096:abc$def:ghi'\n"
+             "                                ^\n")
+    linha, texto = _sessao._erro_psql(saida)
+    assert linha == 3 and texto == 'ERROR:  syntax error at or near "x"'
+    assert _sessao._sem_segredos("a SCRAM-SHA-256$4096:abc$def:ghi b", []) == "a <hash> b"
+    assert _sessao._sem_segredos("tem segredo", ["segredo"]) == "tem <hash>"
+    cmds = [(0, "CREATE ROLE a", ""), (0, "ALTER ROLE a\nPASSWORD 'x'", ""), (1, "GRANT g TO a", "")]
+    assert [_sessao._comando_da_linha(cmds, n, 1) for n in (1, 2, 3, 4, 9)] == [0, 1, 1, 2, 2]
+    assert _sessao._comando_da_linha(cmds, None, 1) == 0
+
+
+def test_trocar_ids_leva_a_operacao_para_o_id_do_catalogo():
+    op = RemoverPapeis(("r13", "novo-p1"), "novo-p2", ("novo-p1",), {"r13": "ana"})
+    _sessao._trocar_ids(op, {"novo-p2": ("r40", "carlos")})
+    assert op.novo_dono == "r40" and op.papeis == ("r13", "novo-p1") and op.bancos == ("novo-p1",)
+    assert op.nomes == {"r13": "ana", "r40": "carlos"}
+    criar = CriarPapel(Papel("novo-p3", "d", True, False, False, False, membro_de=("novo-p2",)))
+    _sessao._trocar_ids(criar, {"novo-p2": ("r40", "carlos")})
+    assert criar.papel.membro_de == ("r40",) and criar.papel.id == "novo-p3"

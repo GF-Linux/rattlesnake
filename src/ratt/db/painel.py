@@ -102,7 +102,7 @@ class PainelSQL(VerticalScroll):
                 y += 1
             self._linhas.append(y)
             if valida:
-                codigo = f"-- {n + 1}. {desc}\n" + "\n".join(c + ";" for c in comandos)
+                codigo = f"-- {n + 1}. {desc}\n" + "\n".join(_linhas_comandos(comandos))
                 partes.append(Syntax(codigo, "sql", theme="ansi_dark", background_color=fundo or "default", word_wrap=True))
             else:
                 codigo = f"-- {n + 1}. {t('canvas.invalida')}"
@@ -146,6 +146,15 @@ class PainelSQL(VerticalScroll):
                 self.indice = n
                 break
         self._desenhar()
+
+
+def _linhas_comandos(comandos) -> List[str]:
+    """Os comandos de um passo como linhas. Os do rascunho do servidor vêm com o banco de destino: cada grupo leva
+    o comentário de onde roda."""
+    if comandos and isinstance(comandos[0], tuple):
+        from ratt.db.rascunho_servidor import linhas_dos_comandos
+        return linhas_dos_comandos(comandos)
+    return [c + ";" for c in comandos]
 
 
 # ── perguntar um nome (ou um caminho) ───────────────────────────────────────
@@ -383,15 +392,203 @@ class AcoesRascunho:
         else:
             self._gravar_exportado(caminho)
 
+    def _dica_exportado(self, arquivo: str) -> str:
+        return t("canvas.dica_exportado", arquivo=arquivo)
+
     def _gravar_exportado(self, caminho: Path) -> None:
         if not self._pode_enviar():             # o banco pode ter mudado enquanto a pergunta estava aberta
             return
         # o arquivo exportado não leva BEGIN/COMMIT (o `ratt db run` já roda numa transação); o comentário do topo
         # diz como rodar tudo de uma vez fora do ratt
-        dica = "".join("-- " + linha + "\n" for linha in t("canvas.dica_exportado", arquivo=caminho.name).splitlines())
+        dica = "".join("-- " + linha + "\n" for linha in self._dica_exportado(caminho.name).splitlines())
         try:
             caminho.write_text(dica + self.sessao.rascunho.sql_texto(self._cabecalho()), encoding="utf-8")
         except OSError as erro:
             self.notify(t("canvas.erro_exportar", caminho=caminho, erro=erro), severity="error")
             return
         self.notify(t("canvas.exportado", caminho=caminho))
+
+
+# ── as ações sobre o rascunho do servidor ───────────────────────────────────
+
+class ConexoesServidor:
+    """O `conectar(nome)` do aplicar do servidor: uma conexão por banco (aberta na primeira vez que se pede, com o
+    usuário da tela), None = o banco da tela; None se não entra. `fechar()` fecha todas."""
+
+    def __init__(self, porta: int, usuario: str, banco: str, entrar=None):
+        from ratt.db import acesso
+        self.porta, self.usuario, self.banco = porta, usuario, banco
+        self._entrar = entrar or acesso.entrar
+        self.abertas: Dict[str, object] = {}
+
+    def __call__(self, nome: Optional[str] = None):
+        nome = nome or self.banco
+        if nome not in self.abertas:
+            self.abertas[nome] = self._entrar(self.porta, self.usuario, nome)[0]
+        return self.abertas[nome]
+
+    def fechar(self) -> None:
+        for conexao in self.abertas.values():
+            if conexao is not None:
+                try:
+                    conexao.close()
+                except Exception:
+                    pass
+        self.abertas = {}
+
+
+def pedir_senha_terminal(nome: str, ler=getpass.getpass, mostrar=print) -> str:
+    """A senha de `nome`, duas vezes (iguais); vazia não vale. Ctrl+C sobe como KeyboardInterrupt (cancela o
+    aplicar inteiro, nada muda)."""
+    while True:
+        senha = ler(f"  {t('usu.senha_pedir', papel=nome)} ")
+        if not senha:
+            mostrar(f"  {t('usu.senha_vazia')}")
+            continue
+        if ler(f"  {t('usu.senha_de_novo')} ") == senha:
+            return senha
+        mostrar(f"  {t('usu.senha_diferente')}")
+
+
+def confirmar_terminal(pergunta: str, ler=input) -> bool:
+    """`[s/N]`: só um sim explícito vale; Enter, Ctrl+C ou fim da entrada é não."""
+    try:
+        return ler(pergunta + " ").strip().lower() in ("s", "sim", "y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
+def aplicar_servidor(sessao, conectar, ensaio: bool, pedir_senha, confirmar, runner=None, garantir_sudo=None,
+                     confirmado: Optional[str] = None, cabecalho: Optional[str] = None) -> tuple:
+    """O aplicar do servidor como a parte suspensa o faz, sem o terminal (testável): roda; se parou por falta de
+    poder (`sessao.precisa_sudo`), mostra o SQL que falta e pergunta se roda como postgres pelo sudo — o sudo pede a
+    senha dele ali mesmo (`garantir_sudo`), e cada banco vai pelo `psql` com o SQL na entrada padrão. Cada senha é
+    pedida uma vez só, mesmo se o aplicar roda de novo pelo sudo (fica só na memória desta chamada)."""
+    from ratt.cli import c
+    dadas: Dict[str, str] = {}
+
+    def pedir(nome: str) -> str:
+        if nome not in dadas:
+            dadas[nome] = pedir_senha(nome)
+        return dadas[nome]
+
+    try:
+        resultado = sessao.aplicar(conectar, ensaio, pedir, confirmado=confirmado, cabecalho=cabecalho)
+        if resultado[0] == 0 or not sessao.precisa_sudo:
+            return resultado
+        cabecalho = sessao.cabecalho()
+        texto = sessao.rascunho.sql_texto(cabecalho)
+        print("\n" + c(texto.rstrip(), "cinza"))
+        if not confirmar(t("usu.oferecer_sudo")):
+            return resultado
+        if not (garantir_sudo or _garantir_sudo)():
+            sessao.falha, sessao.mensagem_falha = None, t("usu.sudo_falhou")
+            print(c(f"✗ {sessao.mensagem_falha}", "laranja", "negrito"))
+            return 1, None, sessao.mensagem_falha
+        return sessao.aplicar(conectar, ensaio, pedir, como_postgres=True, runner=runner, confirmado=texto,
+                              cabecalho=cabecalho)
+    finally:
+        dadas.clear()
+
+
+def _garantir_sudo() -> bool:
+    from ratt.db import configurar
+    return configurar.garantir_sudo()
+
+
+class AcoesRascunhoServidor(AcoesRascunho):
+    """As ações de `AcoesRascunho` sobre o rascunho do servidor (`self.sessao` é uma `sessao.SessaoServidor`;
+    `self.fonte` tem `porta`, `usuario` e `banco`, o banco da tela). O aplicar vai banco por banco (cada um numa
+    transação), pede as senhas na tela suspensa e, sem poder, oferece o sudo. A tela implementa `_pronto()` e
+    `depois_de_aplicar(None, {})` (o servidor gravou: trazer o catálogo novo e chamar `sessao.aplicado`)."""
+
+    def _conectar(self) -> ConexoesServidor:
+        return ConexoesServidor(self.fonte.porta, self.fonte.usuario, self.fonte.banco)
+
+    def _destrutivas(self, passos) -> List[str]:
+        """Cada remoção, com os bancos em que roda (os que aceitam conexão agora: o rebase os refaz)."""
+        from ratt.db.rascunho_servidor import RemoverPapeis
+        return [f"{desc} — {t('usu.d.bancos', bancos=', '.join(op.bancos) or '—')}"
+                for op, valida, desc, _ in passos if valida and isinstance(op, RemoverPapeis)]
+
+    def action_aplicar(self) -> None:
+        if not self._pode_enviar():
+            return
+        passos = self.sessao.rascunho.passos()
+        texto = self.sessao.rascunho.sql_texto(self._cabecalho())
+        destrutivas = self._destrutivas(passos)
+        pergunta = t("usu.f.aplicar_pergunta", n=len(passos))
+        if destrutivas:
+            pergunta += "\n" + t("usu.d.titulo")
+        self.app.push_screen(
+            formularios.Confirmar(pergunta, destrutivas, t("canvas.f.aplicar"), foco="nao", sql=texto),
+            lambda sim: self._rodar(False, texto) if sim else None)
+
+    def _rodar(self, ensaio: bool, confirmado: Optional[str] = None) -> None:
+        if not self._pode_enviar():
+            return
+        cabecalho = self._cabecalho()
+        texto = self.sessao.rascunho.sql_texto(cabecalho)
+        if confirmado is not None and texto != confirmado:
+            self.notify(t("canvas.sql_mudou"), severity="warning")
+            self.action_aplicar()
+            return
+        conectar = self._conectar()
+        try:
+            with self.app.suspend():
+                resultado = self._sessao_servidor(conectar, ensaio, cabecalho, confirmado)
+        except (Exception, KeyboardInterrupt) as erro:     # o rascunho fica como a sessão deixou
+            from ratt.db.sessao import _sem_segredos
+            self.notify(t("canvas.erro_aplicar", erro=_sem_segredos(str(erro) or type(erro).__name__, [])),
+                        severity="error")
+            return
+        finally:
+            conectar.fechar()
+        self._concluir(resultado[0], resultado[1], ensaio, texto)
+
+    def _sessao_servidor(self, conectar, ensaio: bool, cabecalho: str, confirmado: Optional[str]) -> tuple:
+        """A parte que fala com o terminal de verdade (não roda sob `run_test`): cabeçalho, senhas pelo `getpass`,
+        a pergunta do sudo, Enter. A lógica está em `aplicar_servidor`."""
+        from ratt.cli import c
+        modo = c(f" · {t('run.modo_ensaio')}", "amarelo") if ensaio else ""
+        quem = f"{t('usu.run_rascunho')} · {getattr(self.fonte, 'usuario', None) or getpass.getuser()} @ localhost:{self.fonte.porta}"
+        print(f"{c('ratt db', 'azul', 'negrito')} {c(quem, 'cinza')}{modo}")
+        try:
+            resultado = aplicar_servidor(self.sessao, conectar, ensaio, pedir_senha_terminal, confirmar_terminal,
+                                         confirmado=confirmado, cabecalho=cabecalho)
+        except KeyboardInterrupt:
+            print("\n" + c(f"↺ {t('usu.interrompido')}", "amarelo"))
+            resultado = (1, None, None)
+        try:
+            input("\n" + t("usu.enter_volta"))
+        except (EOFError, KeyboardInterrupt):
+            pass
+        try:
+            import termios
+            termios.tcflush(sys.stdin, termios.TCIFLUSH)
+        except Exception:
+            pass
+        return resultado
+
+    def _concluir(self, codigo: int, indice: Optional[int], ensaio: bool, texto: str) -> None:
+        self.sessao.concluir(codigo, indice, ensaio, texto)
+        if codigo != 0:
+            chave = "canvas.ensaio_falhou" if ensaio else "canvas.aplicar_falhou"
+            self.notify(self.sessao.mensagem_falha or t(chave + "_sem_marca"), severity="error")
+            return
+        if ensaio:
+            self.notify(t("canvas.ensaio_ok"))
+            return
+        if self.sessao.aviso:
+            self.notify(self.sessao.aviso, severity="warning", timeout=20)
+        self.depois_de_aplicar(None, {})
+
+    def action_exportar(self) -> None:
+        if not self._pode_enviar():
+            return
+        padrao = guardar.nome_exportado_servidor(self.sessao.porta)
+        self.app.push_screen(PerguntarNome(t("canvas.f.caminho"), padrao),
+                             lambda valor: None if valor is None else self._exportar(valor or padrao))
+
+    def _dica_exportado(self, arquivo: str) -> str:
+        return t("usu.dica_exportado", arquivo=arquivo)
