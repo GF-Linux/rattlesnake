@@ -1075,7 +1075,7 @@ def _schema_perm(esquema="public"):
         "t2": _Tabela("t2", esquema, 'Tabela "X"', [_Coluna("t2.c1", "id", "bigint", pk=True)]),
         "t3": _Tabela("t3", esquema, "ação", [_Coluna("t3.c1", "id", "bigint")]),
     }
-    papeis = {"r1": "app", "r2": "Leitura Ü", "r3": 'o"quote', "r4": "select"}
+    papeis = {"r1": "app", "r2": "Leitura Ü", "r3": 'o"quote', "r4": "select", "r5": "Eu Mesmo"}
     return _Modelo(esquema, tabelas, {}, papeis=papeis, eu="r1")
 
 
@@ -1097,15 +1097,15 @@ def test_conceder_e_revogar_um_comando_com_as_listas_e_nomes_hostis():
 
 def test_conceder_futuras_gera_alter_default_privileges_for_role():
     m = _schema_perm("Vendas")
-    op = Conceder(("r2", "PUBLIC"), ("t1",), ("S", "I"), futuras=True, por="Eu Mesmo")
+    op = Conceder(("r2", "PUBLIC"), ("t1",), ("S", "I"), futuras=True, por="r5")
     assert _cmds(op, m) == [
         'GRANT SELECT, INSERT ON "Vendas".a TO "Leitura Ü", PUBLIC',
         'ALTER DEFAULT PRIVILEGES FOR ROLE "Eu Mesmo" IN SCHEMA "Vendas" GRANT SELECT, INSERT ON TABLES '
         'TO "Leitura Ü", PUBLIC']
     # sem tabela na lista: só as futuras
-    assert _cmds(Conceder(("r2",), (), ("S",), futuras=True, por="app"), m) == [
+    assert _cmds(Conceder(("r2",), (), ("S",), futuras=True, por="r1"), m) == [
         'ALTER DEFAULT PRIVILEGES FOR ROLE app IN SCHEMA "Vendas" GRANT SELECT ON TABLES TO "Leitura Ü"']
-    assert _cmds(Revogar(("r2",), ("t1",), ("S",), futuras=True, por="app"), m) == [
+    assert _cmds(Revogar(("r2",), ("t1",), ("S",), futuras=True, por="r1"), m) == [
         'REVOKE SELECT ON "Vendas".a FROM "Leitura Ü"',
         'ALTER DEFAULT PRIVILEGES FOR ROLE app IN SCHEMA "Vendas" REVOKE SELECT ON TABLES FROM "Leitura Ü"']
 
@@ -1123,6 +1123,33 @@ def test_operacao_de_permissao_mal_formada_e_recusada_e_fica_invalida():
             _rascunho.Rascunho(m).acrescentar(op)
         r = _rascunho.Rascunho(m, [op])
         assert r.invalidas == {0}
+
+
+def test_por_das_futuras_e_o_id_do_papel_e_invalida_quando_ele_some_ou_muda_de_nome():
+    """`por` guarda o id (`r{oid}`), não o nome: entra no `refere()` e nos `nomes`, e o rebase invalida a operação
+    quando o papel que cria as tabelas some ou muda de nome — como qualquer outro id."""
+    m = _schema_perm("Vendas")
+    op = Conceder(("r2",), ("t1",), ("S",), futuras=True, por="r5")
+    assert op.refere() == {"r2", "t1", "r5"}
+    assert Conceder(("r2",), ("t1",), ("S",), por="r5").refere() == {"r2", "t1"}     # sem futuras, o por não conta
+    r = _rascunho.Rascunho(m)
+    r.acrescentar(op)
+    assert op.nomes["r5"] == "Eu Mesmo"
+    assert "Eu Mesmo" in r.passos()[0][2]                       # a descrição diz o nome, não o id
+    renomeado = _schema_perm("Vendas")
+    renomeado.papeis["r5"] = "Outro"
+    assert r.rebase(renomeado) == {0}
+    sem = _schema_perm("Vendas")
+    del sem.papeis["r5"]
+    assert r.rebase(sem) == {0}
+    assert r.rebase(_schema_perm("Vendas")) == set()
+    # um por que não é papel conhecido (o nome, num rascunho de antes desta versão): recusado ao pôr, inválido ao ler
+    with pytest.raises(ValueError):
+        _rascunho.Rascunho(m).acrescentar(Conceder(("r2",), ("t1",), ("S",), futuras=True, por="Eu Mesmo"))
+    antigo = {"operacoes": [{"tipo": "conceder", "papeis": ["r2"], "tabelas": ["t1"], "privilegios": ["S"],
+                             "futuras": True, "por": "Eu Mesmo", "nomes": {"r2": "Leitura Ü", "t1": "a"}}]}
+    lido = _rascunho.Rascunho.de_dict(antigo, m)
+    assert lido.invalidas == {0} and len(lido.operacoes) == 1   # nada se perde: fica marcada, para tirar
 
 
 def test_permissao_no_schema_grant_e_revoke():
@@ -1179,7 +1206,7 @@ def test_permissoes_vao_e_voltam_do_json_e_rascunho_antigo_ainda_abre():
     import json
     m = _schema_perm()
     r = _rascunho.Rascunho(m)
-    r.acrescentar(Conceder(("r2", "PUBLIC"), ("t1", "t2"), ("S", "I"), futuras=True, por="app"))
+    r.acrescentar(Conceder(("r2", "PUBLIC"), ("t1", "t2"), ("S", "I"), futuras=True, por="r1"))
     r.acrescentar(Revogar(("r3",), ("t3",), ("D",)))
     r.acrescentar(PermissaoNoSchema("r2", True, None))
     dados = json.loads(json.dumps(r.para_dict()))
@@ -1252,7 +1279,7 @@ def test_aviso_dono_ja_tem_tudo_e_futuras():
     avisos = _checagem.avisos_da_operacao(Conceder(("r3",), ("t1", "t2"), ("S",)), r, c)
     assert _chaves(avisos) == [("info", "chk.perm_dono", "r3")]
     assert "Tabela \"X\"" in avisos[0].texto()
-    avisos = _checagem.avisos_da_operacao(Conceder(("r2",), (), ("S",), futuras=True, por="app"), r, c)
+    avisos = _checagem.avisos_da_operacao(Conceder(("r2",), (), ("S",), futuras=True, por="r1"), r, c)
     assert _chaves(avisos) == [("info", "chk.perm_futuras", "r2")]
     assert "app" in avisos[0].texto()
 
@@ -1655,3 +1682,515 @@ def test_rascunho_servidor_sql_para_psql_com_connect_por_banco():
     assert "PASSWORD" not in texto and "CREATE ROLE dora LOGIN;" in texto
     assert linhas.index(conecta[0]) < linhas.index("CREATE ROLE dora LOGIN;")
     assert linhas.index(conecta[3]) < linhas.index("DROP ROLE bruno;")
+
+
+# ── Task 7: a tela Permissões (fonte falsa: o schema e as permissões fixos) ──
+
+from ratt.db.catalogo import Permissoes as _Permissoes
+
+
+def _schema_tela(n_tabelas=0, n_papeis=0):
+    """public com pessoas, pedidos e itens (de jared, a pessoa), uma tabela estrangeira (no modelo, fora das
+    permissões) e os papéis app, leitura e um do PostgreSQL (`pg_*`, que a grade não mostra)."""
+    tabelas = {}
+    for i, nome in ((10, "pessoas"), (11, "pedidos"), (12, "itens"), (13, "externa")):
+        tabelas[f"t{i}"] = _Tabela(f"t{i}", "public", nome, [_Coluna(f"t{i}.c1", "id", "bigint", pk=True)])
+    for k in range(n_tabelas):
+        tabelas[f"t{100 + k}"] = _Tabela(f"t{100 + k}", "public", f"tab_{k:02d}", [_Coluna(f"t{100 + k}.c1", "id", "int")])
+    papeis = {"r10": "jared", "r11": "app", "r12": "leitura", "r13": "pg_read_all_data"}
+    for k in range(n_papeis):
+        papeis[f"r{30 + k}"] = f"pessoa_{k:02d}"
+    m = _Modelo("public", tabelas, {}, papeis=papeis, eu="r10")
+    regulares = [i for i in tabelas if i != "t13"]
+    tudo = frozenset("SIUDTRt")
+    por_tabela = {("r10", i): tudo for i in regulares}
+    por_tabela.update({("r11", i): frozenset("SIUD") for i in ("t10", "t11", "t12")})
+    por_tabela[("r12", "t10")] = frozenset("S")
+    perms = _Permissoes(por_tabela, {i: "r10" for i in regulares},
+                        {"PUBLIC": frozenset({"USAGE"}), "r10": frozenset({"USAGE", "CREATE"}),
+                         "r11": frozenset({"USAGE"})}, {})
+    return m, perms
+
+
+class FontePermFalsa:
+    """O banco de mentira da tela Permissões (e do canvas e da tela Dados por baixo dela): o modelo e as
+    permissões fixos por schema, a assinatura que o teste muda, e quem tem USAGE (para os avisos)."""
+
+    def __init__(self, m=None, perms=None):
+        if m is None:
+            m, perms = _schema_tela()
+        self.modelos = {"public": m}
+        self.perms = {"public": perms}
+        self.usage = {"jared": True, "app": True, "leitura": False, "public": True}
+        self.porta, self.usuario, self.banco = 5999, "jared", "estudos"
+        self.sig = 1
+        self.outras = 0
+        self.fechada = False
+
+    def esquemas(self):
+        return sorted(self.modelos)
+
+    def modelo(self, esquema):
+        return self.modelos[esquema].copia()
+
+    def permissoes(self, esquema):
+        return copy.deepcopy(self.perms[esquema])
+
+    def assinatura(self):
+        return self.sig
+
+    def assinatura_permissoes(self, esquema):
+        return (self.sig, esquema)
+
+    def assinaturas(self, oid=None):
+        return self.sig, 0
+
+    def consulta(self):
+        return _ConsultaPerm(self.usage, self.perms["public"])
+
+    def colunas(self, oid):
+        return []
+
+    def pagina(self, esquema, tabela, onde, ordem, deslocamento, limite):
+        return ["id"], ["int8"], []
+
+    def contar(self, esquema, tabela, onde):
+        return 0
+
+    def classe(self, oid):
+        return "r"
+
+    def outra(self):
+        self.outras += 1
+        return self
+
+    def fechar(self):
+        self.fechada = True
+
+
+import copy
+
+
+def _app_perm(fonte, esquema="public"):
+    from textual.app import App
+    from ratt.db import tela_permissoes
+
+    class AppPerm(App):
+        def on_mount(self):
+            tela = tela_permissoes.TelaPermissoes(fonte, esquema)
+            tela.VIGIA_SEGUNDOS = 0
+            self.push_screen(tela)
+    return AppPerm()
+
+
+async def _perm_pronta(app, piloto):
+    from ratt.db import tela_permissoes
+    await esperar_que(piloto, lambda: isinstance(app.screen, tela_permissoes.TelaPermissoes) and app.screen.carregado)
+    await esperar_workers(app)
+
+
+def _grade_perm(tela):
+    """{nome da linha: [células]} da grade de permissões (o nome sem a marca da pessoa)."""
+    from ratt.db.grade_dados import Grade
+    grade = tela.query_one(Grade)
+    linhas = {}
+    for i in range(grade.row_count):
+        celulas = [c.plain if hasattr(c, "plain") else str(c) for c in grade.get_row_at(i)]
+        linhas[celulas[0].split(" ")[0]] = celulas
+    return linhas
+
+
+def _colunas_perm(tela):
+    from ratt.db.grade_dados import Grade
+    return [c.label.plain for c in tela.query_one(Grade).ordered_columns]
+
+
+def _sem_nomes(ops):
+    """As operações sem os `nomes` (que o rascunho preenche ao pôr), para comparar com as montadas no teste."""
+    import dataclasses
+    return [dataclasses.replace(op, nomes={}) for op in ops]
+
+
+async def _contado(app, piloto, form):
+    await esperar_workers(app)
+    await esperar_que(piloto, lambda: not form.contando and form.avisos_chegados is not None, mensagem="avisos não chegaram")
+    await esperar_workers(app)
+
+
+def test_efetivas_sobrepoem_o_rascunho_as_permissoes_lidas():
+    from ratt.db import tela_permissoes
+    m, perms = _schema_tela()
+    r = _rascunho.Rascunho(m)
+    r.acrescentar(Conceder(("r12", "PUBLIC"), ("t10", "t11"), ("I", "S")))
+    r.acrescentar(Revogar(("r11",), ("t10",), ("D", "U")))
+    r.acrescentar(Conceder(("r12",), (), ("S",), futuras=True, por="r10"))      # futuras: não muda célula nenhuma
+    r.acrescentar(PermissaoNoSchema("r12", True, None))
+    r.acrescentar(PermissaoNoSchema("PUBLIC", False, None))
+    ef = tela_permissoes.efetivas(perms, r)
+    assert ef.por_tabela[("r12", "t10")] == frozenset("SI") and ef.por_tabela[("r12", "t11")] == frozenset("SI")
+    assert ef.por_tabela[("PUBLIC", "t10")] == frozenset("SI")
+    assert ef.por_tabela[("r11", "t10")] == frozenset("SI") and ef.por_tabela[("r11", "t11")] == frozenset("SIUD")
+    assert ("r12", "t12") not in ef.por_tabela
+    assert ef.schema["r12"] == frozenset({"USAGE"}) and ef.schema.get("PUBLIC", frozenset()) == frozenset()
+    assert ef.padrao == {"r12": frozenset("S")}
+    assert perms.por_tabela[("r12", "t10")] == frozenset("S")                  # o lido não muda
+    # operação inválida (a tabela sumiu) não conta
+    r2 = _rascunho.Rascunho(m, [Conceder(("r12",), ("t99",), ("T",))])
+    assert tela_permissoes.efetivas(perms, r2).por_tabela == perms.por_tabela
+
+
+def test_tela_permissoes_grade_public_dono_schema_e_o_pendente_marcado(monkeypatch, tmp_path):
+    from ratt.db import tela_permissoes
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    fonte = FontePermFalsa()
+
+    async def roteiro():
+        app = _app_perm(fonte)
+        async with app.run_test(size=(120, 36)) as piloto:
+            await _perm_pronta(app, piloto)
+            tela = app.screen
+            assert _colunas_perm(tela)[1:] == ["itens", "pedidos", "pessoas"]     # sem a estrangeira
+            g = _grade_perm(tela)
+            assert list(g) == ["PUBLIC", "app", "jared", "leitura"]              # sem os pg_*; PUBLIC primeiro
+            assert tela.query_one("#perm_grade").fixed_rows == 1
+            assert g["PUBLIC"][1:] == ["·······"] * 3
+            assert g["app"][1:] == ["SIUD···"] * 3
+            assert g["jared"][1:] == ["dono"] * 3
+            assert g["leitura"][1:] == ["·······", "·······", "S······"]
+            schema = _texto(tela.query_one("#perm_schema"))
+            assert "app USAGE" in schema and "jared USAGE, CREATE" in schema and "PUBLIC USAGE" in schema
+            assert "leitura" not in schema
+            titulo = _texto(tela.query_one("#perm_titulo"))
+            assert "estudos" in titulo and "public" in titulo and t("perm.titulo") in titulo
+            # o rascunho por cima: a letra nova aparece marcada, a tirada também
+            tela.sessao.acrescentar(Conceder(("r12",), ("t11",), ("I",)))
+            tela.sessao.acrescentar(Revogar(("r11",), ("t10",), ("D",)))
+            tela.sessao.acrescentar(PermissaoNoSchema("r12", True, None))
+            await piloto.pause()
+            g = _grade_perm(tela)
+            assert g["leitura"][2] == "·I·····" and g["app"][3] == "SIU····"
+            linha = [tela.linha_id(i) for i in range(4)].index("r12")
+            celula = tela.query_one("#perm_grade").get_row_at(linha)[2]
+            assert any("bold" in str(s.style) for s in celula.spans)              # a letra pendente se destaca
+            assert "leitura USAGE" in _texto(tela.query_one("#perm_schema"))
+            assert _texto(tela.query_one("#perm_titulo")).count("3")
+    asyncio.run(roteiro())
+
+
+def test_tela_permissoes_coluna_pessoas_concede_select_a_todos(monkeypatch, tmp_path):
+    from textual.widgets import Button, SelectionList
+    from ratt.db import formularios_usuarios as fu
+    from ratt.db.painel import PainelSQL
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    fonte = FontePermFalsa()
+
+    async def roteiro():
+        app = _app_perm(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await _perm_pronta(app, piloto)
+            tela = app.screen
+            tela.ir_para("r11", "t10")
+            await piloto.press("k")                                         # a coluna pessoas inteira
+            assert tela.alvo() == (("PUBLIC", "r11", "r10", "r12"), ("t10",))
+            await piloto.press("space")
+            await esperar_que(piloto, lambda: isinstance(app.screen, fu.FormPrivilegios))
+            form = app.screen
+            await esperar_tela(piloto, form)
+            form.query_one("#conceder", SelectionList).select("S")
+            await _contado(app, piloto, form)
+            sql = _texto(form.query_one("#form_sql"))
+            assert "GRANT SELECT ON public.pessoas TO PUBLIC, app, jared, leitura;" in sql
+            avisos = _texto(form.query_one("#form_avisos"))
+            assert "leitura" in avisos and "USAGE" in avisos                  # o aviso da Task 5, ao vivo
+            assert not form.query_one("#por_no_rascunho", Button).disabled
+            await piloto.click("#por_no_rascunho")
+            await esperar_que(piloto, lambda: app.screen is tela)
+            ops = _sem_nomes(tela.sessao.rascunho.operacoes)
+            assert ops == [Conceder(("PUBLIC", "r11", "r10", "r12"), ("t10",), ("S",))]
+            assert "GRANT SELECT ON public.pessoas TO PUBLIC, app, jared, leitura;" in \
+                tela.query_one(PainelSQL).texto_plano()
+            assert tela.selecao is None                                     # a seleção se desfaz depois de pôr
+            assert _grade_perm(tela)["PUBLIC"][3] == "S······"
+            # l: a linha inteira do papel; shift+clique numa célula também
+            tela.ir_para("r12", "t11")
+            await piloto.press("l")
+            assert tela.alvo() == (("r12",), ("t12", "t11", "t10"))
+            await piloto.press("escape")                                    # escape desfaz a seleção (não sai)
+            assert tela.selecao is None and app.screen is tela
+            assert tela.alvo() == (("r12",), ("t11",))                      # sem seleção: a célula do cursor
+            tela.escolher_celula(1, 2, shift=True)                         # o que o shift+clique faz
+            assert tela.alvo() == (("r11",), ("t12", "t11", "t10"))
+    asyncio.run(roteiro())
+
+
+def test_tela_permissoes_todas_e_a_lista_explicita_nunca_all_tables(monkeypatch, tmp_path):
+    from textual.widgets import SelectionList
+    from ratt.db import formularios_usuarios as fu
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    fonte = FontePermFalsa()
+
+    async def roteiro():
+        app = _app_perm(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await _perm_pronta(app, piloto)
+            tela = app.screen
+            await piloto.press("asterisk")
+            assert tela.alvo() == (("PUBLIC", "r11", "r10", "r12"), ("t12", "t11", "t10"))
+            await piloto.press("space")
+            await esperar_que(piloto, lambda: isinstance(app.screen, fu.FormPrivilegios))
+            form = app.screen
+            await esperar_tela(piloto, form)
+            form.query_one("#revogar", SelectionList).select("T")
+            form.query_one("#futuras").value = True
+            await _contado(app, piloto, form)
+            sql = _texto(form.query_one("#form_sql"))
+            assert "REVOKE TRUNCATE ON public.itens, public.pedidos, public.pessoas FROM PUBLIC, app, jared, leitura;" in sql
+            assert "ALTER DEFAULT PRIVILEGES FOR ROLE jared IN SCHEMA public REVOKE TRUNCATE ON TABLES" in sql
+            assert "ALL TABLES" not in sql and "externa" not in sql
+            await piloto.click("#por_no_rascunho")
+            await esperar_que(piloto, lambda: app.screen is tela)
+            op = tela.sessao.rascunho.operacoes[0]
+            assert isinstance(op, Revogar) and op.tabelas == ("t12", "t11", "t10") and op.por == "r10" and op.futuras
+    asyncio.run(roteiro())
+
+
+def test_form_privilegios_oferece_usage_junto_e_recusa_com_o_motivo(monkeypatch, tmp_path):
+    from textual.widgets import Button, Checkbox, SelectionList
+    from ratt.db import formularios_usuarios as fu
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    fonte = FontePermFalsa()
+
+    async def roteiro():
+        app = _app_perm(fonte)
+        async with app.run_test(size=(120, 44)) as piloto:
+            await _perm_pronta(app, piloto)
+            tela = app.screen
+            tela.ir_para("r12", "t11")
+            await piloto.press("space")
+            await esperar_que(piloto, lambda: isinstance(app.screen, fu.FormPrivilegios))
+            form = app.screen
+            await esperar_tela(piloto, form)
+            usage = form.query_one("#usage", Checkbox)
+            assert not usage.display                                        # só aparece com a oferta
+            form.query_one("#conceder", SelectionList).select("S")
+            await _contado(app, piloto, form)
+            assert usage.display and "leitura" in str(usage.label)          # falta USAGE: oferece junto
+            usage.value = True
+            await _contado(app, piloto, form)
+            sql = _texto(form.query_one("#form_sql"))
+            assert sql.index("GRANT USAGE ON SCHEMA public TO leitura;") < sql.index("GRANT SELECT ON public.pedidos TO leitura;")
+            assert usage.display                                            # já resolvido, a oferta continua à vista
+            # conceder e revogar a mesma letra: botão desligado, com o motivo
+            form.query_one("#revogar", SelectionList).select("S")
+            await piloto.pause()
+            assert form.query_one("#por_no_rascunho", Button).disabled
+            assert t("perm.e.conceder_e_revogar", privilegios="SELECT") in _texto(form.query_one("#erro"))
+            form.query_one("#revogar", SelectionList).deselect("S")
+            await _contado(app, piloto, form)
+            await piloto.click("#por_no_rascunho")
+            await esperar_que(piloto, lambda: app.screen is tela)
+            assert _sem_nomes(tela.sessao.rascunho.operacoes) == [PermissaoNoSchema("r12", True, None),
+                                                                  Conceder(("r12",), ("t11",), ("S",))]
+            # papel pendente (do rascunho do servidor): o rascunho de verdade recusa, numa cópia, e o botão desliga
+            pendente = fu.FormPrivilegios(tela.sessao, tela.fonte_avisos, ("novo-p1",), ("t10",))
+            app.push_screen(pendente)
+            await esperar_tela(piloto, pendente)
+            pendente.query_one("#conceder", SelectionList).select("S")
+            await piloto.pause()
+            assert pendente.query_one("#por_no_rascunho", Button).disabled
+            assert t("perm.e.papel_pendente") in _texto(pendente.query_one("#erro"))
+            assert len(tela.sessao.rascunho.operacoes) == 2
+    asyncio.run(roteiro())
+
+
+def test_tela_permissoes_s_muda_usage_e_create_do_papel(monkeypatch, tmp_path):
+    from textual.widgets import Checkbox
+    from ratt.db import formularios_usuarios as fu
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    fonte = FontePermFalsa()
+
+    async def roteiro():
+        app = _app_perm(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await _perm_pronta(app, piloto)
+            tela = app.screen
+            tela.ir_para("r11", "t10")
+            await piloto.press("s")
+            await esperar_que(piloto, lambda: isinstance(app.screen, fu.FormSchema))
+            form = app.screen
+            await esperar_tela(piloto, form)
+            assert form.query_one("#usage", Checkbox).value and not form.query_one("#create", Checkbox).value
+            form.query_one("#usage", Checkbox).value = False
+            form.query_one("#create", Checkbox).value = True
+            await _contado(app, piloto, form)
+            sql = _texto(form.query_one("#form_sql"))
+            assert "GRANT CREATE ON SCHEMA public TO app;" in sql and "REVOKE USAGE ON SCHEMA public FROM app;" in sql
+            await piloto.click("#por_no_rascunho")
+            await esperar_que(piloto, lambda: app.screen is tela)
+            assert _sem_nomes(tela.sessao.rascunho.operacoes) == [PermissaoNoSchema("r11", False, True)]
+            assert "app CREATE" in _texto(tela.query_one("#perm_schema"))
+            # na linha do PUBLIC também (é editável)
+            tela.ir_para("PUBLIC", "t10")
+            await piloto.press("s")
+            await esperar_que(piloto, lambda: isinstance(app.screen, fu.FormSchema))
+            form = app.screen
+            await esperar_tela(piloto, form)
+            assert form.query_one("#usage", Checkbox).value
+    asyncio.run(roteiro())
+
+
+def test_tela_permissoes_80x24_com_40_tabelas_rola_e_mostra_public_e_painel(monkeypatch, tmp_path):
+    from textual.geometry import Region
+    from ratt.db.grade_dados import Grade
+    from ratt.db.painel import PainelSQL
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    fonte = FontePermFalsa(*_schema_tela(n_tabelas=40, n_papeis=15))
+
+    def visivel(grade):
+        return "\n".join("".join(s.text for s in linha)
+                         for linha in grade.render_lines(Region(0, 0, grade.size.width, grade.size.height)))
+
+    async def roteiro():
+        app = _app_perm(fonte)
+        async with app.run_test(size=(80, 24)) as piloto:
+            await _perm_pronta(app, piloto)
+            tela = app.screen
+            tela.sessao.acrescentar(Conceder(("r12",), ("t100",), ("S",)))
+            await piloto.pause()
+            grade = tela.query_one(Grade)
+            painel = tela.query_one(PainelSQL)
+            assert len(grade.columns) == 44 and grade.row_count == 19
+            assert grade.max_scroll_x > 0 and grade.max_scroll_y > 0
+            grade.move_cursor(row=grade.row_count - 1, column=len(grade.columns) - 1)
+            await piloto.pause()
+            await piloto.pause()
+            assert grade.scroll_x > 0 and grade.scroll_y > 0
+            texto = visivel(grade)
+            assert "PUBLIC" in texto                         # a linha fixa no alto
+            assert "pessoa_14" in texto                      # a última linha; o nome fica (coluna fixa)
+            assert "tab_39" in texto
+            assert painel.region.bottom <= 23                # acima do rodapé
+            tela_linhas = ["".join(s.text for s in st) for st in app.screen._compositor.render_strips()]
+            do_painel = tela_linhas[painel.region.y:painel.region.bottom]
+            assert any("GRANT SELECT ON public.tab_00 TO leitura;" in linha for linha in do_painel)
+            assert grade.region.height >= 4
+    asyncio.run(roteiro())
+
+
+def test_tela_permissoes_vigia_rele_quando_as_permissoes_mudam(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    fonte = FontePermFalsa()
+
+    async def roteiro():
+        app = _app_perm(fonte)
+        async with app.run_test(size=(120, 36)) as piloto:
+            await _perm_pronta(app, piloto)
+            tela = app.screen
+            tela.sessao.acrescentar(Conceder(("r12",), ("t11",), ("S",), futuras=True, por="r10"))
+            # alguém deu INSERT a leitura em pedidos pelo psql: só as ACLs mudaram
+            fonte.perms["public"].por_tabela[("r12", "t11")] = frozenset("I")
+            fonte.sig = 2
+            tela.vigiar()
+            await esperar_workers(app)
+            await esperar_que(piloto, lambda: _grade_perm(tela)["leitura"][2] == "SI·····")
+            # o papel que cria as tabelas (o `por` das futuras) mudou de nome: a operação cai no rebase
+            fonte.modelos["public"].papeis["r10"] = "jared2"
+            fonte.sig = 3
+            tela.vigiar()
+            await esperar_workers(app)
+            await esperar_que(piloto, lambda: tela.sessao.rascunho.invalidas == {0})
+    asyncio.run(roteiro())
+
+
+def test_P_no_canvas_e_na_tela_dados_abre_permissoes_no_schema_deles(monkeypatch, tmp_path):
+    from textual.app import App
+    from ratt.db import canvas, tela_dados, tela_permissoes
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    fonte = FontePermFalsa()
+    m2, p2 = _schema_tela()
+    m2.esquema = "vendas"
+    for tab in m2.tabelas.values():
+        tab.esquema = "vendas"
+    fonte.modelos["vendas"], fonte.perms["vendas"] = m2, p2
+
+    class AppCanvas(App):
+        def on_mount(self):
+            self.push_screen(canvas.TelaCanvas(fonte, "vendas"))
+
+    async def roteiro():
+        app = AppCanvas()
+        async with app.run_test(size=(120, 40)) as piloto:
+            await esperar_que(piloto, lambda: app.screen.carregado)
+            await esperar_workers(app)
+            cv = app.screen
+            assert any(b.binding.action == "permissoes" and b.binding.show for b in cv.active_bindings.values())
+            await piloto.press("P")
+            await esperar_que(piloto, lambda: isinstance(app.screen, tela_permissoes.TelaPermissoes))
+            perm = app.screen
+            assert perm.esquema == "vendas" and fonte.outras == 1
+            await esperar_que(piloto, lambda: perm.carregado)
+            await esperar_workers(app)
+            assert perm.sessao is cv.sessao                                  # o mesmo rascunho do schema
+            assert "vendas" in _texto(perm.query_one("#perm_titulo"))
+            await piloto.press("escape")
+            await esperar_que(piloto, lambda: app.screen is cv)
+            # da tela Dados de uma tabela de vendas
+            cv.selecao = ("tabela", "t10")
+            await piloto.press("v")
+            await esperar_que(piloto, lambda: isinstance(app.screen, tela_dados.TelaDados))
+            dados = app.screen
+            dados.VIGIA_SEGUNDOS = 0
+            await esperar_que(piloto, lambda: dados.carregado)
+            await esperar_workers(app)
+            await piloto.press("P")
+            await esperar_que(piloto, lambda: isinstance(app.screen, tela_permissoes.TelaPermissoes))
+            assert app.screen.esquema == "vendas"
+            await esperar_que(piloto, lambda: app.screen.carregado)
+            await esperar_workers(app)
+            assert app.screen.sessao is dados.sessao
+    asyncio.run(roteiro())
+
+
+def test_P_na_tela_usuarios_escolhe_o_schema_do_banco_atual(monkeypatch, tmp_path):
+    from textual.widgets import OptionList
+    from ratt.db import canvas, tela_permissoes
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    banco = FontePermFalsa()
+    m2, p2 = _schema_tela()
+    m2.esquema = "vendas"
+    banco.modelos["vendas"], banco.perms["vendas"] = m2, p2
+    srv = FonteServidorFalsa(_modelo_com_banco_atual())
+    pedidos = []
+    srv.fonte_banco = lambda: pedidos.append(srv.banco) or banco
+
+    async def roteiro():
+        app = _app_usuarios(srv)
+        async with app.run_test(size=(140, 40)) as piloto:
+            app._piloto = piloto
+            await _usuarios_pronta(app)
+            usuarios = app.screen
+            await piloto.press("P")
+            await esperar_que(piloto, lambda: isinstance(app.screen, canvas.EscolherEsquema))
+            escolha = app.screen
+            await esperar_tela(piloto, escolha)
+            assert escolha.esquemas == ["public", "vendas"] and pedidos == ["estudos"]
+            escolha.query_one(OptionList).highlighted = 1
+            await piloto.press("enter")
+            await esperar_que(piloto, lambda: isinstance(app.screen, tela_permissoes.TelaPermissoes))
+            perm = app.screen
+            perm.VIGIA_SEGUNDOS = 0
+            assert perm.esquema == "vendas" and perm.fonte is banco
+            await esperar_que(piloto, lambda: perm.carregado)
+            await esperar_workers(app)
+            await piloto.press("escape")
+            await esperar_que(piloto, lambda: app.screen is usuarios)
+            assert banco.fechada                                            # a tela fechou a conexão dela
+            # escolher e desistir: a conexão aberta para listar os schemas fecha
+            banco.fechada = False
+            await piloto.press("P")
+            await esperar_que(piloto, lambda: isinstance(app.screen, canvas.EscolherEsquema))
+            await esperar_tela(piloto, app.screen)
+            await piloto.press("escape")
+            await esperar_que(piloto, lambda: app.screen is usuarios)
+            assert banco.fechada
+    asyncio.run(roteiro())

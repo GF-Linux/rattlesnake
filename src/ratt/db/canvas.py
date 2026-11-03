@@ -89,6 +89,15 @@ class FonteBanco:
     def consulta(self) -> checagem.Consulta:
         return checagem.Consulta(self._aberta())
 
+    # ── o que a tela Permissões lê ──
+
+    def assinatura_permissoes(self, esquema: str):
+        """A assinatura da estrutura (com os papéis) mais as permissões de `esquema`: um GRANT por fora relê a grade."""
+        return catalogo.assinatura(self._aberta(), escritas=False, acls=esquema)
+
+    def permissoes(self, esquema: str) -> catalogo.Permissoes:
+        return catalogo.permissoes(self._aberta(), esquema)
+
     # ── o que a tela Dados lê ──
 
     def assinaturas(self, oid: Optional[int]) -> Tuple[tuple, object]:
@@ -326,6 +335,7 @@ class TelaCanvas(AcoesRascunho, Screen):
         Binding("F,shift+f", "tudo", t("canvas.k.tudo")),
         Binding("plus", "expandir", t("canvas.k.expandir")),
         Binding("v", "dados", t("dados.abrir")),
+        Binding("P,shift+p", "permissoes", t("perm.k.abrir")),
         Binding("escape,q", "voltar", t("canvas.k.voltar")),
     ]
     LIMITE_TUDO = 150               # `F` em schema com mais tabelas que isso pergunta antes e desenha fora da thread da tela
@@ -865,6 +875,15 @@ class TelaCanvas(AcoesRascunho, Screen):
         outra = getattr(self.fonte, "outra", None)
         self.app.push_screen(tela_dados.TelaDados(outra() if callable(outra) else self.fonte, self.esquema,
                                                   self.selecao[1]))
+
+    def action_permissoes(self) -> None:
+        """`P`: a tela Permissões deste schema (com uma conexão só dela; o rascunho é o mesmo)."""
+        if not self.carregado:
+            self.notify(t("canvas.carregando"))
+            return
+        from ratt.db import tela_permissoes
+        outra = getattr(self.fonte, "outra", None)
+        self.app.push_screen(tela_permissoes.TelaPermissoes(outra() if callable(outra) else self.fonte, self.esquema))
 
     # ── editar ──────────────────────────────────────────────────────────────
 

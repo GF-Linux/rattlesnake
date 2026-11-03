@@ -81,6 +81,11 @@ class FonteServidor:
                 self._conexoes = ConexoesServidor(self.porta, self.usuario, self.banco)
             return checagem_servidor.avisos_da_operacao_servidor(op, r, self._conexoes)
 
+    def fonte_banco(self):
+        """Uma fonte do schema (a do canvas) no banco desta tela, com a sua própria conexão: a tela Permissões (`P`)."""
+        from ratt.db import canvas
+        return canvas.FonteBanco(None, self.porta, self.usuario, self.banco)
+
     def fechar(self) -> None:
         with self._trava:
             if self._conexao is not None:
@@ -138,6 +143,7 @@ class TelaUsuarios(AcoesRascunhoServidor, Screen):
         Binding("w", "exportar", t("canvas.k.exportar")),
         Binding("u", "desfazer", t("canvas.k.desfazer")),  # aqui dentro, u desfaz (na tela do banco, abre esta)
         Binding("r", "painel", t("canvas.k.rascunho")),
+        Binding("P,shift+p", "permissoes", t("perm.k.abrir")),
         Binding("escape,q", "voltar", t("canvas.k.voltar")),
     ]
     VIGIA_SEGUNDOS = 2.0                    # de quanto em quanto tempo a vigia olha o servidor (0: só à mão)
@@ -162,6 +168,7 @@ class TelaUsuarios(AcoesRascunhoServidor, Screen):
         self._olhada = 0
         self._calado = False
         self._relendo: Optional[_sessao.SessaoServidor] = None
+        self._listando = False              # o P está listando os schemas (numa thread)
 
     def compose(self) -> ComposeResult:
         yield Static(id="usu_titulo")
@@ -545,6 +552,48 @@ class TelaUsuarios(AcoesRascunhoServidor, Screen):
 
     def action_voltar(self) -> None:
         self.app.pop_screen()
+
+    # ── P: as permissões de um schema do banco desta tela ───────────────────
+
+    def action_permissoes(self) -> None:
+        """`P`: escolher um schema do banco desta tela e abrir a tela Permissões dele (com uma conexão só dela, que
+        também lista os schemas; o rascunho é o do schema, o mesmo do canvas)."""
+        criar = getattr(self.fonte, "fonte_banco", None)
+        if not callable(criar) or self._listando:   # um P por vez: cada um abre uma conexão
+            return
+        self._listando = True
+        self._listar_esquemas(criar())
+
+    @work(thread=True, group="esquemas_usuarios")
+    def _listar_esquemas(self, banco) -> None:
+        try:
+            nomes = banco.esquemas()
+        except Exception as erro:
+            banco.fechar()
+            self._de_volta(self._nao_listou, erro)
+            return
+        self._de_volta(self._escolher_esquema, banco, nomes)
+
+    def _nao_listou(self, erro) -> None:
+        self._listando = False
+        if self.is_attached:
+            linhas = str(erro).strip().splitlines()
+            self.notify(t("canvas.erro_banco", erro=linhas[0] if linhas else type(erro).__name__), severity="error")
+
+    def _escolher_esquema(self, banco, nomes: List[str]) -> None:
+        from ratt.db import tela_permissoes
+        from ratt.db.canvas import EscolherEsquema
+        self._listando = False
+        if not self.is_attached:
+            banco.fechar()
+            return
+
+        def escolhido(nome) -> None:
+            if not nome:
+                banco.fechar()
+                return
+            self.app.push_screen(tela_permissoes.TelaPermissoes(banco, nome))
+        self.app.push_screen(EscolherEsquema(nomes, "public"), escolhido)
 
     # ── depois de aplicar ───────────────────────────────────────────────────
 

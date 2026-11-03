@@ -1247,9 +1247,8 @@ def test_futuras_vale_para_a_tabela_que_eu_criar_depois(servidor, banco_servidor
     c.execute('CREATE SCHEMA "Vendas"; CREATE TABLE "Vendas".velha (id int)')
     m = catalogo.modelo(c, "Vendas")
     papeis, tabelas = _ids(m)
-    eu = m.papeis[m.eu]
     r = rascunho.Rascunho(m)
-    r.acrescentar(rascunho.Conceder((papeis["leitura"],), (tabelas["velha"],), ("S",), futuras=True, por=eu))
+    r.acrescentar(rascunho.Conceder((papeis["leitura"],), (tabelas["velha"],), ("S",), futuras=True, por=m.eu))
     r.acrescentar(rascunho.PermissaoNoSchema(papeis["leitura"], True, None))
     _aplicar_schema(servidor, banco_servidor, r, tmp_path)
     c.execute('CREATE TABLE "Vendas".nova (id int)')
@@ -1260,7 +1259,7 @@ def test_futuras_vale_para_a_tabela_que_eu_criar_depois(servidor, banco_servidor
     assert p.padrao == {papeis["leitura"]: frozenset({"S"})}
     # revogar as futuras: a próxima tabela já não vem com o SELECT
     r = rascunho.Rascunho(catalogo.modelo(c, "Vendas"))
-    r.acrescentar(rascunho.Revogar((papeis["leitura"],), (), ("S",), futuras=True, por=eu))
+    r.acrescentar(rascunho.Revogar((papeis["leitura"],), (), ("S",), futuras=True, por=m.eu))
     _aplicar_schema(servidor, banco_servidor, r, tmp_path)
     c.execute('CREATE TABLE "Vendas".outra (id int)')
     assert not tem('"Vendas".outra') and catalogo.permissoes(c, "Vendas").padrao == {}
@@ -1335,10 +1334,12 @@ def test_papel_removido_no_servidor_invalida_a_operacao_no_rebase(servidor, banc
     r = rascunho.Rascunho(m)
     r.acrescentar(rascunho.Conceder((papeis["leitura"],), (tabelas["a"],), ("S",)))
     r.acrescentar(rascunho.Conceder((papeis["ana"],), (tabelas["a"],), ("S",)))
+    # o `por` das futuras é um id como os outros: o papel que cria as tabelas mudou de nome, a operação cai
+    r.acrescentar(rascunho.Conceder((m.eu,), (tabelas["a"],), ("S",), futuras=True, por=papeis["ana"]))
     admin.execute("DROP ROLE leitura")
     admin.execute("ALTER ROLE ana RENAME TO bia")
     assert catalogo.assinatura(c, escritas=False) != antes             # a tela relê o schema e faz o rebase
-    assert r.rebase(catalogo.modelo(c, "public")) == {0, 1}
+    assert r.rebase(catalogo.modelo(c, "public")) == {0, 1, 2}
     admin.close()
     c.close()
 
@@ -1532,3 +1533,109 @@ def test_sql_exportado_do_servidor_roda_inteiro_num_psql_so(servidor, banco_serv
         assert c.execute("SELECT rolname FROM pg_roles WHERE rolname = 'ana'").fetchone() == ("ana",)
     for nome in hostis + [b1]:
         assert _donos(servidor, nome) == {"t_bruno": servidor.usuario}
+
+
+# ── Task 7: a tela Permissões ──
+
+def test_assinatura_com_as_permissoes_do_schema_muda_com_um_grant_por_fora(servidor, banco_servidor):
+    """A tela Permissões pede as ACLs do schema na assinatura: um GRANT pelo psql relê a grade. As outras telas (sem
+    `acls`) não mudam por isso."""
+    with servidor.conectar() as admin:
+        admin.execute("CREATE ROLE ratt_p_leitura NOLOGIN")
+    with servidor.conectar(banco_servidor) as c:
+        c.execute("CREATE TABLE public.a (id int); CREATE SCHEMA outro; CREATE TABLE outro.b (id int)")
+        sem, com = catalogo.assinatura(c, escritas=False), catalogo.assinatura(c, escritas=False, acls="public")
+        assert catalogo.assinatura(c, escritas=False, acls="public") == com
+        c.execute("GRANT SELECT ON public.a TO ratt_p_leitura")
+        a1 = catalogo.assinatura(c, escritas=False, acls="public")
+        c.execute("GRANT USAGE ON SCHEMA public TO ratt_p_leitura")
+        a2 = catalogo.assinatura(c, escritas=False, acls="public")
+        c.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO ratt_p_leitura")
+        a3 = catalogo.assinatura(c, escritas=False, acls="public")
+        c.execute("ALTER TABLE public.a OWNER TO ratt_p_leitura")
+        a4 = catalogo.assinatura(c, escritas=False, acls="public")
+        assert len({com, a1, a2, a3, a4}) == 5
+        assert catalogo.assinatura(c, escritas=False) == sem            # canvas, Dados: o mesmo de antes
+        c.execute("GRANT SELECT ON outro.b TO ratt_p_leitura")          # outro schema: não é desta grade
+        assert catalogo.assinatura(c, escritas=False, acls="public") == a4
+        c.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE SELECT ON TABLES FROM ratt_p_leitura")
+
+
+def test_tela_permissoes_concede_e_aplica_pela_tela(servidor, banco_servidor, monkeypatch, tmp_path):
+    """Pela tela, no servidor descartável: leitura × pessoas, espaço, S, pôr; Enter → Confirmar → sim (a parte
+    suspensa trocada por uma sem terminal, que aplica pela sessão como o `ratt db run`); leitura passa a ter o
+    SELECT (`has_table_privilege`) e a grade mostra o S vindo do catálogo, sem marca de pendente."""
+    import asyncio
+    from contextlib import contextmanager
+    from textual.app import App
+    from textual.widgets import SelectionList
+    from conftest import esperar_que, esperar_tela, esperar_workers, saida_presa
+    from ratt.db import canvas, formularios, formularios_usuarios as fu, painel, tela_permissoes
+    b1 = banco_servidor
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "dados"))
+    _entrar_no_descartavel(monkeypatch, servidor)
+    with servidor.conectar() as admin:
+        admin.execute('CREATE ROLE "Leitura Ü" NOLOGIN')
+    with servidor.conectar(b1) as c:
+        c.execute("CREATE TABLE public.pessoas (id int); CREATE TABLE public.pedidos (id int)")
+        # uma tabela estrangeira e uma view: estão no modelo (o canvas as desenha), nunca na grade de permissões
+        c.execute("CREATE FOREIGN DATA WRAPPER ratt_fdw; CREATE SERVER ratt_srv FOREIGN DATA WRAPPER ratt_fdw")
+        c.execute("CREATE FOREIGN TABLE public.estrangeira (id int) SERVER ratt_srv")
+        c.execute("CREATE VIEW public.v AS SELECT 1 AS x")
+
+    def sessao_sem_terminal(self, conexao, arquivo, ensaio, cabecalho):
+        with conexao:
+            return self.sessao.aplicar(conexao, arquivo, ensaio, cabecalho)
+
+    @contextmanager
+    def sem_suspender(self):
+        yield
+
+    monkeypatch.setattr(App, "suspend", sem_suspender)
+    monkeypatch.setattr(tela_permissoes.TelaPermissoes, "_sessao", sessao_sem_terminal)
+
+    class AppTeste(App):
+        def on_mount(self):
+            tela = tela_permissoes.TelaPermissoes(canvas.FonteBanco(None, servidor.porta, servidor.usuario, b1), "public")
+            tela.VIGIA_SEGUNDOS = 0
+            self.push_screen(tela)
+
+    async def roteiro():
+        app = AppTeste()
+        async with app.run_test(size=(120, 44)) as piloto:
+            await esperar_que(piloto, lambda: isinstance(app.screen, tela_permissoes.TelaPermissoes) and app.screen.carregado)
+            tela = app.screen
+            await esperar_workers(app)
+            base = tela.sessao.rascunho.base
+            leitura = next(i for i, n in base.papeis.items() if n == "Leitura Ü")
+            pessoas = base.por_nome("pessoas").id
+            assert base.por_nome("estrangeira") is not None
+            assert [c.label.plain for c in tela.query_one("#perm_grade").ordered_columns][1:] == ["pedidos", "pessoas"]
+            tela.ir_para(leitura, pessoas)
+            await piloto.press("space")
+            await esperar_que(piloto, lambda: isinstance(app.screen, fu.FormPrivilegios))
+            form = app.screen
+            await esperar_tela(piloto, form)
+            form.query_one("#conceder", SelectionList).select("S")
+            await esperar_workers(app)
+            await esperar_que(piloto, lambda: not form.contando and form.avisos_chegados is not None)
+            await piloto.click("#por_no_rascunho")
+            await esperar_que(piloto, lambda: app.screen is tela)
+            plano = tela.query_one(painel.PainelSQL).texto_plano()
+            assert 'GRANT SELECT ON public.pessoas TO "Leitura Ü";' in plano
+            await piloto.press("enter")
+            await esperar_que(piloto, lambda: isinstance(app.screen, formularios.Confirmar))
+            await esperar_tela(piloto, app.screen)
+            with saida_presa():
+                await piloto.click("#sim")
+                await esperar_que(piloto, lambda: not tela.sessao.aplicando and tela.sessao.rascunho.operacoes == []
+                                  and tela.permissoes.por_tabela.get((leitura, pessoas)) == frozenset("S"), limite=10)
+            await esperar_workers(app)
+            linha = [tela.linha_id(i) for i in range(tela.query_one("#perm_grade").row_count)].index(leitura)
+            celula = tela.query_one("#perm_grade").get_row_at(linha)[2]
+            assert celula.plain == "S······" and not any("bold" in str(s.style) for s in celula.spans)
+    asyncio.run(roteiro())
+    with servidor.conectar(b1) as c:
+        tem = c.execute("SELECT has_table_privilege('Leitura Ü', 'public.pessoas', 'SELECT'), "
+                        "has_table_privilege('Leitura Ü', 'public.pedidos', 'SELECT')").fetchone()
+        assert tem == (True, False)

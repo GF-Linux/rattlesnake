@@ -7,6 +7,7 @@ import shutil
 import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from typing import Optional
 
 from ratt.db import modelo as _modelo
 
@@ -59,17 +60,29 @@ def esquemas(conexao):
     return sorted(achados.values(), key=lambda e: (e.nome != "public", e.nome))
 
 
-def assinatura(conexao, escritas: bool = True, papeis: bool = True):
+def assinatura(conexao, escritas: bool = True, papeis: bool = True, acls: Optional[str] = None):
     """Um resumo de tudo o que importa para a tela: objetos, colunas e as escritas em cada tabela.
     Se mudou entre uma olhada e outra, alguém (um ratt db run, o psql) mexeu no banco. `escritas=False` deixa de
     fora os contadores de linhas inseridas/alteradas: o canvas só desenha a estrutura, e com eles ele releria o
     schema a cada volta do vigia num banco que recebe escritas. `papeis=False` deixa de fora os papéis do servidor:
     a tela do `ratt db` não mostra papéis, e com eles avisaria "o banco mudou" a cada usuário criado em qualquer
-    banco (o canvas e a tela Dados os querem: o rascunho do schema refere papéis nas permissões)."""
+    banco (o canvas e a tela Dados os querem: o rascunho do schema refere papéis nas permissões). `acls`: o nome de um
+    schema cujas permissões também contam — o `relacl` e o dono das tabelas, o `nspacl` e o dono do schema e as
+    permissões padrão (`pg_default_acl`) dele: a tela Permissões relê a grade quando alguém dá um GRANT por fora (as
+    outras telas não mostram permissões e não pedem)."""
     escritas_sql = ("(SELECT coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0) FROM pg_stat_user_tables)"
                     if escritas else "0")
     papeis_sql = ("(SELECT md5(coalesce(string_agg(r.oid || ':' || r.rolname, ',' ORDER BY r.oid), '')) FROM pg_roles r)"
                   if papeis else "''")
+    acls_sql = """(SELECT md5(
+            coalesce((SELECT string_agg(c.oid || ':' || c.relowner || ':' || coalesce(c.relacl::text, '-'), ','
+                                        ORDER BY c.oid)
+                        FROM pg_class c WHERE c.relnamespace = n.oid AND c.relkind IN ('r', 'p')), '')
+            || '|' || n.nspowner || ':' || coalesce(n.nspacl::text, '-') || '|'
+            || coalesce((SELECT string_agg(d.oid || ':' || d.defaclrole || ':' || d.defaclobjtype::text || ':'
+                                           || d.defaclacl::text, ',' ORDER BY d.oid)
+                           FROM pg_default_acl d WHERE d.defaclnamespace = n.oid), ''))
+          FROM pg_namespace n WHERE n.nspname = %s)""" if acls is not None else "''"
     return conexao.execute(f"""
         SELECT
           (SELECT md5(coalesce(string_agg(c.oid || c.relname || c.relkind::text, ',' ORDER BY c.oid), ''))
@@ -86,7 +99,8 @@ def assinatura(conexao, escritas: bool = True, papeis: bool = True):
              FROM pg_index x JOIN pg_class c ON c.oid = x.indrelid JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE {_SEM_SISTEMA}),
           {papeis_sql},
-          {escritas_sql}""").fetchone()
+          {escritas_sql},
+          {acls_sql}""", (acls,) if acls is not None else None).fetchone()
 
 
 def esquemas_com_tabelas(conexao):

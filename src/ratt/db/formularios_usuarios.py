@@ -21,10 +21,10 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Input, OptionList, Select, SelectionList, Static
 from textual.widgets.option_list import Option
 
-from ratt.db import servidor as _srv
+from ratt.db import rascunho as _rascunho, servidor as _srv
 from ratt.db.formularios import Corpo
 from ratt.db.idioma import t
-from ratt.db.rascunho import ERROS_OP
+from ratt.db.rascunho import ERROS_OP, PRIVILEGIOS, Conceder, PermissaoNoSchema, Revogar
 from ratt.db.rascunho_servidor import (PUBLIC, CriarPapel, MudarPoderes, OperacaoServidor, PorNoGrupo,
                                        RascunhoServidor, RemoverPapeis, TirarAcesso, TirarDoGrupo, TrocarDonoDoBanco,
                                        TrocarSenha, linhas_dos_comandos)
@@ -35,10 +35,15 @@ _NIVEL = {"info": ("·", COR["cinza"]), "atencao": ("!", COR["amarelo"]), "imped
 _ATRASO = 0.25                      # espera a pessoa parar de mexer antes de contar no servidor
 
 
-def recusa(r: RascunhoServidor, ops: List[OperacaoServidor]) -> Optional[str]:
-    """Por que `ops` (nessa ordem) não entrariam no rascunho `r`: o texto da trava, ou o motivo do rascunho. None se
-    entram. Tudo numa cópia: `r` e as operações não mudam."""
-    copia = RascunhoServidor(r.base, list(r.operacoes), r.proximo)
+def _copia(r, ops=()):
+    """Um rascunho do mesmo tipo de `r` (o do servidor ou o do schema), com as operações dele e mais `ops`."""
+    return type(r)(r.base, list(r.operacoes) + list(ops), r.proximo)
+
+
+def recusa(r, ops: list) -> Optional[str]:
+    """Por que `ops` (nessa ordem) não entrariam no rascunho `r` (o do servidor ou o do schema): o texto da trava, ou
+    o motivo do rascunho. None se entram. Tudo numa cópia: `r` e as operações não mudam."""
+    copia = _copia(r)
     for op in ops:
         try:
             copia.acrescentar(copy.deepcopy(op))
@@ -49,14 +54,18 @@ def recusa(r: RascunhoServidor, ops: List[OperacaoServidor]) -> Optional[str]:
     return None
 
 
-def sql_das(r: RascunhoServidor, ops: List[OperacaoServidor]) -> str:
-    """O SQL que `ops` acrescentariam ao rascunho `r`, como o painel o mostra (com o comentário da senha)."""
-    tmp = RascunhoServidor(r.base, list(r.operacoes) + [copy.deepcopy(o) for o in ops], r.proximo)
-    passos, notas = tmp.passos(), tmp.notas()
+def sql_das(r, ops: list) -> str:
+    """O SQL que `ops` acrescentariam ao rascunho `r`, como o painel o mostra (no do servidor, com o comentário da
+    senha; no do schema, os comandos são texto, sem banco de destino)."""
+    tmp = _copia(r, [copy.deepcopy(o) for o in ops])
+    passos = tmp.passos()
+    notas = tmp.notas() if hasattr(tmp, "notas") else [None] * len(passos)
     linhas: List[str] = []
     for k in range(len(r.operacoes), len(passos)):
         _, valida, _, cmds = passos[k]
-        if valida:
+        if valida and all(isinstance(c, str) for c in cmds):
+            linhas += [linha for c in cmds for linha in (c + ";").split("\n")]
+        elif valida:
             linhas += linhas_dos_comandos(cmds)
         if notas[k]:
             linhas.append("-- " + notas[k])
@@ -83,7 +92,8 @@ def texto_avisos(avisos) -> Text:
 class FormServidor(ModalScreen):
     """Esqueleto: título, campos (da subclasse), SQL, erro (ou o motivo da recusa), avisos e os dois botões. A
     subclasse dá `campos()` e `operacoes()` (as operações dos campos agora; ValueError diz o que falta). Fecha com
-    a lista das operações que entraram no rascunho (a tela grava e avisa), ou None."""
+    a lista das operações que entraram no rascunho (a tela grava e avisa), ou None. Serve aos dois rascunhos: o do
+    servidor (tela Usuários) e o do schema (tela Permissões) — `sessao.rascunho` e `fonte.avisos(op, rascunho)`."""
 
     BINDINGS = [Binding("escape", "cancelar", t("canvas.f.cancelar"))]
     DEFAULT_CSS = """
@@ -117,7 +127,7 @@ class FormServidor(ModalScreen):
         self.avisos_chegados: Optional[list] = None
 
     @property
-    def rascunho(self) -> RascunhoServidor:
+    def rascunho(self):
         return self.sessao.rascunho
 
     @property
@@ -202,7 +212,7 @@ class FormServidor(ModalScreen):
             try:
                 avisos: list = []
                 for k, op in enumerate(ops):
-                    junto = RascunhoServidor(base, antes + [copy.deepcopy(o) for o in ops[:k]], proximo)
+                    junto = type(r)(base, antes + [copy.deepcopy(o) for o in ops[:k]], proximo)
                     avisos += self.fonte.avisos(op, junto)
             except Exception as e:                  # o banco caiu, faltou permissão…: vira uma linha, não um erro
                 avisos = e
@@ -511,3 +521,128 @@ class ExplicarAcesso(ModalScreen):
             self.dismiss(self.ofertas[int(ident.split("_")[1])][1])
         else:
             self.dismiss(None)
+
+
+# ── os formulários da tela Permissões (rascunho do schema) ──
+
+def _resumo(nomes: List[str], limite: int = 5) -> str:
+    """"a, b, c" — com muitos, os primeiros e "(+N)"."""
+    if len(nomes) <= limite:
+        return ", ".join(nomes)
+    return ", ".join(nomes[:limite]) + " " + t("perm.f.e_mais", n=len(nomes) - limite)
+
+
+def nome_papel(m, papel: str) -> str:
+    return _rascunho.PUBLIC if papel == _rascunho.PUBLIC else m.papeis.get(papel, papel)
+
+
+class FormPrivilegios(FormServidor):
+    """`espaço` na grade de permissões: o que conceder e o que revogar (por letra) aos papéis da seleção nas tabelas da
+    seleção — um GRANT e/ou um REVOKE com as listas. "Também as futuras": o `ALTER DEFAULT PRIVILEGES FOR ROLE` da
+    pessoa (vale para as tabelas que ela criar). Os avisos da checagem chegam ao vivo; o que diz que falta USAGE no
+    schema oferece pôr junto (antes do GRANT). O que o rascunho recusa (papel pendente, tabela que sumiu, conceder e
+    revogar a mesma letra) deixa o botão desligado, com o motivo."""
+
+    altura_avisos = 3
+    # num terminal de 24 linhas o formulário inteiro cabe (os campos rolam: metade da altura), botões à vista
+    DEFAULT_CSS = """
+    FormPrivilegios #form_corpo { max-height: 50vh; }
+    FormPrivilegios #perm_letras { height: auto; }
+    FormPrivilegios #perm_letras > Vertical { width: 1fr; height: auto; }
+    FormPrivilegios #perm_letras SelectionList { height: auto; max-height: 7; border: none; padding: 0; }
+    FormPrivilegios Checkbox { height: 1; border: none; padding: 0; }
+    FormPrivilegios #futuras { margin-top: 1; }
+    """
+
+    def __init__(self, sessao, fonte, papeis, tabelas):
+        super().__init__(sessao, fonte)
+        self.papeis, self.tabelas = tuple(papeis), tuple(tabelas)
+        r = sessao.rascunho
+        v = r.vista()
+        self._eu = r.base.eu
+        self._eu_nome = v.papeis.get(self._eu, "")
+        self.ofertas: List[str] = []        # papéis a que falta USAGE no schema (os avisos dizem): dá para pôr junto
+        nomes_tabelas = [v.tabelas[i].nome if i in v.tabelas else i for i in self.tabelas]
+        self.titulo = t("perm.f.privilegios", papeis=_resumo([nome_papel(v, p) for p in self.papeis]),
+                        tabelas=_resumo(nomes_tabelas))
+
+    def campos(self) -> ComposeResult:
+        opcoes = [(f"{letra}  {palavra}", letra) for letra, palavra in PRIVILEGIOS.items()]
+        with Horizontal(id="perm_letras"):
+            with Vertical():
+                yield Static(Text(t("perm.f.conceder"), style=f"bold {COR['verde']}"))
+                yield SelectionList[str](*opcoes, id="conceder")
+            with Vertical():
+                yield Static(Text(t("perm.f.revogar"), style=f"bold {COR['laranja']}"))
+                yield SelectionList[str](*opcoes, id="revogar")
+        yield Checkbox(t("perm.f.futuras", papel=self._eu_nome or "?"), id="futuras")
+        usage = Checkbox("", id="usage")
+        usage.display = False
+        yield usage
+
+    def operacoes(self) -> list:
+        dar = set(self.query_one("#conceder", SelectionList).selected)
+        tirar = set(self.query_one("#revogar", SelectionList).selected)
+        ambas = [palavra for letra, palavra in PRIVILEGIOS.items() if letra in dar and letra in tirar]
+        if ambas:
+            raise ValueError(t("perm.e.conceder_e_revogar", privilegios=", ".join(ambas)))
+        if not dar and not tirar:
+            raise ValueError(t("perm.e.marque"))
+        futuras = self.query_one("#futuras", Checkbox).value
+        if futuras and not self._eu:
+            raise ValueError(t("perm.e.sem_por"))
+        por = self._eu if futuras else None
+        ops: list = []
+        if dar and self.ofertas and self.query_one("#usage", Checkbox).value:
+            ops += [PermissaoNoSchema(p, usage=True, create=None) for p in self.ofertas]
+        if dar:
+            ops.append(Conceder(self.papeis, self.tabelas, tuple(l for l in PRIVILEGIOS if l in dar), futuras, por))
+        if tirar:
+            ops.append(Revogar(self.papeis, self.tabelas, tuple(l for l in PRIVILEGIOS if l in tirar), futuras, por))
+        return ops
+
+    def _chegaram(self, versao: int, avisos) -> None:
+        super()._chegaram(versao, avisos)
+        if not self.is_attached or versao != self._versao:
+            return
+        novos = [a.oferta.papel for a in self.avisos_chegados or []
+                 if isinstance(a.oferta, PermissaoNoSchema) and a.oferta.papel not in self.ofertas]
+        if not novos:
+            return
+        self.ofertas += list(dict.fromkeys(novos))
+        usage = self.query_one("#usage", Checkbox)
+        v = self.rascunho.vista()
+        usage.label = t("perm.f.usage_junto", papeis=_resumo([nome_papel(v, p) for p in self.ofertas]),
+                        esquema=v.esquema)
+        usage.display = True
+        if usage.value:                     # a oferta cresceu com a caixa marcada: o SQL muda
+            self.atualizar()
+
+
+class FormSchema(FormServidor):
+    """`s` na grade de permissões: USAGE (ver o que há no schema) e CREATE (criar objetos nele) do papel da linha —
+    `GRANT`/`REVOKE … ON SCHEMA`. As caixas começam como está agora (o banco com o rascunho por cima)."""
+
+    DEFAULT_CSS = """
+    FormSchema Checkbox { height: 1; border: none; padding: 0; margin-top: 1; }
+    """
+
+    def __init__(self, sessao, fonte, papel: str, atuais):
+        super().__init__(sessao, fonte)
+        self.papel, self.atuais = papel, frozenset(atuais)
+        v = sessao.rascunho.vista()
+        self._nome = nome_papel(v, papel)
+        self.titulo = t("perm.f.schema", papel=self._nome, esquema=v.esquema)
+
+    def campos(self) -> ComposeResult:
+        yield Checkbox(t("perm.f.usage"), "USAGE" in self.atuais, id="usage")
+        yield Checkbox(t("perm.f.create"), "CREATE" in self.atuais, id="create")
+
+    def operacoes(self) -> list:
+        valores = {}
+        for nome in ("USAGE", "CREATE"):
+            agora = self.query_one("#" + nome.lower(), Checkbox).value
+            valores[nome] = None if agora == (nome in self.atuais) else agora
+        if valores["USAGE"] is None and valores["CREATE"] is None:
+            raise ValueError(t("perm.e.nada_muda_schema", papel=self._nome))
+        return [PermissaoNoSchema(self.papel, usage=valores["USAGE"], create=valores["CREATE"])]

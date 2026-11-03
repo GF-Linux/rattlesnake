@@ -65,6 +65,7 @@ class TelaDados(AcoesRascunho, Screen):
         Binding("w", "exportar", t("canvas.k.exportar")),
         Binding("u", "desfazer", t("canvas.k.desfazer")),
         Binding("r", "painel", t("canvas.k.rascunho")),
+        Binding("P,shift+p", "permissoes", t("perm.k.abrir")),
         Binding("escape,q", "voltar", t("canvas.k.voltar")),
     ]
     VIGIA_SEGUNDOS = 2.0                    # de quanto em quanto tempo a vigia olha o banco (0: só à mão, nos testes)
@@ -657,6 +658,12 @@ class TelaDados(AcoesRascunho, Screen):
 
     def action_voltar(self) -> None:
         self.app.pop_screen()
+
+    def action_permissoes(self) -> None:
+        """`P`: a tela Permissões do schema desta tabela (com uma conexão só dela; o rascunho é o mesmo)."""
+        from ratt.db import tela_permissoes
+        outra = getattr(self.fonte, "outra", None)
+        self.app.push_screen(tela_permissoes.TelaPermissoes(outra() if callable(outra) else self.fonte, self.esquema))
 
     # ── o rascunho ──────────────────────────────────────────────────────────
 

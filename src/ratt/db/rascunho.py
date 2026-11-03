@@ -856,9 +856,11 @@ def _privilegios_sql(privilegios: Tuple[str, ...]) -> str:
 
 @dataclass
 class Conceder(Operacao):
-    """`GRANT … ON a, b TO x, y` — um comando com as listas. `futuras`: também as tabelas que `por` (o papel da pessoa,
-    guardado ao criar a operação, para o SQL mostrado ser sempre o mesmo) criar no schema, pelo `ALTER DEFAULT
-    PRIVILEGES FOR ROLE`; sem tabela na lista, só esse."""
+    """`GRANT … ON a, b TO x, y` — um comando com as listas. `futuras`: também as tabelas que `por` (o id `r{oid}` do
+    papel da pessoa, guardado ao criar a operação, para o SQL mostrado ser sempre o mesmo) criar no schema, pelo
+    `ALTER DEFAULT PRIVILEGES FOR ROLE`; sem tabela na lista, só esse. O `por` é um id como os papéis da lista: entra
+    no `refere()` e nos `nomes`, e o rebase invalida a operação se o papel sumir ou mudar de nome. (Um `por` que não é
+    id de papel — o nome, num rascunho de antes — não existe no modelo: a operação fica inválida, para tirar.)"""
     papeis: Tuple[str, ...]
     tabelas: Tuple[str, ...]
     privilegios: Tuple[str, ...]
@@ -885,7 +887,9 @@ class Conceder(Operacao):
         if self.futuras:
             if not isinstance(self.por, str) or not self.por:
                 raise ValueError(t("perm.e.sem_por"))
-            cmds.append(f"ALTER DEFAULT PRIVILEGES FOR ROLE {ident(self.por)} IN SCHEMA {ident(m.esquema)} "
+            if self.por == PUBLIC:
+                raise ValueError(t("perm.e.sem_por"))
+            cmds.append(f"ALTER DEFAULT PRIVILEGES FOR ROLE {_papel_sql(m, self.por)} IN SCHEMA {ident(m.esquema)} "
                         f"{verbo} {privs} ON TABLES {prep} {papeis}")
         return cmds
 
@@ -893,14 +897,16 @@ class Conceder(Operacao):
         valores = {"privilegios": _privilegios_sql(self.privilegios),
                    "papeis": ", ".join(_papel_nome(m, p) for p in dict.fromkeys(self.papeis)),
                    "tabelas": ", ".join(m.tabelas[i].nome for i in dict.fromkeys(self.tabelas)),
-                   "por": self.por or "", "esquema": m.esquema}
+                   "por": m.papeis.get(self.por, self.por) if isinstance(self.por, str) else "",
+                   "esquema": m.esquema}
         chave = "op." + self.tipo + ("_futuras" if self.futuras else "")
         if self.futuras and not self.tabelas:
             chave += "_so"
         return t(chave, **valores)
 
     def refere(self) -> Set[str]:
-        return set(self.tabelas) | {p for p in self.papeis if p != PUBLIC}
+        por = {self.por} if self.futuras is True and isinstance(self.por, str) and self.por else set()
+        return set(self.tabelas) | {p for p in self.papeis if p != PUBLIC} | por
 
 
 @dataclass

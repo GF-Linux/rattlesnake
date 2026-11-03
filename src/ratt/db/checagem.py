@@ -948,7 +948,8 @@ def _conceder(d: _Permissao) -> None:
             if suas:
                 d.avisar(p, "info", "chk.perm_dono", papel=d.nome(p), tabelas=", ".join(suas))
     if op.futuras:
-        d.avisar(op.papeis[0] if op.papeis else "", "info", "chk.perm_futuras", papel=op.por or "")
+        d.avisar(op.papeis[0] if op.papeis else "", "info", "chk.perm_futuras",
+                 papel=d.nome(op.por) if isinstance(op.por, str) else "")
 
 
 def _revogar(d: _Permissao) -> None:
