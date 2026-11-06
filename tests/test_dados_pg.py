@@ -1405,3 +1405,22 @@ def test_bytea_na_chave_ordena_pela_coluna_de_verdade(banco):
     oid = banco.execute("SELECT 'public.kb'::regclass::oid").fetchone()[0]
     assert [l[1] for l in catalogo.dados(banco, catalogo.Objeto("public", "kb", "tabela", oid))[2]] == esperado
     assert [l[1] for l in catalogo.pagina(banco, "public", "kb", "n > 1", ["k"], 0, 10)[2]] == [2, 3]
+
+
+def test_aplica_bytea_e_texto(banco, tmp_path):
+    from ratt.db import arquivos
+    banco.execute("CREATE TABLE public.docs (id int PRIMARY KEY, f bytea, nome text)")
+    m = catalogo.modelo(banco, "public")
+    r = rascunho.Rascunho(m)
+    tab = m.por_nome("docs")
+    c = {x.nome: x.id for x in tab.colunas}
+    binario = bytes(range(256)) + b"'\\'"
+    (tmp_path / "b.bin").write_bytes(binario)
+    texto = "it's a \\ test é 'x'\n"
+    (tmp_path / "t.txt").write_text(texto, encoding="utf-8")
+    fb, _ = arquivos.ler(str(tmp_path / "b.bin"), "bytea")
+    ft, _ = arquivos.ler(str(tmp_path / "t.txt"), "text")
+    r.acrescentar(rascunho.Inserir(tab.id, {c["id"]: "1", c["f"]: fb, c["nome"]: ft}))
+    banco.execute(r.sql_texto())
+    f, nome = banco.execute("SELECT f, nome FROM public.docs WHERE id = 1").fetchone()
+    assert bytes(f) == binario and nome == texto

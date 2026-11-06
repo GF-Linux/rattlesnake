@@ -28,11 +28,12 @@ from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.css.query import NoMatches
-from textual.widgets import Button, Checkbox, Input, OptionList, Select, SelectionList, Static
+from textual.widgets import Button, Checkbox, DirectoryTree, Input, OptionList, Select, SelectionList, Static
 from textual.widgets.option_list import Option
 
 from ratt.db import checagem, filtro
-from ratt.db.arquivos import TamanhoArquivo, rotulo_tamanho, tamanho_legivel
+from ratt.db import arquivos
+from ratt.db.arquivos import ArquivoRecusado, TamanhoArquivo, rotulo_tamanho, tamanho_legivel
 from ratt.db import rascunho as rs
 from ratt.db.formularios import _ATRASO, Abandonada, Confirmar, Corpo, FormBase
 from ratt.db.idioma import t
@@ -87,6 +88,9 @@ class CampoValor(Vertical):
     CampoValor .linha_fk Input { width: 1fr; }
     CampoValor .escolher { width: auto; min-width: 12; margin-left: 1; }
     CampoValor .escolhido { height: auto; }
+    CampoValor .linha_arquivo { height: auto; }
+    CampoValor .linha_arquivo Input { width: 1fr; }
+    CampoValor .arquivo { width: auto; min-width: 12; margin-left: 1; }
     """
 
     def __init__(self, coluna, referencia: Optional[Ligacao] = None, valor: str = "", id: Optional[str] = None,
@@ -102,6 +106,7 @@ class CampoValor(Vertical):
         self.transformacao = ""
         self._escolhas: List[str] = []      # os valores do Select (o que se pode pôr nele)
         self._escolhido: Optional[tuple] = None     # (valor, rótulo) da lista do pai
+        self._arquivo: Optional[tuple] = None       # (conteúdo, rótulo) do arquivo carregado
         c = self.coluna
         self.desativado = c is not None and ((c.identidade and c.identidade_sempre) or c.gerada)
         self.familia = filtro.familia(c.tipo) if c is not None else ""
@@ -113,6 +118,11 @@ class CampoValor(Vertical):
 
     def _fk(self) -> bool:
         return self.coluna is not None and self.referencia is not None and not self.desativado
+
+    def _com_arquivo(self) -> bool:
+        """Coluna bytea ou de texto, ativa, que não é booleana nem chave estrangeira: ganha o botão arquivo…"""
+        return (self.coluna is not None and not self.desativado and not self._booleano() and not self._fk()
+                and arquivos.aceita(self.coluna.tipo))
 
     def dica(self) -> str:
         """O que aparece no campo vazio: o formato esperado e o que o vazio significa."""
@@ -157,6 +167,10 @@ class CampoValor(Vertical):
                 yield Button(t("dados.f.escolher"), classes="escolher", disabled=not self.lista,
                              id=f"{self.id}_escolher" if self.id else None)
             yield Static(Text(self.motivo, style=COR["cinza"]) if not self.lista else "", classes="escolhido")
+        elif self._com_arquivo():
+            with Horizontal(classes="linha_arquivo"):
+                yield Input(value=self._inicial, placeholder=self.dica())
+                yield Button(t("arq.f_botao"), classes="arquivo", id=f"{self.id}_arquivo" if self.id else None)
         else:
             yield Input(value=self._inicial, placeholder=self.dica(), disabled=self.desativado)
 
@@ -189,6 +203,8 @@ class CampoValor(Vertical):
             escolha = self.query_one(Select)
             return None if escolha.is_blank() else str(escolha.value)
         texto = self.query_one(Input).value
+        if self._arquivo is not None and texto == self._arquivo[1]:
+            return self._arquivo[0]
         return None if texto == "" else texto
 
     def preenchido(self) -> bool:
@@ -212,6 +228,7 @@ class CampoValor(Vertical):
             self.query_one(Select).clear()
             return
         self._escolhido = None
+        self._arquivo = None
         self.query_one(Input).value = ""
         if self._fk() and self.lista:
             self.query_one(".escolhido", Static).update("")
@@ -229,10 +246,17 @@ class CampoValor(Vertical):
         self.query_one(".escolhido", Static).update(Text("→ " + (rotulo or valor), style=COR["verde"]))
         self.query_one(Input).value = valor
 
+    def carregado(self, valor: str, rotulo: str) -> None:
+        """Chegou o arquivo: o conteúdo fica guardado e o `Input` mostra o rótulo (‹nome · tamanho›)."""
+        self._arquivo = (valor, rotulo)
+        self.query_one(Input).value = rotulo
+
     # ── eventos ──
 
     def on_input_changed(self, evento: Input.Changed) -> None:
         # não para o evento: o formulário também precisa dele (prévia e avisos)
+        if self._arquivo is not None and evento.value != self._arquivo[1]:
+            self._arquivo = None
         if self._escolhido is not None and evento.value != self._escolhido[0]:
             self._escolhido = None
             self.query_one(".escolhido", Static).update("")
@@ -241,6 +265,13 @@ class CampoValor(Vertical):
         if evento.button.has_class("escolher"):
             evento.stop()
             self.post_message(self.Escolher(self))
+        elif evento.button.has_class("arquivo"):
+            evento.stop()
+
+            def chegou(res: Optional[tuple]) -> None:
+                if res is not None and self.is_attached:
+                    self.carregado(*res)
+            self.app.push_screen(EscolherArquivo(self.coluna.tipo), chegou)
 
 
 class FormCondicao(ModalScreen):
@@ -1272,6 +1303,77 @@ class FormDuplicatas(_FormLinhas):
             texto.append(f"  {marca:<6}", style=COR["laranja"] if sai else COR["verde"])
             texto.append(_corta(" · ".join(_mostra(v) for v in linha[:n])) + "\n")
         return texto
+
+
+_ULTIMA_PASTA: Optional[str] = None     # a pasta do último arquivo carregado (só na memória)
+
+
+class EscolherArquivo(ModalScreen):
+    """Escolhe o arquivo que vira o valor de uma coluna `tipo`: caminho digitado ou clicado na árvore. Devolve
+    `(valor, rótulo)` de `arquivos.ler`, ou None. Se o arquivo é recusado, o motivo aparece e a tela fica aberta."""
+
+    BINDINGS = [Binding("escape", "dismiss(None)", t("canvas.f.cancelar"))]
+    DEFAULT_CSS = """
+    EscolherArquivo { align: center middle; }
+    EscolherArquivo > Vertical { width: 84; max-width: 100%; height: auto; max-height: 100%; border: round $primary;
+                                 background: $surface; padding: 0 2; }
+    EscolherArquivo DirectoryTree { height: 10; }
+    EscolherArquivo #erro { height: auto; color: $error; }
+    EscolherArquivo #botoes { height: 3; align-horizontal: right; }
+    EscolherArquivo Button { margin-left: 1; }
+    """
+
+    def __init__(self, tipo: str, inicio: Optional[str] = None):
+        super().__init__()
+        self.tipo = tipo
+        pasta = inicio or _ULTIMA_PASTA or "~"
+        pasta = os.path.expanduser(pasta)
+        self.pasta = pasta if os.path.isdir(pasta) else os.path.expanduser("~")
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(Text(t("arq.f_titulo"), style="bold"))
+            yield Input(value=self.pasta.rstrip("/") + "/", id="caminho")
+            yield DirectoryTree(self.pasta)
+            yield Static("", id="erro")
+            with Horizontal(id="botoes"):
+                yield Button(t("arq.f_carregar"), id="carregar", variant="primary")
+                yield Button(t("canvas.f.cancelar"), id="cancelar")
+
+    def on_mount(self) -> None:
+        entrada = self.query_one("#caminho", Input)
+        entrada.focus()
+        entrada.cursor_position = len(entrada.value)
+
+    def on_directory_tree_file_selected(self, evento: DirectoryTree.FileSelected) -> None:
+        evento.stop()
+        entrada = self.query_one("#caminho", Input)
+        entrada.value = str(evento.path)
+        entrada.cursor_position = len(entrada.value)
+
+    def _tentar(self) -> None:
+        global _ULTIMA_PASTA
+        erro = self.query_one("#erro", Static)
+        erro.update("")
+        caminho = os.path.expanduser(self.query_one("#caminho", Input).value.strip())
+        try:
+            res = arquivos.ler(caminho, self.tipo)
+        except ArquivoRecusado as e:
+            erro.update(Text(str(e)))
+            return
+        _ULTIMA_PASTA = os.path.dirname(os.path.abspath(caminho))
+        self.dismiss(res)
+
+    def on_input_submitted(self, evento: Input.Submitted) -> None:
+        evento.stop()
+        self._tentar()
+
+    def on_button_pressed(self, evento: Button.Pressed) -> None:
+        evento.stop()
+        if evento.button.id == "carregar":
+            self._tentar()
+        else:
+            self.dismiss(None)
 
 
 class SalvarArquivo(ModalScreen):

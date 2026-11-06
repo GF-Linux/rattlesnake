@@ -2860,3 +2860,206 @@ def test_s_com_bytea_na_chave_recusa(monkeypatch, tmp_path):
             await _s_em(app, piloto, 0, 1)
             assert avisos == [t("arq.s_sem_pk")] and fonte.lidos == []
     asyncio.run(roteiro())
+
+
+# ── arquivos: o botão arquivo… nos formulários ──
+
+def _sem_ultima_pasta(monkeypatch, tmp_path):
+    from ratt.db import formularios_dados
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(formularios_dados, "_ULTIMA_PASTA", None)
+
+
+async def _carregar(app, piloto, form, coluna, caminho):
+    from textual.widgets import Button, Input
+    from ratt.db import formularios_dados
+    await piloto.click("#" + form.campo(coluna).query_one(".arquivo", Button).id)
+    await piloto.pause()
+    modal = app.screen
+    assert isinstance(modal, formularios_dados.EscolherArquivo)
+    modal.query_one("#caminho", Input).value = str(caminho)
+    await piloto.press("enter")
+    await pronto_dados(app)
+    return modal
+
+
+def test_inserir_carrega_arquivo_bytea(monkeypatch, tmp_path):
+    _sem_ultima_pasta(monkeypatch, tmp_path)
+    from textual.widgets import Input
+    dados = bytes(range(256)) + b"'\\"
+    arq = tmp_path / "x.ab1"
+    arq.write_bytes(dados)
+
+    async def roteiro():
+        app = AppDados(FonteArquivos())
+        async with app.run_test(size=(140, 50)) as piloto:
+            tela, form = await _abrir_inserir(app, piloto)
+            await _carregar(app, piloto, form, "f", arq)
+            assert app.screen is form
+            assert form.campo("f").query_one(Input).value == "‹x.ab1 · 258 B›"
+            assert form.campo("f").valor() == "\\x" + dados.hex()
+            await contado(app, form)
+            await pronto_dados(app)
+            assert "/* arquivo · " in form.query_one("#form_sql").content.code
+            await piloto.click("#por_no_rascunho")
+            await pronto_dados(app)
+            op = tela.sessao.rascunho.operacoes[-1]
+            assert op.valores["t1.c2"] == "\\x" + dados.hex()
+    asyncio.run(roteiro())
+
+
+def test_alterar_carrega_texto(monkeypatch, tmp_path):
+    _sem_ultima_pasta(monkeypatch, tmp_path)
+    from textual.widgets import Button, Select
+    from ratt.db.formularios_dados import CampoValor, FonteTravada, FormAlterar
+    arq = tmp_path / "t.txt"
+    arq.write_text("olá 'mundo'\\", encoding="utf-8")
+
+    async def roteiro():
+        fonte = FonteArquivos()
+        app = AppDados(fonte)
+        async with app.run_test(size=(140, 50)) as piloto:
+            await pronto_dados(app)
+            tela = app.screen
+            app.push_screen(FormAlterar(tela.sessao, FonteTravada(fonte, tela._trava), "t1", filtro.Filtro()))
+            await piloto.pause()
+            form = app.screen
+            linha = form.linhas()[0]
+            await _escolher(piloto, linha.query_one(".coluna", Select), "t1.c3")
+            await _escolher(piloto, linha.query_one(".tipo", Select), "valor")
+            campo = linha.query_one(CampoValor)
+            await piloto.click("#" + campo.query_one(".arquivo", Button).id)
+            await piloto.pause()
+            from textual.widgets import Input
+            app.screen.query_one("#caminho", Input).value = str(arq)
+            await piloto.press("enter")
+            await pronto_dados(app)
+            assert app.screen is form
+            assert linha.mudanca() == ("t1.c3", rascunho.Mudanca("valor", "olá 'mundo'\\"))
+    asyncio.run(roteiro())
+
+
+def test_editar_input_descarta_e_por_e_outra_limpa(monkeypatch, tmp_path):
+    _sem_ultima_pasta(monkeypatch, tmp_path)
+    from textual.widgets import Input
+    arq = tmp_path / "x.bin"
+    arq.write_bytes(b"abc")
+
+    async def roteiro():
+        app = AppDados(FonteArquivos())
+        async with app.run_test(size=(140, 50)) as piloto:
+            tela, form = await _abrir_inserir(app, piloto)
+            await _carregar(app, piloto, form, "f", arq)
+            campo = form.campo("f")
+            assert campo.valor() == "\\x616263"
+            campo.query_one(Input).value = "‹x.bin · 3 B› "
+            await piloto.pause()
+            assert campo._arquivo is None and campo.valor() == "‹x.bin · 3 B› "
+            await _carregar(app, piloto, form, "f", arq)
+            assert campo.valor() == "\\x616263"
+            _digitar(form, "id", "k")
+            await pronto_dados(app)
+            await piloto.click("#por_e_outra")
+            await pronto_dados(app)
+            assert campo.valor() is None and campo._arquivo is None
+    asyncio.run(roteiro())
+
+
+def test_erro_no_modal_e_lembra_pasta(monkeypatch, tmp_path):
+    _sem_ultima_pasta(monkeypatch, tmp_path)
+    from textual.widgets import Button, Input
+    from ratt.db import formularios_dados
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    arq = sub / "x.bin"
+    arq.write_bytes(b"abc")
+
+    async def roteiro():
+        app = AppDados(FonteArquivos())
+        async with app.run_test(size=(140, 50)) as piloto:
+            tela, form = await _abrir_inserir(app, piloto)
+            await piloto.click("#" + form.campo("f").query_one(".arquivo", Button).id)
+            await piloto.pause()
+            modal = app.screen
+            assert modal.query_one("#caminho", Input).value == str(tmp_path) + "/"      # começa em ~
+            for ruim, msg in ((sub, t("arq.e_pasta", caminho=sub)), (tmp_path / "nao", t("arq.nao_existe",
+                                                                                         caminho=tmp_path / "nao"))):
+                modal.query_one("#caminho", Input).value = str(ruim)
+                await piloto.click("#carregar")
+                await piloto.pause(0.3)
+                assert app.screen is modal and msg in str(modal.query_one("#erro").render())
+            modal.query_one("#caminho", Input).value = str(arq)
+            await piloto.press("enter")
+            await pronto_dados(app)
+            assert app.screen is form and formularios_dados._ULTIMA_PASTA == str(sub)
+            await piloto.click("#" + form.campo("f").query_one(".arquivo", Button).id)
+            await piloto.pause()
+            assert app.screen.query_one("#caminho", Input).value == str(sub) + "/"
+            await piloto.press("escape")
+            await piloto.pause()
+            assert app.screen is form and form.campo("f").valor() == "\\x616263"       # cancelar não mexe
+    asyncio.run(roteiro())
+
+
+def test_escolher_arquivo_pela_arvore(monkeypatch, tmp_path):
+    _sem_ultima_pasta(monkeypatch, tmp_path)
+    from textual.widgets import DirectoryTree, Input
+    from ratt.db.formularios_dados import EscolherArquivo
+    (tmp_path / "a.txt").write_text("oi")
+
+    async def roteiro():
+        app = AppDados(FonteArquivos())
+        async with app.run_test(size=(80, 24)) as piloto:
+            await pronto_dados(app)
+            achou = []
+            app.push_screen(EscolherArquivo("text", str(tmp_path)), achou.append)
+            await piloto.pause()
+            modal = app.screen
+            arvore = modal.query_one(DirectoryTree)
+            arvore.post_message(DirectoryTree.FileSelected(arvore.root, tmp_path / "a.txt"))
+            await piloto.pause()
+            assert modal.query_one("#caminho", Input).value == str(tmp_path / "a.txt")
+            await piloto.click("#carregar")
+            await pronto_dados(app)
+            assert achou == [("oi", "‹a.txt · 2 B›")]
+    asyncio.run(roteiro())
+
+
+def test_sem_botao(monkeypatch, tmp_path):
+    _sem_ultima_pasta(monkeypatch, tmp_path)
+    from textual.widgets import Button
+    from ratt.db import formularios_dados
+
+    async def roteiro():
+        app = AppDados(FonteDadosFalsa())
+        async with app.run_test(size=(140, 50)) as piloto:
+            tela, form = await _abrir_inserir(app, piloto)
+            assert form.campo("nome").query(".arquivo")                  # texto: tem
+            for nome in ("id", "idade", "ativo", "nascimento"):          # identidade, int, boolean, data: não
+                assert not form.campo(nome).query(".arquivo"), nome
+        m = modelo_pessoas()
+        fk = formularios_dados.CampoValor(m.tabelas["t2"].coluna("t2.c2"), m.ligacoes["k1"])
+        assert not fk._com_arquivo()
+        assert not formularios_dados.CampoValor("valor")._com_arquivo()
+    asyncio.run(roteiro())
+
+
+def test_escolher_cabe_80x24(monkeypatch, tmp_path):
+    _sem_ultima_pasta(monkeypatch, tmp_path)
+    from textual.widgets import Button, Static
+    from ratt.db.formularios_dados import EscolherArquivo
+    for i in range(40):
+        (tmp_path / f"arq{i:02}.txt").write_text("x")
+
+    async def roteiro():
+        app = AppDados(FonteArquivos())
+        async with app.run_test(size=(80, 24)) as piloto:
+            await pronto_dados(app)
+            app.push_screen(EscolherArquivo("text", str(tmp_path)))
+            await piloto.pause()
+            modal = app.screen
+            for seletor in ("#carregar", "#cancelar", "#erro", "#caminho"):
+                r = modal.query_one(seletor).region
+                assert r.y >= 0 and r.bottom <= 24 and r.right <= 80, seletor
+    asyncio.run(roteiro())

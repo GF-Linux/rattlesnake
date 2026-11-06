@@ -3,6 +3,18 @@
 O `ratt check-update` e o `ratt upgrade` leem este arquivo: cada `## versão` é o que você
 vê antes de responder `[s/N]`.
 
+## 0.12.0
+
+- **arquivos nas colunas**: dá para pôr o conteúdo de um arquivo numa coluna `bytea` (qualquer
+  arquivo) ou de texto (só UTF-8) e tirá-lo de lá, sem escrever SQL.
+  - **Botão `arquivo…`** nos formulários de inserir e de alterar: escolhe o arquivo pelo caminho
+    ou pela árvore de pastas, e o campo passa a mostrar `‹nome · tamanho›`. Se você editar o campo,
+    o arquivo é descartado. A tela lembra a pasta do último arquivo carregado.
+  - **Na grade**, um `bytea` aparece como `‹arquivo · tamanho›`, sem trazer os bytes.
+  - **`s` na tela Dados** salva em arquivo o conteúdo da célula (`bytea` ou texto).
+  - **Limite de 10 MB** por arquivo; acima disso o ratt recusa e explica. O SQL mostrado abrevia o
+    conteúdo longo (`/* arquivo · … */`), mas o que é aplicado é o conteúdo inteiro.
+
 ## 0.11.0
 
 - **usuários e permissões pela tela**: duas telas novas no `ratt db`, para mexer em quem entra

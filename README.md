@@ -175,8 +175,13 @@ filtro: nome começa com G e mês(nascimento) é maior ou igual a junho   (f con
 As teclas: `i` inserir (uma chave estrangeira se escolhe numa lista), `f` filtro, `o` troca E / OU,
 `backspace` tira a última condição, `F` limpa o filtro, `t` escreve o `WHERE` em texto,
 `m` altera as linhas filtradas, `x` apaga as filtradas, `D` apaga duplicatas, `n` / `N` páginas,
-`u` desfaz, `enter` aplica, `e` ensaia, `w` salva num `.sql`, `r` leva o foco ao painel do SQL
-e `Esc` volta.
+`s` salva em arquivo o conteúdo da célula (um `bytea` ou um texto), `u` desfaz, `enter` aplica,
+`e` ensaia, `w` salva num `.sql`, `r` leva o foco ao painel do SQL e `Esc` volta.
+
+**Arquivos.** Num campo `bytea` ou de texto, no inserir e no alterar, o botão **arquivo…** escolhe um
+arquivo (pelo caminho ou pela árvore de pastas) e põe o conteúdo no lugar do valor; no texto o
+arquivo precisa ser UTF-8. O limite é 10 MB por arquivo. Na grade, um `bytea` aparece como
+`‹arquivo · N›` (o tamanho), e o SQL mostrado abrevia o conteúdo longo.
 
 **A grade mostra o banco como está; o que está no rascunho aparece depois de aplicar.** O
 rascunho é o mesmo do canvas, e o aplicar confere: se um alterar ou apagar pegar um número de
