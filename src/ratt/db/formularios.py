@@ -24,6 +24,7 @@ from textual.widgets import Button, Checkbox, Input, OptionList, RadioButton, Ra
 from textual.widgets.option_list import Option
 
 from ratt.db import checagem, rascunho as rs
+from ratt.db.arquivos import sql_para_ver
 from ratt.db.idioma import t
 from ratt.db.modelo import Coluna, Ligacao, Tabela
 from ratt.db.tela import COR
@@ -62,7 +63,7 @@ class _DestaVersao:
 
 
 def sql_bonito(comandos: List[str]) -> Syntax:
-    return Syntax("\n".join(c + ";" for c in comandos), "sql", theme="ansi_dark", background_color="default", word_wrap=True)
+    return Syntax(sql_para_ver("\n".join(c + ";" for c in comandos)), "sql", theme="ansi_dark", background_color="default", word_wrap=True)
 
 
 class Corpo(VerticalScroll):
@@ -787,7 +788,7 @@ class Confirmar(ModalScreen):
                     yield Static(Text("\n".join("  • " + i for i in self.itens)))
             if self.sql:
                 with VerticalScroll(id="sql"):
-                    yield Static(Syntax(self.sql, "sql", theme="ansi_dark", background_color="default", word_wrap=True))
+                    yield Static(Syntax(sql_para_ver(self.sql), "sql", theme="ansi_dark", background_color="default", word_wrap=True))
             with Horizontal(id="botoes"):
                 yield Button(self.rotulo, id="sim", variant="warning")
                 yield Button(t("canvas.f.cancelar"), id="nao")

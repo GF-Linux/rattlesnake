@@ -26,6 +26,7 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
+from ratt.db.arquivos import sql_para_ver
 from ratt.db import formularios, guardar, rascunho as _rascunho
 from ratt.db.idioma import t
 from ratt.db.tela import COR
@@ -91,7 +92,7 @@ class PainelSQL(VerticalScroll):
         partes, plano, y, self._linhas = [], [], 0, []
         if self.topo:
             codigo = f"-- {t('dados.o_filtro')}\n{self.topo}"
-            partes.append(Syntax(codigo, "sql", theme="ansi_dark", background_color="default", word_wrap=True))
+            partes.append(Syntax(sql_para_ver(codigo), "sql", theme="ansi_dark", background_color="default", word_wrap=True))
             plano.append(codigo)
             y = len(codigo.splitlines())
             if not self.passos:
@@ -109,7 +110,7 @@ class PainelSQL(VerticalScroll):
                 codigo = f"-- {n + 1}. {desc}\n" + "\n".join(_linhas_comandos(comandos))
                 if n < len(self.notas) and self.notas[n]:
                     codigo += "\n-- " + self.notas[n]
-                partes.append(Syntax(codigo, "sql", theme="ansi_dark", background_color=fundo or "default", word_wrap=True))
+                partes.append(Syntax(sql_para_ver(codigo), "sql", theme="ansi_dark", background_color=fundo or "default", word_wrap=True))
             else:
                 codigo = f"-- {n + 1}. {t('canvas.invalida')}"
                 partes.append(Text(codigo, style=Style(color=COR["laranja"], bgcolor=fundo)))

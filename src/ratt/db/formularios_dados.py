@@ -31,6 +31,7 @@ from textual.widgets import Button, Checkbox, Input, OptionList, Select, Selecti
 from textual.widgets.option_list import Option
 
 from ratt.db import checagem, filtro
+from ratt.db.arquivos import TamanhoArquivo, rotulo_tamanho
 from ratt.db import rascunho as rs
 from ratt.db.formularios import _ATRASO, Abandonada, Corpo, FormBase
 from ratt.db.idioma import t
@@ -900,7 +901,13 @@ def _mostra(v) -> str:
     """Um valor como aparece na amostra: texto entre aspas (espaços nas pontas à vista), vazio como ∅."""
     if v is None:
         return "∅"
-    return f"'{v}'" if isinstance(v, str) else _como_texto(v)
+    if isinstance(v, (bytes, bytearray, memoryview)):
+        return rotulo_tamanho(len(v))
+    if isinstance(v, TamanhoArquivo):
+        return rotulo_tamanho(v)
+    if isinstance(v, str):
+        return f"'{v if len(v) <= _LARGURA else v[:_LARGURA - 1] + '…'}'"
+    return _como_texto(v)
 
 
 def _corta(texto: str) -> str:
