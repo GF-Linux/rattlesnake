@@ -97,3 +97,56 @@ def test_mostra_bytes():
     assert "‹arquivo · 2 KB›" in _mostra(b"\x00" * 2048)
     assert "‹arquivo · 2 KB›" in _mostra(memoryview(b"\x00" * 2048))
     assert len(_mostra("a" * 500)) < 100
+
+
+# ── arquivos grandes: tempo linear e mensagens curtas ──
+
+def _amostras():
+    from ratt.db import rascunho as rs
+    from ratt.db.modelo import Coluna, Modelo, Tabela
+    m = Modelo("public", {"t1": Tabela("t1", "public", "amostras", [
+        Coluna("t1.c1", "id", "text", pk=True), Coluna("t1.c2", "f", "bytea"), Coluna("t1.c3", "seq", "varchar(50)")])})
+    return rs, m
+
+
+def test_literal_de_10_mb_nao_trava():
+    """`comandos_de` (a cada tecla e redesenho) e `sql_para_ver` andam em C sobre um literal de 10 MB. O teto é
+    folgado: antes levavam ~1,6 s e ~1,2 s; agora ~0,05 s."""
+    import time
+    rs, m = _amostras()
+    dados = bytes(range(256)) * (10 * 1024 * 1024 // 256)
+    casos = [{"t1.c1": "a", "t1.c2": "\\x" + dados.hex()},              # bytea: E'\\x…'
+             {"t1.c1": "b", "t1.c3": "ACGT\n" * (2 * 1024 * 1024)},       # texto sem aspas
+             {"t1.c1": "c", "t1.c3": "it's a \\ path\n" * 700_000}]      # texto com aspas e barras (vai para o `re`)
+    for valores in casos:
+        op = rs.Inserir("t1", valores)
+        inicio = time.monotonic()
+        (cmd,) = rs.comandos_de(op, m)
+        visto = sql_para_ver(cmd + ";")
+        assert time.monotonic() - inicio < 2.0, list(valores)
+        assert len(visto) < 300 and _aspas_balanceadas(visto)
+
+
+def test_vinte_arquivos_no_rascunho_tecla_rapida():
+    """20 × 300 KB no rascunho: a vista (que cada tecla de um formulário refaz) e o SQL do painel."""
+    import time
+    rs, m = _amostras()
+    r = rs.Rascunho(m)
+    hexa = "\\x" + (bytes(range(256)) * 1200)[:300_000].hex()
+    for k in range(20):
+        r.acrescentar(rs.Inserir("t1", {"t1.c1": str(k), "t1.c2": hexa}))
+    inicio = time.monotonic()
+    r.vista()
+    texto = sql_para_ver(r.sql_texto())
+    assert time.monotonic() - inicio < 1.0
+    assert texto.count("/* arquivo · 293 KB */") == 20
+
+
+def test_texto_longo_com_muitos_escapes_divide_igual():
+    """Mais aspas dobradas e barras do que o `str.find` pula: o resto vai para o `re`, com o mesmo resultado."""
+    from ratt.db import rodar
+    com_e, sem_e = "a'';b\\\\c\\';d" * 200, "a'';b\\" * 200       # o ; dentro do texto não separa
+    sql = f"insert into t values (E'{com_e}', '{sem_e}'); select ';'; select E'x\\';y'"
+    assert [c.texto for c in rodar.dividir(sql)] == [
+        f"insert into t values (E'{com_e}', '{sem_e}')", "select ';'", "select E'x\\';y'"]
+    assert len(rodar.dividir("select E'" + "\\\\" * 100 + "\\';")) == 1         # a última barra leva a aspa: não fecha

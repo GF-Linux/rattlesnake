@@ -100,37 +100,66 @@ def dividir(sql):
     return comandos
 
 
+_BLOCO = re.compile(r"/\*|\*/")
+# O corpo de um texto, até antes da aspa que o fecha: a aspa dobrada é uma aspa e, no E'…', a barra leva o caractere
+# seguinte. É um laço guloso sem nada depois, então o `re` acha o mesmo fim que o percurso caractere a caractere.
+_CORPO = {("'", False): re.compile(r"[^']*(?:''[^']*)*"),
+          ("'", True): re.compile(r"[^'\\]*(?:(?:''|\\.)[^'\\]*)*", re.S),
+          ('"', False): re.compile(r'[^"]*(?:""[^"]*)*'),
+          ('"', True): re.compile(r'[^"\\]*(?:(?:""|\\.)[^"\\]*)*', re.S)}
+_PULOS_COM_FIND = 64        # aspas dobradas e barras puladas com str.find antes de passar o resto ao `re`
+
+
 def _fim_do_bloco(sql, i):
     """/* … */ — que no PostgreSQL pode ter outro /* … */ dentro."""
-    nivel, i = 0, i
-    while i < len(sql):
-        if sql.startswith("/*", i):
-            nivel, i = nivel + 1, i + 2
-        elif sql.startswith("*/", i):
-            nivel, i = nivel - 1, i + 2
+    nivel = 0
+    while True:
+        achou = _BLOCO.search(sql, i)
+        if achou is None:
+            return len(sql)
+        i = achou.end()
+        if achou.group(0) == "/*":
+            nivel += 1
+        else:
+            nivel -= 1
             if nivel == 0:
                 return i
+
+
+def fecha_texto(sql, i, aspa, barra_escapa):
+    """A posição da aspa que fecha o texto aberto pela aspa em `i`; -1 se ele não fecha. `barra_escapa`: um E'…',
+    onde a barra leva o caractere seguinte. Um literal de 10 MB (um arquivo) não é percorrido caractere a caractere
+    em Python: `str.find` pula até a próxima aspa ou barra; um texto cheio delas vai para o laço do `re`, também em C."""
+    n, i = len(sql), i + 1
+    j = sql.find(aspa, i)
+    barra = sql.find("\\", i) if barra_escapa else -1
+    for _ in range(_PULOS_COM_FIND):
+        if j < 0:
+            return -1
+        if 0 <= barra < j:                     # a barra leva o caractere seguinte (que pode ser a aspa)
+            i = barra + 2
+            barra = sql.find("\\", i)
+            if i > j:
+                j = sql.find(aspa, i)
+        elif sql.startswith(aspa, j + 1):      # '' dentro de '…' é uma aspa
+            i = j + 2
+            j = sql.find(aspa, i)
         else:
-            i += 1
-    return len(sql)
+            return j
+    fim = _CORPO[aspa, barra_escapa].match(sql, i).end()
+    return fim if fim < n and sql[fim] == aspa else -1
 
 
 def _fim_do_texto(sql, i, aspa, barra_escapa):
-    i += 1
-    while i < len(sql):
-        if barra_escapa and sql[i] == "\\":
-            i += 2
-        elif sql[i] == aspa:
-            if sql.startswith(aspa * 2, i):      # '' dentro de '…' é uma aspa
-                i += 2
-            else:
-                return i + 1
-        else:
-            i += 1
-    return len(sql)
+    """Logo depois da aspa que fecha o texto aberto em `i`; o fim do arquivo se ele não fecha."""
+    j = fecha_texto(sql, i, aspa, barra_escapa)
+    return len(sql) if j < 0 else j + 1
 
 
 def _so_comentario(trecho):
+    sem = trecho.lstrip()
+    if sem and sem[0] not in "-/":      # o primeiro caractere não abre comentário nem some ao tirar um: é código
+        return False                    # (e um INSERT de 10 MB não é varrido atrás de comentário)
     sem = re.sub(r"--[^\n]*", "", trecho)
     while "/*" in sem:
         a = sem.find("/*")

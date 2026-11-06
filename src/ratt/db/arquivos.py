@@ -8,6 +8,7 @@ import re
 from typing import Tuple
 
 from ratt.db import filtro, idioma
+from ratt.db.rodar import fecha_texto
 from ratt.db.idioma import t
 
 TETO = 10 * 1024 * 1024         # bytes por arquivo
@@ -83,8 +84,16 @@ def ler(caminho: str, tipo: str) -> Tuple[str, str]:
 # ── o SQL para ver ──
 
 def _desfaz(inner: str, com_e: bool) -> str:
+    """O valor que o literal escreve. No E'…' cada barra leva o caractere seguinte: as barras dobradas viram uma
+    (por um marcador que o texto não tem), as que sobram somem — o mesmo que `re.sub(r"\\\\(.)", r"\\1")`, mas sem
+    chamar Python a cada barra de um texto de 10 MB."""
     texto = inner.replace("''", "'")
-    return re.sub(r"\\(.)", r"\1", texto, flags=re.S) if com_e else texto
+    if not com_e or "\\" not in texto:
+        return texto
+    marca = next((c for c in "\x00\x01\ufffe\uffff" if c not in texto), None)
+    if marca is None:
+        return re.sub(r"\\(.)", r"\1", texto, flags=re.S)
+    return texto.replace("\\\\", marca).replace("\\", "").replace(marca, "\\")
 
 
 def _unidades(inner: str, com_e: bool):
@@ -96,12 +105,24 @@ def _unidades(inner: str, com_e: bool):
         i += n
 
 
+_HEX = re.compile(r"[0-9a-fA-F]*")
+
+
 def _abrevia(inner: str, com_e: bool, prefixo: str) -> str:
+    # o caso de todo arquivo de bytea, `'\x…'` ou `E'\\x…'` só com hex depois: o valor é o próprio texto, sem desfazer
+    comeco = "\\\\x" if com_e else "\\x"
+    corpo = inner[len(comeco):] if inner.startswith(comeco) else None
+    if corpo is not None and len(corpo) % 2 == 0 and _HEX.fullmatch(corpo):
+        return _abreviado(inner, com_e, prefixo, f"{t('arq.arquivo')} · {tamanho_legivel(len(corpo) // 2)}")
     real = _desfaz(inner, com_e)
     if re.fullmatch(r"\\x[0-9a-fA-F]*", real) and len(real) % 2 == 0:
         marca = f"{t('arq.arquivo')} · {tamanho_legivel((len(real) - 2) // 2)}"
     else:
         marca = f"{t('arq.texto')} · {tamanho_legivel(len(real.encode('utf-8')))}"
+    return _abreviado(inner, com_e, prefixo, marca)
+
+
+def _abreviado(inner: str, com_e: bool, prefixo: str, marca: str) -> str:
     inicio, usado = [], 0
     for u in _unidades(inner, com_e):
         if usado + len(u) > _FICA:
@@ -109,6 +130,12 @@ def _abrevia(inner: str, com_e: bool, prefixo: str) -> str:
         inicio.append(u)
         usado += len(u)
     return f"{prefixo}'{''.join(inicio)}…' /* {marca} */"
+
+
+def _fecha(texto: str, j: int, com_e: bool) -> int:
+    """A posição da aspa que fecha o literal cujo conteúdo começa em `j`; `len(texto)` se ele não fecha."""
+    fim = fecha_texto(texto, j - 1, "'", com_e)
+    return len(texto) if fim < 0 else fim
 
 
 def sql_para_ver(texto: str) -> str:
@@ -134,17 +161,7 @@ def sql_para_ver(texto: str) -> str:
         elif c == "'":
             com_e = bool(saida) and saida[-1] in ("e", "E") and (
                 len(saida) == 1 or not (saida[-2][-1].isalnum() or saida[-2][-1] in "_$"))
-            j = i + 1
-            while j < n:
-                if com_e and texto[j] == "\\":
-                    j += 2
-                elif texto[j] == "'":
-                    if texto[j + 1:j + 2] == "'":
-                        j += 2
-                    else:
-                        break
-                else:
-                    j += 1
+            j = _fecha(texto, i + 1, com_e)
             if j >= n:                                  # literal aberto: deixa como está
                 saida.append(texto[i:]); i = n
                 continue

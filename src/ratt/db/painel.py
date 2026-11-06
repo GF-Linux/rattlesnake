@@ -64,6 +64,7 @@ class PainelSQL(VerticalScroll):
         self._plano = ""
         self.topo: Optional[str] = None     # o SELECT do filtro (tela Dados), acima do rascunho
         self.notas: List[Optional[str]] = []    # um comentário depois dos comandos de cada passo (a senha)
+        self._vistos: Dict[int, str] = {}       # o SQL abreviado de cada passo: as setas e o foco não o refazem
 
     def compose(self) -> ComposeResult:
         yield Static(id="sql_conteudo")
@@ -77,6 +78,7 @@ class PainelSQL(VerticalScroll):
         a senha é pedida ao aplicar), ou None."""
         self.passos = passos
         self.notas = list(notas or [])
+        self._vistos = {}
         self.falhou = falhou
         self.mensagem = mensagem
         self.topo = topo
@@ -107,10 +109,12 @@ class PainelSQL(VerticalScroll):
                 y += 1
             self._linhas.append(y)
             if valida:
-                codigo = f"-- {n + 1}. {desc}\n" + "\n".join(_linhas_comandos(comandos))
-                if n < len(self.notas) and self.notas[n]:
-                    codigo += "\n-- " + self.notas[n]
-                codigo = sql_para_ver(codigo)
+                codigo = self._vistos.get(n)
+                if codigo is None:          # com arquivos no rascunho, abreviar custa: uma vez por `atualizar`
+                    codigo = f"-- {n + 1}. {desc}\n" + "\n".join(_linhas_comandos(comandos))
+                    if n < len(self.notas) and self.notas[n]:
+                        codigo += "\n-- " + self.notas[n]
+                    codigo = self._vistos[n] = sql_para_ver(codigo)
                 partes.append(Syntax(codigo, "sql", theme="ansi_dark", background_color=fundo or "default", word_wrap=True))
             else:
                 codigo = f"-- {n + 1}. {t('canvas.invalida')}"
