@@ -2815,3 +2815,48 @@ def test_salvar_cabe_80x24(monkeypatch, tmp_path):
                 w = modal.query_one(seletor)
                 assert w.region.height >= 1 and modal.screen.region.contains_region(w.region), seletor
     asyncio.run(roteiro())
+
+
+def test_s_nome_sugerido_sem_barra_nem_espaco(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Input
+
+    async def roteiro():
+        fonte = FonteArquivos()
+        fonte.m.tabelas["t1"].nome = "a/b c"
+        fonte.NOMES = ["id", "f\\x y", "nome"]
+        app = AppDados(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await _s_em(app, piloto, 0, 1)
+            assert app.screen.query_one(Input).value == "~/a_b_c_a_b_c_f_x_y.ab1"
+    asyncio.run(roteiro())
+
+
+def test_s_ignora_segundo_s_com_leitura_no_ar(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+    async def roteiro():
+        fonte = FonteArquivos()
+        app = AppDados(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto_dados(app)
+            app.screen._salvando = True
+            await _s_em(app, piloto, 0, 1)
+            assert fonte.lidos == [] and type(app.screen).__name__ == "TelaDados"
+    asyncio.run(roteiro())
+
+
+def test_s_com_bytea_na_chave_recusa(monkeypatch, tmp_path):
+    from ratt.db.arquivos import TamanhoArquivo
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    avisos = _avisando(monkeypatch)
+
+    async def roteiro():
+        fonte = FonteArquivos()
+        fonte.LINHAS = [(TamanhoArquivo(3), TamanhoArquivo(4), "x")]
+        fonte.TIPOS = ["bytea", "bytea", "text"]
+        app = AppDados(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await _s_em(app, piloto, 0, 1)
+            assert avisos == [t("arq.s_sem_pk")] and fonte.lidos == []
+    asyncio.run(roteiro())

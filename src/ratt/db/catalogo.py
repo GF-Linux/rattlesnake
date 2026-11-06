@@ -254,8 +254,9 @@ def _selecao(conexao, esquema, tabela):
     nunca baixar o arquivo. Sem `bytea` a lista é `*` (e a ordem das colunas é a do `SELECT *`: `attnum`)."""
     from psycopg import sql
     colunas_ = executar(conexao, """
-        SELECT a.attname, a.atttypid = 'bytea'::regtype
+        SELECT a.attname, coalesce(nullif(ty.typbasetype, 0), ty.oid) = 'bytea'::regtype
         FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+             JOIN pg_type ty ON ty.oid = a.atttypid
         WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped
         ORDER BY a.attnum""", (esquema, tabela)).fetchall()
     bytea = [i for i, (_, eh) in enumerate(colunas_) if eh]
@@ -281,7 +282,9 @@ def dados(conexao, objeto, deslocamento=0, limite=200):
     vem como `TamanhoArquivo` (o tamanho), não como bytes."""
     from psycopg import sql
     chave = [c.nome for c in colunas(conexao, objeto.oid) if c.chave] if objeto.tipo == "tabela" else []
-    ordem = sql.SQL(" ORDER BY {}").format(sql.SQL(", ").join(map(sql.Identifier, chave))) if chave else sql.SQL("")
+    # a coluna com o nome da tabela: um `bytea` na chave tem `octet_length(k) AS k`, e o ORDER BY solto pegaria a saída
+    ordem = sql.SQL(" ORDER BY {}").format(sql.SQL(", ").join(
+        sql.Identifier(objeto.esquema, objeto.nome, k) for k in chave)) if chave else sql.SQL("")
     lista, bytea = _selecao(conexao, objeto.esquema, objeto.nome)
     consulta = sql.SQL("SELECT {} FROM {}.{}{} LIMIT %s OFFSET %s").format(
         lista, sql.Identifier(objeto.esquema), sql.Identifier(objeto.nome), ordem)
@@ -381,7 +384,8 @@ def pagina(conexao, esquema, tabela, onde, ordem, deslocamento, limite, limite_m
     (`QueryCanceled` se passar). `ordem` são as colunas da chave primária; vazia, a página sai sem ORDER BY (a
     ordem não é estável)."""
     from psycopg import sql
-    por = sql.SQL(" ORDER BY {}").format(sql.SQL(", ").join(map(sql.Identifier, ordem))) if ordem else sql.SQL("")
+    por = sql.SQL(" ORDER BY {}").format(sql.SQL(", ").join(
+        sql.Identifier(esquema, tabela, k) for k in ordem)) if ordem else sql.SQL("")
     with somente_leitura(conexao, limite_ms):
         lista, bytea = _selecao(conexao, esquema, tabela)
         consulta = sql.SQL("SELECT {} FROM {}{}{} LIMIT {} OFFSET {}").format(

@@ -1359,3 +1359,49 @@ def test_s_salva_bytea_do_banco(banco, tmp_path, monkeypatch):
             await _pronto(app)
             assert (tmp_path / "amostras_7_f.ab1").read_bytes() == conteudo
     asyncio.run(roteiro())
+
+
+def test_dominio_de_bytea_vira_tamanho_e_s_salva(banco, tmp_path, monkeypatch):
+    import asyncio
+    import getpass
+    from ratt.db import canvas, formularios_dados, tela_dados
+    from ratt.db.arquivos import TamanhoArquivo
+    from ratt.db.grade_dados import Grade
+    from test_dados import AppDados
+    _apps_isolados(monkeypatch, tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(tela_dados.TelaDados, "VIGIA_SEGUNDOS", 0)
+    conteudo = b"%PDF" + bytes(range(256))
+    banco.execute("CREATE DOMAIN public.arq AS bytea")
+    banco.execute("CREATE TABLE public.docs (id bigint PRIMARY KEY, f public.arq)")
+    banco.execute("INSERT INTO public.docs VALUES (1, %s)", (conteudo,))
+    pagina = catalogo.pagina(banco, "public", "docs", "", ["id"], 0, 10)
+    assert pagina[2] == [(1, len(conteudo))] and isinstance(pagina[2][0][1], TamanhoArquivo)
+    oid = banco.execute("SELECT 'public.docs'::regclass::oid").fetchone()[0]
+    assert catalogo.dados(banco, catalogo.Objeto("public", "docs", "tabela", oid))[2] == pagina[2]
+
+    async def roteiro():
+        fonte = canvas.FonteBanco(None, banco.info.port, getpass.getuser(), banco.info.dbname)
+        app = AppDados(fonte, "t%d" % oid)
+        async with app.run_test(size=(140, 44)) as piloto:
+            await _pronto(app)
+            app.screen.query_one(Grade).move_cursor(row=0, column=1)
+            await piloto.press("s")
+            await _pronto(app)
+            assert isinstance(app.screen, formularios_dados.SalvarArquivo)
+            await piloto.press("enter")
+            await _pronto(app)
+            assert (tmp_path / "docs_1_f.pdf").read_bytes() == conteudo
+    asyncio.run(roteiro())
+
+
+def test_bytea_na_chave_ordena_pela_coluna_de_verdade(banco):
+    banco.execute("CREATE TABLE public.kb (k bytea PRIMARY KEY, n int)")
+    banco.execute("INSERT INTO public.kb VALUES ('\\x01', 1), ('\\x0000000002', 2), ('\\x03', 3)")
+    # ordem real dos bytes: 00..02 < 01 < 03; ordenar pelo tamanho (1, 1, 5) daria outra
+    esperado = [n for (n,) in banco.execute("SELECT n FROM public.kb ORDER BY k")]
+    assert esperado == [2, 1, 3]
+    assert [l[1] for l in catalogo.pagina(banco, "public", "kb", "", ["k"], 0, 10)[2]] == esperado
+    oid = banco.execute("SELECT 'public.kb'::regclass::oid").fetchone()[0]
+    assert [l[1] for l in catalogo.dados(banco, catalogo.Objeto("public", "kb", "tabela", oid))[2]] == esperado
+    assert [l[1] for l in catalogo.pagina(banco, "public", "kb", "n > 1", ["k"], 0, 10)[2]] == [2, 3]

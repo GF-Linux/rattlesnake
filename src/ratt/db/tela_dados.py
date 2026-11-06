@@ -47,6 +47,11 @@ def _primeira_linha(erro: Exception) -> str:
     return linhas[0] if linhas else type(erro).__name__
 
 
+def _nome_seguro(valor) -> str:
+    """Um pedaço de nome de arquivo: sem `/`, `\\` nem espaço."""
+    return re.sub(r"[/\\\s]", "_", str(valor))
+
+
 class TelaDados(AcoesRascunho, Screen):
     BINDINGS = [
         Binding("i", "inserir", t("dados.k.inserir")),
@@ -98,6 +103,7 @@ class TelaDados(AcoesRascunho, Screen):
         self.vista: _modelo.Modelo = _modelo.Modelo(esquema)     # o schema com o rascunho (os nomes que se veem)
         self.carregado = False
         self._view = view or colunas_view is not None
+        self._salvando = False                      # uma leitura do `s` no ar
         self._modelo_view: Optional[_modelo.Modelo] = None      # a view como um modelo de uma tabela só
         if colunas_view is not None:
             self._modelo_view = modelo_da_view(esquema, tabela_id, nome or tabela_id, colunas_view)
@@ -700,16 +706,25 @@ class TelaDados(AcoesRascunho, Screen):
         if valor is None:
             self.notify(t("arq.s_vazio"))
             return
+        if self._salvando:
+            return
         tab = self._tab_base()
         chave = {c.nome: self.linhas[linha][self.nomes.index(c.nome)] for c in tab.pk() if c.nome in self.nomes}
-        partes = [re.sub(r"[/\\\s]", "_", str(v)) for v in chave.values()]
+        partes = [_nome_seguro(v) for v in chave.values()]
         if isinstance(valor, arquivos.TamanhoArquivo):
-            if not tab.pk() or len(chave) != len(tab.pk()):
+            if (not tab.pk() or len(chave) != len(tab.pk())
+                    or any(isinstance(v, arquivos.TamanhoArquivo) for v in chave.values())):
                 self.notify(t("arq.s_sem_pk"), severity="warning")
                 return
+            self._salvando = True
             self._ler_valor(tab.esquema, tab.nome, nome, chave, partes)
-            return
-        self._pedir_caminho(valor.encode("utf-8"), tab.nome, partes, nome, ".txt")
+        elif isinstance(valor, (bytes, bytearray, memoryview)):
+            dados = bytes(valor)
+            self._pedir_caminho(dados, tab.nome, partes, nome, arquivos.extensao(dados))
+        elif isinstance(valor, str):
+            self._pedir_caminho(valor.encode("utf-8"), tab.nome, partes, nome, ".txt")
+        else:
+            self.notify(t("arq.s_tipo", tipo=tipo), severity="warning")
 
     @work(thread=True, group="salvar_arquivo")
     def _ler_valor(self, esquema, tabela, coluna, chave, partes) -> None:
@@ -722,6 +737,7 @@ class TelaDados(AcoesRascunho, Screen):
         self._de_volta(self._valor_chegou, tabela, coluna, partes, resultado)
 
     def _valor_chegou(self, tabela, coluna, partes, resultado) -> None:
+        self._salvando = False
         if not self.is_attached:
             return
         if "erro" in resultado:
@@ -736,7 +752,7 @@ class TelaDados(AcoesRascunho, Screen):
         if not dados:
             self.notify(t("arq.s_vazio"))
             return
-        sugestao = "~/" + "_".join([tabela, *partes, coluna]) + ext
+        sugestao = "~/" + "_".join(_nome_seguro(x) for x in [tabela, *partes, coluna]) + ext
         self.app.push_screen(SalvarArquivo(dados, sugestao), lambda caminho: self._salvou(caminho, len(dados)))
 
     def _salvou(self, caminho: Optional[str], n: int) -> None:
