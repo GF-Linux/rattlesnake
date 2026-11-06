@@ -2869,3 +2869,19 @@ def test_botoes_da_nova_coluna_e_do_ligar_nao_andam_quando_os_avisos_chegam(monk
             assert len(avisos.splitlines()) >= 2, avisos
             assert form.query_one("#por_no_rascunho").region == regiao
     asyncio.run(roteiro())
+
+
+def test_painel_conta_as_linhas_do_sql_abreviado(monkeypatch, tmp_path):
+    """Um texto de várias linhas vira uma linha na tela: o passo seguinte começa na linha que se vê."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    longo = "INSERT INTO t VALUES ('" + "\n".join("ACGT" * 10 for _ in range(50)) + "')"
+
+    async def roteiro():
+        app = AppTeste(FonteFalsa())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await pronto(app)
+            painel = app.screen.query_one(canvas.PainelSQL)
+            painel.atualizar([(None, True, "a", [longo]), (None, True, "b", ["SELECT 1"])])
+            assert painel._linhas == [0, 3]       # 2 linhas do passo abreviado + a vazia
+            assert len(painel.texto_plano().splitlines()) < 12
+    asyncio.run(roteiro())

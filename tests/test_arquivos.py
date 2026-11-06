@@ -39,6 +39,14 @@ def test_recusas(tmp_path):
             ler(str(caminho), tipo)
 
 
+def test_recusa_arquivo_especial_e_tipo_antes_de_ler(tmp_path):
+    with pytest.raises(ArquivoRecusado):
+        ler("/dev/null", "bytea")
+    (tmp_path / "g").write_bytes(b"x" * (TETO + 1))
+    with pytest.raises(ArquivoRecusado, match="integer"):
+        ler(str(tmp_path / "g"), "integer")
+
+
 def test_vazio(tmp_path):
     f = tmp_path / "v"
     f.write_bytes(b"")
@@ -51,6 +59,7 @@ def test_tamanho_legivel():
     assert tamanho_legivel(1023) == "1023 B"
     assert tamanho_legivel(1024) == "1 KB"
     assert tamanho_legivel(218_000) == "213 KB"
+    assert tamanho_legivel(1048575) == "1,0 MB"
     assert tamanho_legivel(5 * 1024 * 1024) == "5,0 MB"
 
 

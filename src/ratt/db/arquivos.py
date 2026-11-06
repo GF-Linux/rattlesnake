@@ -30,7 +30,7 @@ def aceita(tipo: str) -> bool:
 def tamanho_legivel(n: int) -> str:
     if n < 1024:
         return f"{n} B"
-    if n < 1024 * 1024:
+    if round(n / 1024) < 1024:
         return f"{max(1, round(n / 1024))} KB"
     mb = f"{n / (1024 * 1024):.1f} MB"
     return mb.replace(".", ",") if idioma.atual() == "pt" else mb
@@ -50,11 +50,15 @@ def extensao(dados: bytes) -> str:
 
 def ler(caminho: str, tipo: str) -> Tuple[str, str]:
     """`(valor, rótulo)` do arquivo para uma coluna de `tipo`. Recusa com `ArquivoRecusado`."""
+    if not aceita(tipo):
+        raise ArquivoRecusado(t("arq.tipo", tipo=tipo))
     caminho = os.path.expanduser(caminho.strip())
     if os.path.isdir(caminho):
         raise ArquivoRecusado(t("arq.e_pasta", caminho=caminho))
     if not os.path.exists(caminho):
         raise ArquivoRecusado(t("arq.nao_existe", caminho=caminho))
+    if not os.path.isfile(caminho):
+        raise ArquivoRecusado(t("arq.nao_regular", caminho=caminho))
     try:
         with open(caminho, "rb") as f:
             dados = f.read(TETO + 1)
@@ -67,8 +71,6 @@ def ler(caminho: str, tipo: str) -> Tuple[str, str]:
     rotulo = f"‹{os.path.basename(caminho)} · {tamanho_legivel(len(dados))}›"
     if filtro.tipo_normal(tipo) == "bytea":
         return "\\x" + dados.hex(), rotulo
-    if filtro.familia(tipo) != "texto":
-        raise ArquivoRecusado(t("arq.tipo", tipo=tipo))
     if b"\x00" in dados:
         raise ArquivoRecusado(t("arq.binario"))
     try:

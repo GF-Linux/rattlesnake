@@ -1174,6 +1174,7 @@ ratt db user passwd [name]            changes a password (no name: yours)
     "arq.nao_existe": {"pt": "não existe: {caminho}", "en": "does not exist: {caminho}"},
     "arq.e_pasta": {"pt": "é uma pasta, não um arquivo: {caminho}", "en": "is a folder, not a file: {caminho}"},
     "arq.sem_permissao": {"pt": "sem permissão para ler: {caminho}", "en": "no permission to read: {caminho}"},
+    "arq.nao_regular": {"pt": "não é um arquivo comum: {caminho}", "en": "not a regular file: {caminho}"},
     "arq.erro": {"pt": "não consegui ler {caminho}: {erro}", "en": "could not read {caminho}: {erro}"},
     "arq.grande": {"pt": "arquivo acima de {teto}: guarde só o caminho numa coluna de texto",
                    "en": "file over {teto}: keep just the path in a text column"},
