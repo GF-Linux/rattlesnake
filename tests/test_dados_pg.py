@@ -1297,3 +1297,65 @@ def test_contagem_que_estoura_o_tempo_entra_sem_vista(banco, tmp_path, monkeypat
             op, = tela.sessao.rascunho.operacoes
             assert op.vista is None
     asyncio.run(roteiro())
+
+
+# ── arquivos: a grade traz o tamanho do bytea, não o arquivo ──
+
+def test_pagina_bytea_vem_como_tamanho(banco):
+    from ratt.db.arquivos import TamanhoArquivo
+    banco.execute("CREATE TABLE public.amostras (id bigint PRIMARY KEY, f bytea, nome text)")
+    banco.execute("INSERT INTO public.amostras VALUES (1, %s, 'a'), (2, NULL, 'b')", (b"x" * 307200,))
+    nomes_, tipos, linhas = catalogo.pagina(banco, "public", "amostras", "", ["id"], 0, 10)
+    assert nomes_ == ["id", "f", "nome"] and tipos == ["int8", "bytea", "text"]
+    assert linhas == [(1, 307200, "a"), (2, None, "b")]
+    assert isinstance(linhas[0][1], TamanhoArquivo) and linhas[1][1] is None
+    oid = banco.execute("SELECT 'public.amostras'::regclass::oid").fetchone()[0]
+    objeto = catalogo.Objeto("public", "amostras", "tabela", oid)
+    assert catalogo.dados(banco, objeto) == (nomes_, tipos, linhas)
+    banco.execute("CREATE VIEW public.va AS SELECT id, f FROM public.amostras")
+    oid = banco.execute("SELECT 'public.va'::regclass::oid").fetchone()[0]
+    visao = catalogo.Objeto("public", "va", "view", oid)
+    assert catalogo.dados(banco, visao)[2] == [(1, 307200), (2, None)]
+
+
+def test_valor_da_linha(banco):
+    banco.execute("CREATE TABLE public.chaves (a text, b int, f bytea, PRIMARY KEY (a, b))")
+    banco.execute("INSERT INTO public.chaves VALUES ('x y', 1, %s), ('x y', 2, %s), ('z', 1, NULL)",
+                  (b"\x00\xff\x10", b"outro"))
+    assert catalogo.valor_da_linha(banco, "public", "chaves", "f", {"a": "x y", "b": 1}) == b"\x00\xff\x10"
+    assert catalogo.valor_da_linha(banco, "public", "chaves", "f", {"a": "x y", "b": 2}) == b"outro"
+    assert catalogo.valor_da_linha(banco, "public", "chaves", "f", {"a": "z", "b": 1}) is None
+    assert catalogo.valor_da_linha(banco, "public", "chaves", "f", {"a": "nada", "b": 1}) is None
+
+
+def test_s_salva_bytea_do_banco(banco, tmp_path, monkeypatch):
+    import asyncio
+    import getpass
+    from textual.widgets import Input
+    from ratt.db import canvas, formularios_dados, tela_dados
+    from ratt.db.grade_dados import Grade
+    from test_dados import AppDados
+    _apps_isolados(monkeypatch, tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(tela_dados.TelaDados, "VIGIA_SEGUNDOS", 0)
+    conteudo = b"ABIF" + bytes(range(256)) * 1200
+    banco.execute("CREATE TABLE public.amostras (id bigint PRIMARY KEY, f bytea)")
+    banco.execute("INSERT INTO public.amostras VALUES (7, %s)", (conteudo,))
+    oid = banco.execute("SELECT 'public.amostras'::regclass::oid").fetchone()[0]
+
+    async def roteiro():
+        fonte = canvas.FonteBanco(None, banco.info.port, getpass.getuser(), banco.info.dbname)
+        app = AppDados(fonte, "t%d" % oid)
+        async with app.run_test(size=(140, 44)) as piloto:
+            await _pronto(app)
+            tela = app.screen
+            assert tela.linhas == [(7, len(conteudo))]
+            tela.query_one(Grade).move_cursor(row=0, column=1)
+            await piloto.press("s")
+            await _pronto(app)
+            assert isinstance(app.screen, formularios_dados.SalvarArquivo)
+            assert app.screen.query_one(Input).value == "~/amostras_7_f.ab1"
+            await piloto.press("enter")
+            await _pronto(app)
+            assert (tmp_path / "amostras_7_f.ab1").read_bytes() == conteudo
+    asyncio.run(roteiro())

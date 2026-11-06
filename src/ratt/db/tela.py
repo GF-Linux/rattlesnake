@@ -25,6 +25,7 @@ from textual.widgets import DataTable, Footer, OptionList, Static, TabbedContent
 from textual.widgets.option_list import Option
 
 from ratt.db import acesso, catalogo, config, rodar
+from ratt.db.arquivos import TamanhoArquivo, rotulo_tamanho
 from ratt.db.idioma import t
 
 POR_PAGINA = 200
@@ -39,6 +40,8 @@ _GRUPOS = (("tabelas", "tui.tabelas"), ("views", "tui.views"), ("funcoes", "tui.
 
 
 def _celula(valor, tipo):
+    if isinstance(valor, TamanhoArquivo):
+        return Text(rotulo_tamanho(valor), style=COR["cinza"])
     texto = rodar._cortar(rodar._formatar(valor), LARGURA_CELULA)
     if valor is None:
         return Text(texto, style=COR["laranja"])

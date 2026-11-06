@@ -29,9 +29,9 @@ from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Static
 
-from ratt.db import catalogo, checagem, filtro, formularios, modelo as _modelo, rascunho as _rascunho, sessao
+from ratt.db import arquivos, catalogo, checagem, filtro, formularios, modelo as _modelo, rascunho as _rascunho, sessao
 from ratt.db.formularios_dados import (ConfirmarApagarLinhas, FonteTravada, FormAlterar, FormCondicao, FormDuplicatas,
-                                      FormInserir)
+                                      FormInserir, SalvarArquivo)
 from ratt.db.grade_dados import Grade, condicao_da_celula, modelo_da_view, select_texto, texto_contagem
 from ratt.db.idioma import t
 from ratt.db.painel import AcoesRascunho, PainelSQL, PerguntarNome
@@ -58,6 +58,7 @@ class TelaDados(AcoesRascunho, Screen):
         Binding("t", "texto", t("dados.k.texto")),
         Binding("o", "conectivo", t("dados.k.conectivo")),
         Binding("backspace", "tirar_condicao", t("dados.k.tirar"), show=False),
+        Binding("s", "salvar", t("dados.k.salvar")),
         Binding("n", "pagina(1)", t("tui.proxima")),
         Binding("N,shift+n", "pagina(-1)", t("tui.anterior"), show=False),
         Binding("enter", "aplicar", t("canvas.k.aplicar")),
@@ -682,6 +683,65 @@ class TelaDados(AcoesRascunho, Screen):
         if not self.carregado:
             self.notify(t("canvas.carregando"))
         return self.carregado
+
+    def action_salvar(self) -> None:
+        """`s`: a célula sob o cursor vira um arquivo. `bytea` é relido do banco pela chave primária; texto é o que
+        a grade já tem."""
+        if not self.carregado or not self.linhas or self._tab_base() is None:
+            return
+        linha, coluna = self.query_one(Grade).cursor_coordinate
+        if coluna >= len(self.nomes) or linha >= len(self.linhas):
+            self.notify(t("dados.e.coluna_grade"), severity="warning")
+            return
+        tipo, nome, valor = self.tipos[coluna], self.nomes[coluna], self.linhas[linha][coluna]
+        if not arquivos.aceita(tipo):
+            self.notify(t("arq.s_tipo", tipo=tipo), severity="warning")
+            return
+        if valor is None:
+            self.notify(t("arq.s_vazio"))
+            return
+        tab = self._tab_base()
+        chave = {c.nome: self.linhas[linha][self.nomes.index(c.nome)] for c in tab.pk() if c.nome in self.nomes}
+        partes = [re.sub(r"[/\\\s]", "_", str(v)) for v in chave.values()]
+        if isinstance(valor, arquivos.TamanhoArquivo):
+            if not tab.pk() or len(chave) != len(tab.pk()):
+                self.notify(t("arq.s_sem_pk"), severity="warning")
+                return
+            self._ler_valor(tab.esquema, tab.nome, nome, chave, partes)
+            return
+        self._pedir_caminho(valor.encode("utf-8"), tab.nome, partes, nome, ".txt")
+
+    @work(thread=True, group="salvar_arquivo")
+    def _ler_valor(self, esquema, tabela, coluna, chave, partes) -> None:
+        resultado: Dict[str, object] = {}
+        with self._trava:
+            try:
+                resultado["dados"] = self.fonte.valor_da_linha(esquema, tabela, coluna, chave)
+            except Exception as erro:
+                resultado["erro"] = _primeira_linha(erro)
+        self._de_volta(self._valor_chegou, tabela, coluna, partes, resultado)
+
+    def _valor_chegou(self, tabela, coluna, partes, resultado) -> None:
+        if not self.is_attached:
+            return
+        if "erro" in resultado:
+            self.notify(t("canvas.erro_banco", erro=resultado["erro"]), severity="error")
+        elif not resultado["dados"]:
+            self.notify(t("arq.s_vazio"))
+        else:
+            dados = resultado["dados"]
+            self._pedir_caminho(dados, tabela, partes, coluna, arquivos.extensao(dados))
+
+    def _pedir_caminho(self, dados: bytes, tabela: str, partes, coluna: str, ext: str) -> None:
+        if not dados:
+            self.notify(t("arq.s_vazio"))
+            return
+        sugestao = "~/" + "_".join([tabela, *partes, coluna]) + ext
+        self.app.push_screen(SalvarArquivo(dados, sugestao), lambda caminho: self._salvou(caminho, len(dados)))
+
+    def _salvou(self, caminho: Optional[str], n: int) -> None:
+        if caminho:
+            self.notify(t("arq.s_salvo", caminho=caminho, tamanho=arquivos.tamanho_legivel(n)))
 
     def action_inserir(self) -> None:
         """Uma linha nova pelo formulário (também numa tabela criada no rascunho: entra, e aparece ao aplicar)."""

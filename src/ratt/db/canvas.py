@@ -113,6 +113,9 @@ class FonteBanco:
     def pagina(self, esquema: str, tabela: str, onde: str, ordem: List[str], deslocamento: int, limite: int):
         return catalogo.pagina(self._aberta(), esquema, tabela, onde, ordem, deslocamento, limite)
 
+    def valor_da_linha(self, esquema: str, tabela: str, coluna: str, chave: dict):
+        return catalogo.valor_da_linha(self._aberta(), esquema, tabela, coluna, chave)
+
     def contar(self, esquema: str, tabela: str, onde: str) -> Optional[int]:
         return catalogo.contar_filtrado(self._aberta(), esquema, tabela, onde)
 

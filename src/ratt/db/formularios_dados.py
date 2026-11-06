@@ -18,6 +18,7 @@ cascata; a operação guarda a contagem mostrada (`vista`, None se não deu para
 from __future__ import annotations
 
 import copy
+import os
 from typing import Dict, List, Optional, Tuple
 
 from rich.text import Text
@@ -31,9 +32,9 @@ from textual.widgets import Button, Checkbox, Input, OptionList, Select, Selecti
 from textual.widgets.option_list import Option
 
 from ratt.db import checagem, filtro
-from ratt.db.arquivos import TamanhoArquivo, rotulo_tamanho
+from ratt.db.arquivos import TamanhoArquivo, rotulo_tamanho, tamanho_legivel
 from ratt.db import rascunho as rs
-from ratt.db.formularios import _ATRASO, Abandonada, Corpo, FormBase
+from ratt.db.formularios import _ATRASO, Abandonada, Confirmar, Corpo, FormBase
 from ratt.db.idioma import t
 from ratt.db.modelo import Coluna, Ligacao, Modelo
 from ratt.db.tela import COR
@@ -1271,3 +1272,73 @@ class FormDuplicatas(_FormLinhas):
             texto.append(f"  {marca:<6}", style=COR["laranja"] if sai else COR["verde"])
             texto.append(_corta(" · ".join(_mostra(v) for v in linha[:n])) + "\n")
         return texto
+
+
+class SalvarArquivo(ModalScreen):
+    """Onde gravar os bytes de uma célula. O caminho vem pré-preenchido (`~/…`); se o arquivo existe, pergunta antes
+    de sobrescrever (foco no cancelar); a pasta precisa existir. Devolve o caminho gravado, ou None."""
+
+    BINDINGS = [Binding("escape", "dismiss(None)", t("canvas.f.cancelar"))]
+    DEFAULT_CSS = """
+    SalvarArquivo { align: center middle; }
+    SalvarArquivo > Vertical { width: 84; max-width: 100%; height: auto; max-height: 100%; border: round $primary;
+                               background: $surface; padding: 1 2; }
+    SalvarArquivo #erro { height: auto; color: $error; }
+    SalvarArquivo #botoes { height: 3; margin-top: 1; align-horizontal: right; }
+    SalvarArquivo Button { margin-left: 1; }
+    """
+
+    def __init__(self, dados: bytes, sugestao: str):
+        super().__init__()
+        self.dados, self.sugestao = dados, sugestao
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(Text(t("arq.s_titulo", tamanho=tamanho_legivel(len(self.dados))), style="bold"))
+            yield Input(value=self.sugestao, id="caminho")
+            yield Static("", id="erro")
+            with Horizontal(id="botoes"):
+                yield Button(t("arq.s_salvar"), id="salvar", variant="primary")
+                yield Button(t("canvas.f.cancelar"), id="cancelar")
+
+    def on_mount(self) -> None:
+        self.query_one("#caminho", Input).focus()
+
+    def _erro(self, texto: str) -> None:
+        self.query_one("#erro", Static).update(Text(texto))
+
+    def _tentar(self) -> None:
+        self._erro("")
+        caminho = os.path.expanduser(self.query_one("#caminho", Input).value.strip())
+        if not caminho:
+            return self._erro(t("arq.s_sem_nome"))
+        if os.path.isdir(caminho):
+            return self._erro(t("arq.e_pasta", caminho=caminho))
+        pasta = os.path.dirname(os.path.abspath(caminho))
+        if not os.path.isdir(pasta):
+            return self._erro(t("arq.s_sem_pasta", pasta=pasta))
+        if os.path.lexists(caminho):
+            self.app.push_screen(Confirmar(t("canvas.f.sobrescrever", caminho=caminho), [],
+                                           t("canvas.f.sobrescrever_sim"), foco="nao"),
+                                 lambda sim: self._gravar(caminho) if sim else None)
+        else:
+            self._gravar(caminho)
+
+    def _gravar(self, caminho: str) -> None:
+        try:
+            with open(caminho, "wb") as f:
+                f.write(self.dados)
+        except OSError as erro:
+            return self._erro(t("arq.s_erro", caminho=caminho, erro=erro.strerror or str(erro)))
+        self.dismiss(caminho)
+
+    def on_input_submitted(self, evento: Input.Submitted) -> None:
+        evento.stop()
+        self._tentar()
+
+    def on_button_pressed(self, evento: Button.Pressed) -> None:
+        evento.stop()
+        if evento.button.id == "salvar":
+            self._tentar()
+        else:
+            self.dismiss(None)

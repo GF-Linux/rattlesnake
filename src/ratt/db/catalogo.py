@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from ratt.db import modelo as _modelo
+from ratt.db.arquivos import TamanhoArquivo
 
 # os esquemas do próprio PostgreSQL ficam de fora da árvore
 _SEM_SISTEMA = "n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_(toast|temp)'"
@@ -248,18 +249,48 @@ def tamanho(conexao, oid):
     return conexao.execute("SELECT pg_total_relation_size(%s)", (oid,)).fetchone()[0]
 
 
+def _selecao(conexao, esquema, tabela):
+    """(a lista do SELECT, os índices das colunas `bytea`): cada `bytea` vira `octet_length(col)`, para a grade
+    nunca baixar o arquivo. Sem `bytea` a lista é `*` (e a ordem das colunas é a do `SELECT *`: `attnum`)."""
+    from psycopg import sql
+    colunas_ = executar(conexao, """
+        SELECT a.attname, a.atttypid = 'bytea'::regtype
+        FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped
+        ORDER BY a.attnum""", (esquema, tabela)).fetchall()
+    bytea = [i for i, (_, eh) in enumerate(colunas_) if eh]
+    if not bytea:
+        return sql.SQL("*"), []
+    itens = [sql.SQL("octet_length({0}) AS {0}").format(sql.Identifier(nome)) if eh else sql.Identifier(nome)
+             for nome, eh in colunas_]
+    return sql.SQL(", ").join(itens), bytea
+
+
+def _como_tamanhos(tipos, linhas, bytea):
+    """Os `octet_length` viram `TamanhoArquivo` (∅ fica `None`) e o tipo volta a ser `bytea`."""
+    if not bytea:
+        return tipos, linhas
+    for i in bytea:
+        tipos[i] = "bytea"
+    return tipos, [tuple(TamanhoArquivo(v) if i in bytea and v is not None else v for i, v in enumerate(l))
+                   for l in linhas]
+
+
 def dados(conexao, objeto, deslocamento=0, limite=200):
-    """(colunas, tipos, linhas) de uma página da tabela ou view, na ordem da chave primária."""
+    """(colunas, tipos, linhas) de uma página da tabela ou view, na ordem da chave primária. Uma coluna `bytea`
+    vem como `TamanhoArquivo` (o tamanho), não como bytes."""
     from psycopg import sql
     chave = [c.nome for c in colunas(conexao, objeto.oid) if c.chave] if objeto.tipo == "tabela" else []
     ordem = sql.SQL(" ORDER BY {}").format(sql.SQL(", ").join(map(sql.Identifier, chave))) if chave else sql.SQL("")
-    consulta = sql.SQL("SELECT * FROM {}.{}{} LIMIT %s OFFSET %s").format(
-        sql.Identifier(objeto.esquema), sql.Identifier(objeto.nome), ordem)
+    lista, bytea = _selecao(conexao, objeto.esquema, objeto.nome)
+    consulta = sql.SQL("SELECT {} FROM {}.{}{} LIMIT %s OFFSET %s").format(
+        lista, sql.Identifier(objeto.esquema), sql.Identifier(objeto.nome), ordem)
     with conexao.cursor() as cur:
         cur.execute(consulta, (limite, deslocamento))
         nomes = [d.name for d in cur.description]
         tipos = [getattr(conexao.adapters.types.get(d.type_code), "name", str(d.type_code)) for d in cur.description]
-        return nomes, tipos, cur.fetchall()
+        tipos, linhas = _como_tamanhos(tipos, cur.fetchall(), bytea)
+        return nomes, tipos, linhas
 
 
 def ddl(conexao, objeto):
@@ -351,14 +382,31 @@ def pagina(conexao, esquema, tabela, onde, ordem, deslocamento, limite, limite_m
     ordem não é estável)."""
     from psycopg import sql
     por = sql.SQL(" ORDER BY {}").format(sql.SQL(", ").join(map(sql.Identifier, ordem))) if ordem else sql.SQL("")
-    consulta = sql.SQL("SELECT * FROM {}{}{} LIMIT {} OFFSET {}").format(
-        sql.Identifier(esquema, tabela), onde_sql(onde), por, sql.Literal(int(limite)), sql.Literal(int(deslocamento)))
     with somente_leitura(conexao, limite_ms):
+        lista, bytea = _selecao(conexao, esquema, tabela)
+        consulta = sql.SQL("SELECT {} FROM {}{}{} LIMIT {} OFFSET {}").format(
+            lista, sql.Identifier(esquema, tabela), onde_sql(onde), por, sql.Literal(int(limite)),
+            sql.Literal(int(deslocamento)))
         with conexao.cursor() as cur:
             executar(cur, consulta)
             nomes = [d.name for d in cur.description]
             tipos = [getattr(conexao.adapters.types.get(d.type_code), "name", str(d.type_code)) for d in cur.description]
-            return nomes, tipos, cur.fetchall()
+            tipos, linhas = _como_tamanhos(tipos, cur.fetchall(), bytea)
+            return nomes, tipos, linhas
+
+
+def valor_da_linha(conexao, esquema, tabela, coluna, chave, limite_ms=5000):
+    """O valor de `coluna` na linha que `chave` ({coluna da chave: valor}) acha, em transação somente leitura e com
+    tempo limite; None se a linha sumiu ou o valor é vazio. `bytea` volta como `bytes`."""
+    from psycopg import sql
+    onde = sql.SQL(" AND ").join(sql.SQL("{} = %s").format(sql.Identifier(k)) for k in chave)
+    consulta = sql.SQL("SELECT {} FROM {} WHERE {} LIMIT 2").format(sql.Identifier(coluna), sql.Identifier(esquema, tabela), onde)
+    with somente_leitura(conexao, limite_ms):
+        linhas = executar(conexao, consulta, list(chave.values())).fetchall()
+    if len(linhas) != 1 or linhas[0][0] is None:
+        return None
+    valor = linhas[0][0]
+    return bytes(valor) if isinstance(valor, (bytes, memoryview)) else valor
 
 
 def contar_filtrado(conexao, esquema, tabela, onde, limite_ms=2000):

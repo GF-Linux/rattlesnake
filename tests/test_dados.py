@@ -2616,3 +2616,202 @@ def test_duplicatas_sem_data_nao_oferece_recente_e_normalizar_so_com_texto(monke
             await piloto.pause()
             assert normalizar.disabled and not normalizar.value
     asyncio.run(roteiro())
+
+
+# ── arquivos: a grade mostra o tamanho e `s` salva ──
+
+def test_celula_arquivo():
+    from ratt.db.arquivos import TamanhoArquivo
+    from ratt.db.tela import _celula
+    assert _celula(TamanhoArquivo(2048), "bytea").plain == "‹arquivo · 2 KB›"
+
+
+ABIF = b"ABIF" + bytes(range(256)) * 3
+
+
+class FonteArquivos(FonteDadosFalsa):
+    """Uma tabela `amostras (id pk, f bytea, nome text)`; o `bytea` da grade é só o tamanho."""
+    NOMES = ["id", "f", "nome"]
+    TIPOS = ["int8", "bytea", "text"]
+
+    def __init__(self, pk=True):
+        from ratt.db.arquivos import TamanhoArquivo
+        m = Modelo("public", {"t1": Tabela("t1", "public", "amostras", [
+            Coluna("t1.c1", "id", "text", pk=pk), Coluna("t1.c2", "f", "bytea"), Coluna("t1.c3", "nome", "text")])})
+        super().__init__(m)
+        self.LINHAS = [("a b/c", TamanhoArquivo(len(ABIF)), "texto da grade"), ("2", None, None),
+                       ("3", TamanhoArquivo(0), "")]
+        self.NOMES, self.TIPOS = ["id", "f", "nome"], ["text", "bytea", "text"]
+        self.lidos = []
+
+    def valor_da_linha(self, esquema, tabela, coluna, chave):
+        self.lidos.append((tabela, coluna, dict(chave)))
+        return ABIF if chave["id"] == "a b/c" else b""
+
+
+async def _s_em(app, piloto, linha, coluna):
+    from ratt.db.grade_dados import Grade
+    await pronto_dados(app)
+    app.screen.query_one(Grade).move_cursor(row=linha, column=coluna)
+    await piloto.press("s")
+    await pronto_dados(app)
+
+
+def test_s_salva_bytea(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from textual.widgets import Input
+    from ratt.db import formularios_dados
+    avisos = []
+    monkeypatch.setattr(tela_dados_mod(), "notify", lambda self, msg, **kw: avisos.append(msg))
+
+    async def roteiro():
+        fonte = FonteArquivos()
+        app = AppDados(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await _s_em(app, piloto, 0, 1)
+            modal = app.screen
+            assert isinstance(modal, formularios_dados.SalvarArquivo)
+            assert fonte.lidos == [("amostras", "f", {"id": "a b/c"})]
+            assert modal.query_one(Input).value == "~/amostras_a_b_c_f.ab1"
+            await piloto.press("enter")
+            await pronto_dados(app)
+            assert (tmp_path / "amostras_a_b_c_f.ab1").read_bytes() == ABIF
+            assert any("amostras_a_b_c_f.ab1" in a for a in avisos)
+    asyncio.run(roteiro())
+
+
+def tela_dados_mod():
+    from ratt.db import tela_dados
+    return tela_dados.TelaDados
+
+
+def test_s_texto(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from textual.widgets import Input
+
+    async def roteiro():
+        fonte = FonteArquivos()
+        app = AppDados(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await _s_em(app, piloto, 0, 2)
+            assert app.screen.query_one(Input).value == "~/amostras_a_b_c_nome.txt"
+            await piloto.press("enter")
+            await pronto_dados(app)
+            assert (tmp_path / "amostras_a_b_c_nome.txt").read_bytes() == "texto da grade".encode()
+            assert fonte.lidos == []
+    asyncio.run(roteiro())
+
+
+def _avisando(monkeypatch):
+    avisos = []
+    monkeypatch.setattr(tela_dados_mod(), "notify", lambda self, msg, **kw: avisos.append(msg))
+    return avisos
+
+
+def test_s_sem_pk_recusa_bytea(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    avisos = _avisando(monkeypatch)
+
+    async def roteiro():
+        app = AppDados(FonteArquivos(pk=False))
+        async with app.run_test(size=(120, 40)) as piloto:
+            await _s_em(app, piloto, 0, 1)
+            assert avisos[-1] == t("arq.s_sem_pk") and type(app.screen).__name__ == "TelaDados"
+            await _s_em(app, piloto, 0, 2)                       # o texto não precisa de chave
+            assert type(app.screen).__name__ == "SalvarArquivo"
+    asyncio.run(roteiro())
+
+
+def test_s_vazio_e_tipo_avisam(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    avisos = _avisando(monkeypatch)
+
+    async def roteiro():
+        app = AppDados(FonteArquivos())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await _s_em(app, piloto, 1, 1)                       # bytea ∅
+            await _s_em(app, piloto, 2, 1)                       # bytea de 0 bytes
+            await _s_em(app, piloto, 1, 2)                       # texto ∅
+            assert avisos == [t("arq.s_vazio")] * 3
+            assert type(app.screen).__name__ == "TelaDados"
+    asyncio.run(roteiro())
+
+
+def test_s_coluna_numero_avisa(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    avisos = _avisando(monkeypatch)
+
+    async def roteiro():
+        fonte = FonteDadosFalsa()
+        app = AppDados(fonte)
+        async with app.run_test(size=(120, 40)) as piloto:
+            await _s_em(app, piloto, 0, 2)                       # idade
+            assert avisos == [t("arq.s_tipo", tipo="int4")]
+    asyncio.run(roteiro())
+
+
+def test_s_sobrescrever_pergunta_e_cancelar_nao_escreve(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from textual.widgets import Button
+    from ratt.db import formularios
+    alvo = tmp_path / "amostras_a_b_c_f.ab1"
+    alvo.write_bytes(b"antigo")
+
+    async def roteiro():
+        app = AppDados(FonteArquivos())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await _s_em(app, piloto, 0, 1)
+            await piloto.press("enter")
+            await piloto.pause(0.1)
+            conf = app.screen
+            assert isinstance(conf, formularios.Confirmar)
+            assert app.focused is conf.query_one("#nao", Button)
+            await piloto.press("enter")                          # o enter distraído cancela
+            await piloto.pause(0.1)
+            assert alvo.read_bytes() == b"antigo"
+            assert type(app.screen).__name__ == "SalvarArquivo"
+            await piloto.press("enter")
+            await piloto.pause(0.1)
+            await piloto.click("#sim")
+            await pronto_dados(app)
+            assert alvo.read_bytes() == ABIF
+    asyncio.run(roteiro())
+
+
+def test_s_pasta_inexistente_erro(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    from textual.widgets import Input, Static
+
+    async def roteiro():
+        app = AppDados(FonteArquivos())
+        async with app.run_test(size=(120, 40)) as piloto:
+            await _s_em(app, piloto, 0, 1)
+            modal = app.screen
+            modal.query_one(Input).value = str(tmp_path / "nao" / "existe.bin")
+            await piloto.press("enter")
+            await piloto.pause(0.1)
+            assert str(tmp_path / "nao") in str(modal.query_one("#erro", Static).render())
+            assert type(app.screen).__name__ == "SalvarArquivo" and not (tmp_path / "nao").exists()
+    asyncio.run(roteiro())
+
+
+def test_salvar_cabe_80x24(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from textual.widgets import Input
+
+    async def roteiro():
+        app = AppDados(FonteArquivos())
+        async with app.run_test(size=(80, 24)) as piloto:
+            await _s_em(app, piloto, 0, 1)
+            modal = app.screen
+            modal.query_one(Input).value = str(tmp_path / "nao" / "existe.bin")
+            await piloto.press("enter")
+            await piloto.pause(0.1)
+            for seletor in ("#caminho", "#salvar", "#cancelar", "#erro"):
+                w = modal.query_one(seletor)
+                assert w.region.height >= 1 and modal.screen.region.contains_region(w.region), seletor
+    asyncio.run(roteiro())
