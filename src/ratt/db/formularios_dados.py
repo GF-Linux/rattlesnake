@@ -248,9 +248,15 @@ class CampoValor(Vertical):
         self.query_one(Input).value = valor
 
     def carregado(self, valor: str, rotulo: str) -> None:
-        """Chegou o arquivo: o conteúdo fica guardado e o `Input` mostra o rótulo (‹nome · tamanho›)."""
+        """Chegou o arquivo: o conteúdo fica guardado e o `Input` mostra o rótulo (‹nome · tamanho›). Com o mesmo
+        rótulo de antes (outro arquivo de mesmo nome e tamanho), o `Input` não muda e não avisa: o formulário refaz a
+        prévia e os avisos assim mesmo."""
         self._arquivo = (valor, rotulo)
-        self.query_one(Input).value = rotulo
+        campo = self.query_one(Input)
+        if campo.value != rotulo:
+            campo.value = rotulo
+        elif callable(getattr(self.screen, "atualizar", None)):
+            self.screen.atualizar()
 
     # ── eventos ──
 

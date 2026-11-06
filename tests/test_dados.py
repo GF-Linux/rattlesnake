@@ -2941,6 +2941,31 @@ def test_inserir_carrega_arquivo_bytea(monkeypatch, tmp_path):
     asyncio.run(roteiro())
 
 
+def test_outro_arquivo_de_mesmo_rotulo_refaz_os_avisos(monkeypatch, tmp_path):
+    """O segundo arquivo tem o mesmo nome e tamanho (outra pasta): o `Input` não muda, mas a prévia e os avisos
+    são os do arquivo novo."""
+    _sem_ultima_pasta(monkeypatch, tmp_path)
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "x.txt").write_text(" abc", encoding="utf-8")       # espaço na ponta: avisa
+    (tmp_path / "b" / "x.txt").write_text("abcd", encoding="utf-8")       # mesmo rótulo, sem aviso
+    espacos = t("chk.espacos_valor", coluna="nome")
+
+    async def roteiro():
+        app = AppDados(FonteArquivos())
+        async with app.run_test(size=(140, 50)) as piloto:
+            tela, form = await _abrir_inserir(app, piloto)
+            _digitar(form, "id", "k")
+            await _carregar(app, piloto, form, "nome", tmp_path / "a" / "x.txt")
+            await contado(app, form)
+            assert espacos in _texto(form, "#form_avisos") and "' abc'" in form.query_one("#form_sql").content.code
+            await _carregar(app, piloto, form, "nome", tmp_path / "b" / "x.txt")
+            await contado(app, form)
+            assert form.campo("nome").valor() == "abcd"
+            assert espacos not in _texto(form, "#form_avisos") and "'abcd'" in form.query_one("#form_sql").content.code
+    asyncio.run(roteiro())
+
+
 def test_alterar_carrega_texto(monkeypatch, tmp_path):
     _sem_ultima_pasta(monkeypatch, tmp_path)
     from textual.widgets import Button, Select

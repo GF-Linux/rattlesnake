@@ -1426,6 +1426,21 @@ def test_aplica_bytea_e_texto(banco, tmp_path):
     assert bytes(f) == binario and nome == texto
 
 
+def test_antes_depois_mostra_o_bytea_novo_como_arquivo(banco):
+    """O "depois" sai no tipo da coluna: o arquivo novo de um `bytea` vem como bytes (a amostra mostra
+    ‹arquivo · N›), não como o hex do literal; num varchar o tamanho não corta o que se mostra."""
+    from ratt.db.formularios_dados import _mostra
+    banco.execute("CREATE TABLE public.docs (id int PRIMARY KEY, f bytea, v varchar(3))")
+    banco.execute("INSERT INTO public.docs VALUES (1, '\\x414249', 'abc')")
+    c = checagem.Consulta(banco)
+    novo = "\\x" + (b"ABIF" + bytes(range(256))).hex()
+    pares = c.antes_depois("public", "docs", "id = 1", {"f": filtro.literal(novo, "bytea"), "v": "'abcdef'"})
+    (antes, depois), = pares
+    assert bytes(antes[0]) == b"ABI" and bytes(depois[0]) == b"ABIF" + bytes(range(256))
+    assert depois[1] == "abcdef"
+    assert _mostra(depois[0]) == "‹arquivo · 260 B›"
+
+
 def test_erro_ao_aplicar_com_arquivo_nao_despeja_o_hex(banco, tmp_path):
     """Um `id` repetido num INSERT com um arquivo de 300 KB: o erro mostra a janela em volta do lugar, não a linha
     inteira (antes, ~615 mil caracteres no terminal)."""
@@ -1449,3 +1464,74 @@ def test_erro_ao_aplicar_com_arquivo_nao_despeja_o_hex(banco, tmp_path):
     texto = saida.getvalue()
     assert len(texto) < 3000 and "(id)=(1)" in texto and "INSERT INTO public.docs" in texto
     assert len((tmp_path / "a.sql").read_text(encoding="utf-8")) > 600_000       # o arquivo em disco, inteiro
+
+
+def test_arquivo_de_ponta_a_ponta(banco, tmp_path, monkeypatch):
+    """Do botão arquivo… ao `s`: carrega pelo formulário, aplica pelo enter da tela (o caminho de verdade, com a
+    confirmação), vê ‹arquivo · N› na grade e salva com `s` — os mesmos bytes, todos de 0 a 255 mais ' e \\."""
+    import asyncio
+    import builtins
+    import getpass
+    from contextlib import contextmanager
+    from textual.app import App
+    from textual.coordinate import Coordinate
+    from textual.widgets import Input
+    from ratt.db import canvas, formularios, formularios_dados, tela_dados
+    from ratt.db.arquivos import TamanhoArquivo, rotulo_tamanho, tamanho_legivel
+    from ratt.db.grade_dados import Grade
+    from test_dados import AppDados, _carregar
+    _apps_isolados(monkeypatch, tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(formularios_dados, "_ULTIMA_PASTA", None)
+    monkeypatch.setattr(tela_dados.TelaDados, "VIGIA_SEGUNDOS", 0)
+
+    @contextmanager
+    def sem_suspender(self):
+        yield
+    monkeypatch.setattr(App, "suspend", sem_suspender)
+    monkeypatch.setattr(builtins, "input", lambda *a: "")         # o "Enter volta" do terminal suspenso
+    blob = b"ABIF" + bytes(range(256)) + b"'\\''\\\\'" + bytes(range(255, -1, -1)) * 3
+    (tmp_path / "amostra.ab1").write_bytes(blob)
+    banco.execute("CREATE TABLE public.docs (id int PRIMARY KEY, f bytea)")
+    oid = banco.execute("SELECT 'public.docs'::regclass::oid").fetchone()[0]
+
+    async def roteiro():
+        fonte = canvas.FonteBanco(None, banco.info.port, getpass.getuser(), banco.info.dbname)
+        app = AppDados(fonte, "t%d" % oid)
+        async with app.run_test(size=(140, 50)) as piloto:
+            await _pronto(app)
+            tela = app.screen
+            await piloto.press("i")
+            await piloto.pause()
+            form = app.screen
+            assert isinstance(form, formularios_dados.FormInserir)
+            form.campo("id").query_one(Input).value = "1"
+            await _carregar(app, piloto, form, "f", tmp_path / "amostra.ab1")
+            assert form.campo("f").query_one(Input).value == f"‹amostra.ab1 · {tamanho_legivel(len(blob))}›"
+            await contado(app, form)
+            await _pronto(app)
+            await piloto.click("#por_no_rascunho")
+            await _pronto(app)
+            assert app.screen is tela and len(tela.sessao.rascunho.operacoes) == 1
+            await piloto.press("enter")
+            await piloto.pause()
+            assert isinstance(app.screen, formularios.Confirmar)
+            assert blob.hex() in app.screen.sql                  # o que se confirma é o SQL inteiro
+            with saida_presa() as saida:
+                await piloto.click("#sim")
+                await _pronto(app)
+            assert _GRAVADO in saida.getvalue() and len(saida.getvalue()) < 5000
+            assert app.screen is tela and tela.sessao.rascunho.operacoes == []
+            assert tela.linhas == [(1, len(blob))] and isinstance(tela.linhas[0][1], TamanhoArquivo)
+            grade = tela.query_one(Grade)
+            assert grade.get_cell_at(Coordinate(0, 1)).plain == rotulo_tamanho(len(blob))
+            grade.move_cursor(row=0, column=1)
+            await piloto.press("s")
+            await _pronto(app)
+            assert isinstance(app.screen, formularios_dados.SalvarArquivo)
+            assert app.screen.query_one(Input).value == "~/docs_1_f.ab1"
+            await piloto.press("enter")
+            await _pronto(app)
+            assert (tmp_path / "docs_1_f.ab1").read_bytes() == blob
+    asyncio.run(roteiro())
+    assert bytes(banco.execute("SELECT f FROM public.docs WHERE id = 1").fetchone()[0]) == blob

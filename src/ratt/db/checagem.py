@@ -244,10 +244,13 @@ class Consulta:
     def antes_depois(self, esquema, tabela, onde: str, sets: Dict[str, str],
                      limite: int = 5) -> Optional[List[Tuple[tuple, tuple]]]:
         """Até `limite` linhas como estão e como ficariam. `sets`: coluna (já por `ident`, como `Alterar.sets`)
-        → a expressão SQL que ela recebe."""
+        → a expressão SQL que ela recebe. O "depois" sai no tipo da coluna, como o UPDATE o gravaria: um literal
+        solto seria `text`, e o arquivo novo de um `bytea` viria como hex em vez de ‹arquivo · N›. O CASE que nunca
+        escolhe a coluna só empresta o tipo dela (um domínio vira o tipo de base; o tamanho de um varchar não corta)."""
         colunas = list(sets)
+        depois = [sql.SQL("CASE WHEN false THEN {} ELSE {} END").format(sql.SQL(c), sql.SQL(sets[c])) for c in colunas]
         linhas = self._rodar(sql.SQL("SELECT {}, {} FROM {}{} LIMIT {}").format(
-            sql.SQL(", ").join(sql.SQL(c) for c in colunas), sql.SQL(", ").join(sql.SQL(sets[c]) for c in colunas),
+            sql.SQL(", ").join(sql.SQL(c) for c in colunas), sql.SQL(", ").join(depois),
             sql.Identifier(esquema, tabela), catalogo.onde_sql(onde), sql.Literal(int(limite))), engolir=True)
         if linhas is None:
             return None
