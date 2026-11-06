@@ -181,7 +181,9 @@ As teclas: `i` inserir (uma chave estrangeira se escolhe numa lista), `f` filtro
 **Arquivos.** Num campo `bytea` ou de texto, no inserir e no alterar, o botão **arquivo…** escolhe um
 arquivo (pelo caminho ou pela árvore de pastas) e põe o conteúdo no lugar do valor; no texto o
 arquivo precisa ser UTF-8. O limite é 10 MB por arquivo. Na grade, um `bytea` aparece como
-`‹arquivo · N›` (o tamanho), e o SQL mostrado abrevia o conteúdo longo.
+`‹arquivo · N›` (o tamanho), e o SQL mostrado abrevia o conteúdo longo. O SQL aplicado, guardado em
+`~/.local/share/ratt/canvas/{porta}-{banco}/aplicados/`, leva o conteúdo inteiro de cada arquivo
+(em hex, no `bytea`): apague dali o que não quiser guardar.
 
 **A grade mostra o banco como está; o que está no rascunho aparece depois de aplicar.** O
 rascunho é o mesmo do canvas, e o aplicar confere: se um alterar ou apagar pegar um número de

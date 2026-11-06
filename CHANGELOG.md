@@ -13,7 +13,9 @@ vê antes de responder `[s/N]`.
   - **Na grade**, um `bytea` aparece como `‹arquivo · tamanho›`, sem trazer os bytes.
   - **`s` na tela Dados** salva em arquivo o conteúdo da célula (`bytea` ou texto).
   - **Limite de 10 MB** por arquivo; acima disso o ratt recusa e explica. O SQL mostrado abrevia o
-    conteúdo longo (`/* arquivo · … */`), mas o que é aplicado é o conteúdo inteiro.
+    conteúdo longo (`/* arquivo · … */`), mas o que é aplicado é o conteúdo inteiro — e o SQL
+    guardado em `aplicados/` (`~/.local/share/ratt/canvas/{porta}-{banco}/aplicados/`) também
+    leva cada arquivo inteiro.
 
 ## 0.11.0
 
