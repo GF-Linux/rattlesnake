@@ -322,3 +322,37 @@ def test_codigo_pula_comentarios_do_topo():
     sql = "select 1;\n\n-- este curso não existe\n/* e este bloco */\ninsert into a\nvalues (9);"
     cmd = rodar.dividir(sql)[1]
     assert sql[cmd.codigo:].startswith("insert into a")
+
+
+def test_erro_numa_linha_longa_mostra_so_a_janela(monkeypatch, capsys):
+    """Um INSERT com um arquivo é uma linha só: o erro mostra o trecho em volta do lugar, com … e o ^ no caractere
+    certo, nunca centenas de KB de hex."""
+    import types
+    from pathlib import Path
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("RATT_LANG", "pt")
+    hexa = "ab" * 300_000
+    sql = f"-- 1. inserir\nINSERT INTO public.docs (id, f) VALUES (1, E'\\\\x{hexa}'), (1, 'x');\n"
+    comando = rodar.dividir(sql)[0]
+    lugar = comando.texto.index("(1, 'x')") + 1          # o servidor conta a partir de 1
+    diag = types.SimpleNamespace(statement_position=str(lugar), message_primary="duplicate key value " + "k" * 5000,
+                                 message_detail="Key (id)=(1) already exists.", message_hint=None)
+    rodar._mostrar_erro(types.SimpleNamespace(diag=diag), comando, sql, Path("x.sql"))
+    saida = capsys.readouterr().out
+    assert len(saida) < 1500 and "erro na linha 2 de x.sql" in saida and "Key (id)=(1) already exists." in saida
+    linhas = saida.splitlines()
+    codigo, seta = linhas[1], linhas[2]
+    assert codigo.startswith("   2 │ …") and codigo.endswith("(1, 'x');")      # o fim da linha está perto
+    assert codigo[seta.index("^")] == "("                # o ^ embaixo do `(` de `(1, 'x')`
+    assert linhas[3].endswith("…") and len(linhas[3]) < 450
+
+
+def test_janela():
+    assert rodar.janela("curto", 2) == ("curto", 2)
+    texto = "".join(chr(ord("a") + i % 26) for i in range(1000))
+    trecho, coluna = rodar.janela(texto, 500, 10)
+    assert trecho == "…" + texto[490:511] + "…" and trecho[coluna] == texto[500]
+    trecho, coluna = rodar.janela(texto, 3, 10)
+    assert trecho == texto[:14] + "…" and coluna == 3
+    trecho, coluna = rodar.janela(texto, 999, 10)
+    assert trecho == "…" + texto[989:] and trecho[coluna] == texto[999]

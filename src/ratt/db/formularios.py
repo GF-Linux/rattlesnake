@@ -25,6 +25,7 @@ from textual.widgets.option_list import Option
 
 from ratt.db import checagem, rascunho as rs
 from ratt.db.arquivos import sql_para_ver
+from ratt.db.rodar import curta
 from ratt.db.idioma import t
 from ratt.db.modelo import Coluna, Ligacao, Tabela
 from ratt.db.tela import COR
@@ -297,7 +298,8 @@ class FormBase(ModalScreen):
         alvo = self.query_one("#form_avisos", Static)
         if isinstance(avisos, Exception):
             linhas = str(avisos).strip().splitlines()
-            alvo.update(Text(t("canvas.erro_banco", erro=linhas[0] if linhas else type(avisos).__name__), style=COR["amarelo"]))
+            alvo.update(Text(t("canvas.erro_banco", erro=curta(linhas[0]) if linhas else type(avisos).__name__),
+                             style=COR["amarelo"]))
             self.query_one("#form_amostra", Static).update(self.texto_extra(None))
             self._botao(True)                          # não deu para contar: a pessoa vê isso e decide
             return

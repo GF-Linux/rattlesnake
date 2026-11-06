@@ -43,8 +43,10 @@ _ACOES_DO_RASCUNHO = ("aplicar", "ensaio", "exportar", "desfazer", "inserir", "a
 
 
 def _primeira_linha(erro: Exception) -> str:
+    """A primeira linha do erro, com teto: o PostgreSQL pode citar um valor (um arquivo inteiro) nela."""
+    from ratt.db.rodar import curta
     linhas = str(erro).strip().splitlines()
-    return linhas[0] if linhas else type(erro).__name__
+    return curta(linhas[0]) if linhas else type(erro).__name__
 
 
 def _nome_seguro(valor) -> str:

@@ -33,6 +33,7 @@ from textual.widgets.option_list import Option
 
 from ratt.db import checagem, filtro
 from ratt.db import arquivos
+from ratt.db.rodar import curta
 from ratt.db.arquivos import ArquivoRecusado, TamanhoArquivo, rotulo_tamanho, tamanho_legivel
 from ratt.db import rascunho as rs
 from ratt.db.formularios import _ATRASO, Abandonada, Confirmar, Corpo, FormBase
@@ -782,7 +783,7 @@ class EscolherLinha(ModalScreen):
             estado.update(Text(t("dados.f.sem_tempo_busca"), style=COR["amarelo"]))
             return
         if isinstance(linhas, Exception):
-            primeira = (str(linhas).strip().splitlines() or [type(linhas).__name__])[0]
+            primeira = curta((str(linhas).strip().splitlines() or [type(linhas).__name__])[0])
             estado.update(Text(t("canvas.erro_banco", erro=primeira), style=COR["laranja"]))
             return
         self.linhas = list(linhas)

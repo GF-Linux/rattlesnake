@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Tuple
 import psycopg
 from psycopg import sql
 
-from . import catalogo, filtro
+from . import catalogo, filtro, rodar
 from . import rascunho as rs
 from .idioma import t
 from .modelo import Modelo, opcional
@@ -758,7 +758,7 @@ def _sem_resposta(consulta, avisar, alvo) -> None:
     erro = getattr(consulta, "erro", None)
     motivo = erro() if callable(erro) else None
     if motivo:
-        avisar(alvo, "impede", "chk.consulta_falhou", erro=motivo)     # o aplicar falharia do mesmo jeito
+        avisar(alvo, "impede", "chk.consulta_falhou", erro=rodar.curta(motivo))     # o aplicar falharia do mesmo jeito
     else:
         avisar(alvo, "info", "chk.sem_tempo")
 

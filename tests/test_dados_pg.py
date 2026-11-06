@@ -1424,3 +1424,28 @@ def test_aplica_bytea_e_texto(banco, tmp_path):
     banco.execute(r.sql_texto())
     f, nome = banco.execute("SELECT f, nome FROM public.docs WHERE id = 1").fetchone()
     assert bytes(f) == binario and nome == texto
+
+
+def test_erro_ao_aplicar_com_arquivo_nao_despeja_o_hex(banco, tmp_path):
+    """Um `id` repetido num INSERT com um arquivo de 300 KB: o erro mostra a janela em volta do lugar, não a linha
+    inteira (antes, ~615 mil caracteres no terminal)."""
+    from ratt.db import arquivos, sessao
+    banco.execute("CREATE TABLE public.docs (id int PRIMARY KEY, f bytea)")
+    banco.execute("INSERT INTO public.docs VALUES (1, NULL)")
+    m = catalogo.modelo(banco, "public")
+    tab = m.por_nome("docs")
+    c = {x.nome: x.id for x in tab.colunas}
+    r = rascunho.Rascunho(m)
+    (tmp_path / "a.ab1").write_bytes(b"ABIF" + bytes(range(256)) * 1200)
+    valor, _ = arquivos.ler(str(tmp_path / "a.ab1"), "bytea")
+    r.acrescentar(rascunho.Inserir(tab.id, {c["f"]: valor, c["id"]: "1"}))
+    con = psycopg.connect(banco.info.dsn)
+    try:
+        with saida_presa() as saida:
+            codigo, indice = sessao.executar_rascunho(r, con, tmp_path / "a.sql", True, "-- teste")
+    finally:
+        con.close()
+    assert (codigo, indice) == (1, 0)
+    texto = saida.getvalue()
+    assert len(texto) < 3000 and "(id)=(1)" in texto and "INSERT INTO public.docs" in texto
+    assert len((tmp_path / "a.sql").read_text(encoding="utf-8")) > 600_000       # o arquivo em disco, inteiro

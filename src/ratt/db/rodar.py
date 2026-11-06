@@ -292,24 +292,46 @@ def _mostrar_avisos(avisos):
     avisos.clear()
 
 
+JANELA_ERRO = 100          # caracteres de cada lado do lugar do erro: um INSERT com um arquivo é uma linha só
+LIMITE_MENSAGEM = 400      # a mensagem do servidor (o detalhe pode citar o valor) também tem teto
+
+
+def janela(texto, coluna, lado=JANELA_ERRO):
+    """(trecho, coluna no trecho): a linha inteira se cabe; senão até `lado` caracteres de cada lado de `coluna`,
+    com … onde cortou. O ^ embaixo continua no mesmo caractere."""
+    if len(texto) <= 2 * lado + 1:
+        return texto, coluna
+    comeco, fim = max(0, coluna - lado), min(len(texto), coluna + lado + 1)
+    trecho = texto[comeco:fim]
+    if comeco:
+        trecho, coluna = "…" + trecho, coluna - comeco + 1
+    return (trecho + "…" if fim < len(texto) else trecho), coluna
+
+
+def curta(mensagem, limite=LIMITE_MENSAGEM):
+    """Uma mensagem do servidor de no máximo `limite` caracteres (mais …)."""
+    return mensagem if len(mensagem) <= limite else mensagem[:limite] + "…"
+
+
 def _mostrar_erro(erro, comando, sql, arquivo):
-    """O erro com a linha do arquivo e um ^ embaixo do lugar, quando o servidor diz onde foi."""
+    """O erro com a linha do arquivo e um ^ embaixo do lugar, quando o servidor diz onde foi. Uma linha longa
+    (um arquivo numa coluna) aparece só em volta do lugar do erro: o arquivo em disco continua inteiro."""
     diag = erro.diag
     posicao = int(diag.statement_position) if getattr(diag, "statement_position", None) else None
     onde = comando.inicio + posicao - 1 if posicao else comando.codigo
     linha_n = sql.count("\n", 0, onde) + 1
     comeco_linha = sql.rfind("\n", 0, onde) + 1
     fim_linha = sql.find("\n", onde)
-    texto_linha = sql[comeco_linha:fim_linha if fim_linha >= 0 else len(sql)]
+    texto_linha, coluna = janela(sql[comeco_linha:fim_linha if fim_linha >= 0 else len(sql)], onde - comeco_linha)
     print(c(f"   ✗ {t('run.erro_linha', linha=linha_n, arquivo=arquivo.name)}", "laranja", "negrito"))
     margem = len(str(linha_n))
     print(c(f"   {linha_n} │ ", "cinza") + texto_linha)
     if posicao:
-        print(c(f"   {' ' * margem} │ ", "cinza") + " " * (onde - comeco_linha) + c("^", "laranja", "negrito"))
-    print(f"   {diag.message_primary or str(erro).strip()}")
+        print(c(f"   {' ' * margem} │ ", "cinza") + " " * coluna + c("^", "laranja", "negrito"))
+    print(f"   {curta(diag.message_primary or str(erro).strip())}")
     for extra in (diag.message_detail, diag.message_hint):
         if extra:
-            print(c(f"   {extra}", "cinza"))
+            print(c(f"   {curta(extra)}", "cinza"))
 
 
 def executar(arquivo, conexao, ensaio=False, autocommit=False, ao_falhar=None, conferir=None):
