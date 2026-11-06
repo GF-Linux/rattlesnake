@@ -1171,6 +1171,7 @@ ratt db user passwd [name]            changes a password (no name: yours)
     # ── arquivos em colunas ──
     "arq.arquivo": {"pt": "arquivo", "en": "file"},
     "arq.texto": {"pt": "texto", "en": "text"},
+    "arq.curto": {"pt": "{inicio}… ({tamanho} de texto)", "en": "{inicio}… ({tamanho} of text)"},
     "arq.nao_existe": {"pt": "não existe: {caminho}", "en": "does not exist: {caminho}"},
     "arq.e_pasta": {"pt": "é uma pasta, não um arquivo: {caminho}", "en": "is a folder, not a file: {caminho}"},
     "arq.sem_permissao": {"pt": "sem permissão para ler: {caminho}", "en": "no permission to read: {caminho}"},

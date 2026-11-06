@@ -150,3 +150,12 @@ def test_texto_longo_com_muitos_escapes_divide_igual():
     assert [c.texto for c in rodar.dividir(sql)] == [
         f"insert into t values (E'{com_e}', '{sem_e}')", "select ';'", "select E'x\\';y'"]
     assert len(rodar.dividir("select E'" + "\\\\" * 100 + "\\';")) == 1         # a última barra leva a aspa: não fecha
+
+
+def test_valor_curto():
+    from ratt.db.arquivos import valor_curto
+    assert valor_curto("Ana") == "Ana"
+    assert valor_curto("x" * 60) == "x" * 60
+    assert valor_curto("\\x" + "ab" * 300_000) == "‹arquivo · 293 KB›"
+    curto = valor_curto(">seq1\nACGT" + "A" * 500_000)
+    assert curto.startswith(">seq1↵ACGT") and "…" in curto and "488 KB de texto" in curto and len(curto) < 80

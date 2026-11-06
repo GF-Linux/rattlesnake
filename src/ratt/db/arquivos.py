@@ -41,6 +41,20 @@ def rotulo_tamanho(n: int) -> str:
     return f"‹{t('arq.arquivo')} · {tamanho_legivel(n)}›"
 
 
+_CABE = 60                      # um valor até este tamanho entra inteiro numa mensagem
+
+
+def valor_curto(texto: str) -> str:
+    """Um valor do tamanho de uma mensagem (um aviso, um erro): ele mesmo se é curto; `‹arquivo · N›` se é o
+    `\\x` + hex de um `bytea`; senão os primeiros 40 caracteres, … e o tamanho."""
+    if len(texto) <= _CABE:
+        return texto
+    if len(texto) % 2 == 0 and re.fullmatch(r"\\x[0-9a-fA-F]*", texto):
+        return rotulo_tamanho((len(texto) - 2) // 2)
+    return t("arq.curto", inicio=texto[:_FICA].replace("\r", "").replace("\n", "↵"),
+             tamanho=tamanho_legivel(len(texto.encode("utf-8", "surrogatepass"))))
+
+
 _ASSINATURAS = ((b"ABIF", ".ab1"), (b"%PDF", ".pdf"), (b"\x89PNG", ".png"), (b"\xff\xd8\xff", ".jpg"),
                 (b"\x1f\x8b", ".gz"), (b"PK\x03\x04", ".zip"))
 

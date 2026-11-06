@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Tuple
 import psycopg
 from psycopg import sql
 
-from . import catalogo, filtro, rodar
+from . import arquivos, catalogo, filtro, rodar
 from . import rascunho as rs
 from .idioma import t
 from .modelo import Modelo, opcional
@@ -659,6 +659,13 @@ def _unica_sozinha(tab, c) -> bool:
     return c.unica or (c.pk and len(tab.pk()) == 1)
 
 
+def _espaco_nas_pontas(texto: str) -> bool:
+    """Espaço sobrando no começo ou no fim. As quebras de linha do fim não contam: quase todo arquivo de texto
+    termina numa (`\n` ou `\r\n`), e avisar de todo FASTA carregado ensinaria a ignorar o aviso."""
+    sem_fim = texto.rstrip("\r\n")
+    return sem_fim != sem_fim.strip()
+
+
 class _Dados:
     def __init__(self, op, r: rs.Rascunho, consulta):
         self.op, self.r, self.consulta = op, r, consulta
@@ -685,12 +692,13 @@ class _Dados:
 
     def valor(self, c, texto: str) -> Optional[str]:
         """O literal SQL de um valor digitado, ou None (com o aviso) se ele não servir para o tipo da coluna."""
-        if filtro.familia(c.tipo) == "texto" and texto != texto.strip():
+        if filtro.familia(c.tipo) == "texto" and _espaco_nas_pontas(texto):
             self.avisar(c.id, "atencao", "chk.espacos_valor", coluna=c.nome)
         try:
             literal = filtro.literal(texto, c.tipo)
         except ValueError:
-            self.avisar(c.id, "impede", "chk.valor_invalido", coluna=c.nome, valor=texto, tipo=c.tipo)
+            self.avisar(c.id, "impede", "chk.valor_invalido", coluna=c.nome, valor=arquivos.valor_curto(texto),
+                        tipo=c.tipo)
             return None
         base = self.tab_base.coluna(c.id) if self.na_base else None
         if base is None or filtro.familia(c.tipo) == "booleano" or filtro.tipo_normal(c.tipo) == "text":
@@ -699,7 +707,8 @@ class _Dados:
         if ok is None:
             self.falhou(c.id)
         elif not ok:
-            self.avisar(c.id, "impede", "chk.valor_invalido", coluna=c.nome, valor=texto, tipo=c.tipo)
+            self.avisar(c.id, "impede", "chk.valor_invalido", coluna=c.nome, valor=arquivos.valor_curto(texto),
+                        tipo=c.tipo)
             return None
         return literal
 
@@ -709,7 +718,7 @@ class _Dados:
         if k is None:
             self.falhou(c.id)
         elif k:
-            self.avisar(c.id, "impede", "chk.ja_existe", coluna=c.nome, valor=texto, n=k)
+            self.avisar(c.id, "impede", "chk.ja_existe", coluna=c.nome, valor=arquivos.valor_curto(texto), n=k)
 
     def pai_existe(self, c, texto: str) -> None:
         """Valor de chave estrangeira (de uma coluna só) que não existe na tabela pai."""
@@ -729,7 +738,7 @@ class _Dados:
                 self.falhou(c.id)
             elif k == 0:
                 vista_pai = self.v.tabelas[lig.destino]
-                self.avisar(c.id, "impede", "chk.fk_inexistente", coluna=c.nome, valor=texto,
+                self.avisar(c.id, "impede", "chk.fk_inexistente", coluna=c.nome, valor=arquivos.valor_curto(texto),
                             pai=f"{vista_pai.nome}.{vista_pai.coluna(col_pai.id).nome}")
 
     def cascata(self, onde: str) -> None:
@@ -810,7 +819,8 @@ def _alterar(d: _Dados) -> None:
                 col = rs.ident(d.tab_base.coluna(i).nome)
                 k = d.contar(f"{col} = {literal} AND ({onde}) IS NOT TRUE", c.id)
                 if k:
-                    d.avisar(c.id, "impede", "chk.ja_existe", coluna=c.nome, valor=mud.valor, n=k)
+                    d.avisar(c.id, "impede", "chk.ja_existe", coluna=c.nome, valor=arquivos.valor_curto(mud.valor),
+                             n=k)
         d.pai_existe(c, mud.valor)
 
 

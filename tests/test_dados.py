@@ -820,6 +820,38 @@ def test_inserir_obrigatoria_vazia_e_valores():
     assert ("impede", "chk.valor_invalido") in _chaves(avisos)          # o número nem chega ao banco
 
 
+def test_quebra_de_linha_no_fim_nao_e_espaco_sobrando():
+    """Um arquivo de texto quase sempre termina numa quebra de linha: ela não conta como espaço nas pontas."""
+    r = rascunho.Rascunho(modelo_pessoas())
+    for valor, avisa in ((">s1\nACGT\n", False), ("ACGT\r\n", False), ("ACGT\n\n", False), ("ACGT", False),
+                         (" ACGT\n", True), ("ACGT \n", True), ("ACGT\t", True), ("\nACGT", True)):
+        avisos = checagem.avisos_da_operacao(rascunho.Inserir("t1", {"t1.c2": valor}), r, ConsultaFalsa(valor_valido=True))
+        assert (("atencao", "chk.espacos_valor") in _chaves(avisos)) == avisa, repr(valor)
+
+
+def test_avisos_com_valor_enorme_sao_curtos_e_rapidos():
+    """Um arquivo de 10 MB que não serve (ou que já existe) não vai inteiro para o aviso: antes, o formulário ficava
+    ~45 s montando o texto."""
+    import time
+    r = rascunho.Rascunho(modelo_pessoas())
+    grande = ">seq\n" + "ACGT" * (10 * 1024 * 1024 // 4)
+    inicio = time.monotonic()
+    avisos = checagem.avisos_da_operacao(rascunho.Inserir("t1", {"t1.c2": "x", "t1.c3": grande, "t1.c4": grande,
+                                                                 "t1.c5": grande}), r,
+                                         ConsultaFalsa(valor_valido=False, ja_existe=1))
+    op = rascunho.Alterar("t1", _G(), {"t1.c4": rascunho.Mudanca("valor", grande)})
+    avisos += checagem.avisos_da_operacao(op, r, ConsultaFalsa(contar_onde=1, valor_valido=True))
+    avisos += checagem.avisos_da_operacao(rascunho.Inserir("t2", {"t2.c2": "9" * 5000}), r,
+                                          ConsultaFalsa(valor_valido=True, ja_existe=0))
+    textos = [a.texto() for a in avisos]
+    assert time.monotonic() - inicio < 2.0
+    chaves = [c for _, c in _chaves(avisos)]
+    assert chaves.count("chk.valor_invalido") == 2 and chaves.count("chk.ja_existe") == 2
+    assert "chk.fk_inexistente" in chaves
+    assert all(len(x) < 200 for x in textos), max(textos, key=len)[:300]
+    assert any("«>seq↵ACGTACGT" in x and "10,0 MB de texto" in x for x in textos)
+
+
 def test_inserir_fk_que_nao_existe_no_pai():
     r = rascunho.Rascunho(modelo_pessoas())
     falsa = ConsultaFalsa(valor_valido=True, ja_existe=0)
